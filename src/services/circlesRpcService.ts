@@ -20,10 +20,20 @@ const CIRCLES_HUB_INTERFACE = new Interface([
  * and normalise raw events into the flat SDK shape.
  */
 function unwrapEventsResult(result: unknown): unknown[] {
+  if (Array.isArray(result)) {
+    return result.map(flattenRawEvent);
+  }
+
   if (!result || typeof result !== "object" || !("events" in result)) {
     return [];
   }
-  return (result as { events: unknown[] }).events.map(flattenRawEvent);
+
+  const events = (result as { events?: unknown }).events;
+  if (!Array.isArray(events)) {
+    return [];
+  }
+
+  return events.map(flattenRawEvent);
 }
 
 const NUMERIC_FIELDS = new Set(["blockNumber", "timestamp", "transactionIndex", "logIndex"]);
@@ -136,3 +146,8 @@ export class CirclesRpcService implements ICirclesRpc {
     return Array.from(groups);
   }
 }
+
+export const __testables = {
+  unwrapEventsResult,
+  flattenRawEvent
+};

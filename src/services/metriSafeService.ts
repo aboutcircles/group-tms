@@ -1,8 +1,13 @@
 import {getAddress} from "ethers";
-import {type AvatarSafeResult, IAvatarSafeService} from "../interfaces/IAvatarSafeService";
+import {
+  type AvatarSafeResult,
+  IAvatarSafeService,
+  SafeOwnerSelection
+} from "../interfaces/IAvatarSafeService";
 
 type DelayModuleOwner = {
   ownerAddress?: string | null;
+  timestamp?: unknown;
 };
 
 type DelayModule = {
@@ -25,6 +30,7 @@ const QUERY = `query($addresses:[String!]!){
     safeAddress
     owners(where:{ownerAddress:{_in:$addresses}}){
       ownerAddress
+      timestamp
     }
   }
 }`;
@@ -44,45 +50,24 @@ export class MetriSafeService implements IAvatarSafeService {
   async findAvatarsWithSafes(avatars: string[]): Promise<AvatarSafeResult> {
     const normalized = normalizeAddresses(avatars);
     if (normalized.length === 0) {
-      return {mappings: new Map(), safeConflicts: new Map()};
+      return {mappings: new Map(), selectedOwnersBySafe: new Map()};
     }
 
     const requested = new Set(normalized);
-    const result = new Map<string, string>();
-    const conflicts = new Set<string>();
+    const selectedOwnersBySafe = new Map<string, SafeOwnerSelection>();
 
     for (let index = 0; index < normalized.length; index += this.chunkSize) {
       const chunk = normalized.slice(index, index + this.chunkSize);
       const modules = await this.fetchModules(chunk);
-      this.mergeModules(result, requested, modules, conflicts);
+      this.mergeModules(selectedOwnersBySafe, requested, modules);
     }
 
-    for (const conflictedAvatar of conflicts) {
-      result.delete(conflictedAvatar);
+    const mappings = new Map<string, string>();
+    for (const [safe, selected] of selectedOwnersBySafe.entries()) {
+      mappings.set(selected.avatar, safe);
     }
 
-    const avatarsBySafe = new Map<string, string[]>();
-    for (const [avatar, safe] of result.entries()) {
-      const existing = avatarsBySafe.get(safe);
-      if (existing) {
-        existing.push(avatar);
-      } else {
-        avatarsBySafe.set(safe, [avatar]);
-      }
-    }
-
-    const safeConflicts = new Map<string, string[]>();
-    for (const [safe, avatarsForSafe] of avatarsBySafe.entries()) {
-      if (avatarsForSafe.length < 2) {
-        continue;
-      }
-      safeConflicts.set(safe, avatarsForSafe);
-      for (const avatar of avatarsForSafe) {
-        result.delete(avatar);
-      }
-    }
-
-    return {mappings: result, safeConflicts};
+    return {mappings, selectedOwnersBySafe};
   }
 
   private async fetchModules(addresses: string[]): Promise<DelayModule[]> {
@@ -136,10 +121,9 @@ export class MetriSafeService implements IAvatarSafeService {
   }
 
   private mergeModules(
-    accumulator: Map<string, string>,
+    accumulator: Map<string, SafeOwnerSelection>,
     requested: Set<string>,
-    modules: DelayModule[],
-    conflicts: Set<string>
+    modules: DelayModule[]
   ): void {
     for (const module of modules) {
       const safe = normalizeAddress(module.safeAddress);
@@ -157,18 +141,14 @@ export class MetriSafeService implements IAvatarSafeService {
           continue;
         }
 
-        if (conflicts.has(avatar)) {
+        const timestamp = normalizeTimestamp(owner.timestamp);
+        if (!timestamp) {
           continue;
         }
 
-        if (accumulator.has(avatar)) {
-          accumulator.delete(avatar);
-          conflicts.add(avatar);
-          continue;
-        }
-
-        if (!accumulator.has(avatar)) {
-          accumulator.set(avatar, safe);
+        const existing = accumulator.get(safe);
+        if (!existing || compareTimestamp(timestamp, existing.timestamp) > 0) {
+          accumulator.set(safe, {avatar, timestamp});
         }
       }
     }
@@ -207,4 +187,48 @@ function normalizeAddress(value: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+function normalizeTimestamp(value: unknown): string | null {
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    return String(Math.trunc(value));
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+}
+
+function compareTimestamp(left: string, right: string): number {
+  const leftBigInt = toComparableBigInt(left);
+  const rightBigInt = toComparableBigInt(right);
+
+  if (leftBigInt !== null && rightBigInt !== null) {
+    if (leftBigInt > rightBigInt) return 1;
+    if (leftBigInt < rightBigInt) return -1;
+    return 0;
+  }
+
+  return left.localeCompare(right);
+}
+
+function toComparableBigInt(value: string): bigint | null {
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return BigInt(trimmed);
+  }
+
+  const parsedDate = Date.parse(trimmed);
+  if (!Number.isNaN(parsedDate)) {
+    return BigInt(parsedDate);
+  }
+
+  return null;
 }

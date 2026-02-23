@@ -13,10 +13,14 @@ import {
 import {ISlackService} from "../src/interfaces/ISlackService";
 import {ILoggerService} from "../src/interfaces/ILoggerService";
 import {AffiliateGroupChanged, IAffiliateGroupEventsService} from "../src/interfaces/IAffiliateGroupEventsService";
-import {type AvatarSafeResult, IAvatarSafeService} from "../src/interfaces/IAvatarSafeService";
+import {
+  type AvatarSafeResult,
+  IAvatarSafeService,
+  SafeOwnerSelection
+} from "../src/interfaces/IAvatarSafeService";
 import {IRouterService} from "../src/interfaces/IRouterService";
 import {IRouterEnablementStore} from "../src/interfaces/IRouterEnablementStore";
-import {IAvatarSafeMappingStore} from "../src/interfaces/IAvatarSafeMappingStore";
+import {IAvatarSafeMappingStore, SafeTrustState} from "../src/interfaces/IAvatarSafeMappingStore";
 
 export class FakeLogger implements ILoggerService {
   logs: { level: "info" | "warn" | "error" | "debug" | "table"; args: unknown[] }[] = [];
@@ -163,19 +167,25 @@ export class FakeGroupService implements IGroupService {
 }
 
 export class FakeAvatarSafeService implements IAvatarSafeService {
-  private readonly safeByAvatar: Map<string, string> | null;
+  private readonly safeByAvatar: Map<string, { safe: string; timestamp: string }> | null;
 
-  constructor(mapping: Record<string, string> | null = null) {
+  constructor(
+    mapping: Record<string, string | { safe: string; timestamp: string | number }> | null = null
+  ) {
     if (mapping === null) {
       this.safeByAvatar = null;
       return;
     }
 
-    this.safeByAvatar = new Map<string, string>();
-    for (const [rawAvatar, safe] of Object.entries(mapping)) {
+    this.safeByAvatar = new Map<string, { safe: string; timestamp: string }>();
+    for (const [rawAvatar, value] of Object.entries(mapping)) {
       try {
         const normalized = getAddress(rawAvatar);
-        this.safeByAvatar.set(normalized, safe);
+        if (typeof value === "string") {
+          this.safeByAvatar.set(normalized, {safe: value, timestamp: "0"});
+        } else {
+          this.safeByAvatar.set(normalized, {safe: value.safe, timestamp: String(value.timestamp)});
+        }
       } catch {
         // ignore invalid addresses provided in tests
       }
@@ -183,43 +193,49 @@ export class FakeAvatarSafeService implements IAvatarSafeService {
   }
 
   async findAvatarsWithSafes(avatars: string[]): Promise<AvatarSafeResult> {
-    const result = new Map<string, string>();
+    const candidates: Array<{ avatar: string; safe: string; timestamp: string }> = [];
     for (const avatar of avatars) {
       try {
         const normalized = getAddress(avatar);
         if (this.safeByAvatar === null) {
-          result.set(normalized, `0xsafe_${normalized.slice(2, 8).toLowerCase()}`);
+          candidates.push({
+            avatar: normalized,
+            safe: `0xsafe_${normalized.slice(2, 8).toLowerCase()}`,
+            timestamp: "0"
+          });
           continue;
         }
 
         const configured = this.safeByAvatar.get(normalized);
         if (configured) {
-          result.set(normalized, configured);
+          candidates.push({
+            avatar: normalized,
+            safe: configured.safe,
+            timestamp: configured.timestamp
+          });
         }
       } catch {
         // ignore invalid avatar addresses passed in tests
       }
     }
 
-    const safeConflicts = new Map<string, string[]>();
-    const avatarsBySafe = new Map<string, string[]>();
-    for (const [avatar, safe] of result.entries()) {
-      const existing = avatarsBySafe.get(safe);
-      if (existing) {
-        existing.push(avatar);
-      } else {
-        avatarsBySafe.set(safe, [avatar]);
-      }
-    }
-    for (const [safe, avatarsForSafe] of avatarsBySafe.entries()) {
-      if (avatarsForSafe.length < 2) continue;
-      safeConflicts.set(safe, avatarsForSafe);
-      for (const avatar of avatarsForSafe) {
-        result.delete(avatar);
+    const selectedOwnersBySafe = new Map<string, SafeOwnerSelection>();
+    for (const candidate of candidates) {
+      const existing = selectedOwnersBySafe.get(candidate.safe);
+      if (!existing || compareTimestamp(candidate.timestamp, existing.timestamp) > 0) {
+        selectedOwnersBySafe.set(candidate.safe, {
+          avatar: candidate.avatar,
+          timestamp: candidate.timestamp
+        });
       }
     }
 
-    return {mappings: result, safeConflicts};
+    const mappings = new Map<string, string>();
+    for (const [safe, selected] of selectedOwnersBySafe.entries()) {
+      mappings.set(selected.avatar, safe);
+    }
+
+    return {mappings, selectedOwnersBySafe};
   }
 }
 
@@ -325,10 +341,10 @@ export class FakeRouterEnablementStore implements IRouterEnablementStore {
 
 export class FakeAvatarSafeMappingStore implements IAvatarSafeMappingStore {
   private mapping: Map<string, string>;
-  private conflictHistory: Map<string, string[]>;
+  private safeTrustState: Map<string, SafeTrustState>;
   saveCalls = 0;
 
-  constructor(initial?: Record<string, string>, initialConflictHistory?: Record<string, string[]>) {
+  constructor(initial?: Record<string, string>, initialSafeTrustState?: Record<string, SafeTrustState>) {
     this.mapping = new Map<string, string>();
     if (initial) {
       for (const [avatar, safe] of Object.entries(initial)) {
@@ -339,10 +355,10 @@ export class FakeAvatarSafeMappingStore implements IAvatarSafeMappingStore {
         }
       }
     }
-    this.conflictHistory = new Map<string, string[]>();
-    if (initialConflictHistory) {
-      for (const [safe, claimants] of Object.entries(initialConflictHistory)) {
-        this.conflictHistory.set(safe, [...claimants]);
+    this.safeTrustState = new Map<string, SafeTrustState>();
+    if (initialSafeTrustState) {
+      for (const [safe, state] of Object.entries(initialSafeTrustState)) {
+        this.safeTrustState.set(safe, {...state});
       }
     }
   }
@@ -356,15 +372,15 @@ export class FakeAvatarSafeMappingStore implements IAvatarSafeMappingStore {
     this.mapping = new Map(mapping);
   }
 
-  async loadConflictHistory(): Promise<Map<string, string[]>> {
+  async loadSafeTrustState(): Promise<Map<string, SafeTrustState>> {
     return new Map(
-      Array.from(this.conflictHistory.entries()).map(([k, v]) => [k, [...v]])
+      Array.from(this.safeTrustState.entries()).map(([safe, state]) => [safe, {...state}])
     );
   }
 
-  async saveConflictHistory(history: Map<string, string[]>): Promise<void> {
-    this.conflictHistory = new Map(
-      Array.from(history.entries()).map(([k, v]) => [k, [...v]])
+  async saveSafeTrustState(state: Map<string, SafeTrustState>): Promise<void> {
+    this.safeTrustState = new Map(
+      Array.from(state.entries()).map(([safe, value]) => [safe, {...value}])
     );
   }
 
@@ -372,9 +388,35 @@ export class FakeAvatarSafeMappingStore implements IAvatarSafeMappingStore {
     return new Map(this.mapping);
   }
 
-  getSavedConflictHistory(): Map<string, string[]> {
+  getSavedSafeTrustState(): Map<string, SafeTrustState> {
     return new Map(
-      Array.from(this.conflictHistory.entries()).map(([k, v]) => [k, [...v]])
+      Array.from(this.safeTrustState.entries()).map(([safe, state]) => [safe, {...state}])
     );
   }
+}
+
+function compareTimestamp(left: string, right: string): number {
+  const leftBigInt = toComparableBigInt(left);
+  const rightBigInt = toComparableBigInt(right);
+
+  if (leftBigInt === null || rightBigInt === null) {
+    return left.localeCompare(right);
+  }
+
+  if (leftBigInt > rightBigInt) return 1;
+  if (leftBigInt < rightBigInt) return -1;
+  return 0;
+}
+
+function toComparableBigInt(raw: string): bigint | null {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  if (/^\d+$/.test(trimmed)) return BigInt(trimmed);
+
+  const parsedDate = Date.parse(trimmed);
+  if (!Number.isNaN(parsedDate)) {
+    return BigInt(parsedDate);
+  }
+
+  return null;
 }

@@ -13,6 +13,7 @@ import {
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
 import {getAddress, Wallet} from "ethers";
+import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 
 const DEFAULT_RPC_URL = "https://rpc.aboutcircles.com/";
 const DEFAULT_INVITATION_MODULE = "0x00738aca013B7B2e6cfE1690F0021C3182Fa40B5";
@@ -129,6 +130,12 @@ async function mainLoop(): Promise<void> {
     }
 
     try {
+      await ensureRpcHealthyOrNotify({
+        appName: "dublin-tms",
+        rpcUrl,
+        slackService,
+        logger: rootLogger
+      });
       const runConfig: RunConfig = {
         ...staticConfig,
         fromBlock: nextFromBlock,

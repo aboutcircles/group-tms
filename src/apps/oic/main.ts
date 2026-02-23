@@ -9,6 +9,7 @@ import {IGroupService} from "../../interfaces/IGroupService";
 import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {formatErrorWithCauses} from "../../formatError";
+import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const oicGroupAddress = (process.env.OIC_GROUP_ADDRESS || "0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5").toLowerCase();
@@ -136,6 +137,13 @@ async function loop() {
     const runStartedAt = Date.now();
     try {
       const LOG = rootLogger.child("oic");
+      await ensureRpcHealthyOrNotify({
+        appName: "oic",
+        rpcUrl,
+        slackService,
+        logger: rootLogger
+      });
+
       if (!printedStartupLogs) {
         LOG.info("OIC app starting (monitor + reconcile trust)...");
         // Reduce noise: print config details only in verbose mode

@@ -276,7 +276,33 @@ describe("gp-crc runOnce (query-based)", () => {
     expect(outcome.untrustTxHashes).toEqual(["0xuntrust_1"]);
   });
 
-  it("reassigns safes and force-untrusts previous owners when conflicts are resolved via mapping store", async () => {
+  it("picks the owner with the latest timestamp for a shared safe", async () => {
+    const avatarA = "0x1111000000000000000000000000000000000000";
+    const avatarB = "0x2222000000000000000000000000000000000000";
+    const sharedSafe = "0xSAFE000000000000000000000000000000000001";
+    registerHumanPages = [[avatarA, avatarB]];
+
+    const avatarSafeService = new FakeAvatarSafeService({
+      [avatarA]: {safe: sharedSafe, timestamp: 100},
+      [avatarB]: {safe: sharedSafe, timestamp: 200}
+    });
+
+    const groupService = new FakeGroupService();
+    const deps = makeDeps({avatarSafeService, groupService});
+    const cfg = makeConfig();
+
+    const outcome = await runOnce(deps, cfg);
+
+    const normalB = getAddress(avatarB);
+    const normalA = getAddress(avatarA);
+
+    expect(outcome.trustedAvatars).toEqual([normalB]);
+    expect(outcome.safeReassignmentUntrustedAvatars).toEqual([]);
+    expect(outcome.untrustedAvatars).toEqual([]);
+    expect(outcome.trustedAvatars).not.toContain(normalA);
+  });
+
+  it("switches to a newer timestamp owner while switch count is below the cap", async () => {
     const oldAvatarInput = "0x1111000000000000000000000000000000000000";
     const newAvatarInput = "0x2222000000000000000000000000000000000000";
     const sharedSafe = "0xSAFE000000000000000000000000000000000001";
@@ -286,21 +312,27 @@ describe("gp-crc runOnce (query-based)", () => {
     circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [oldAvatarInput];
 
     const avatarSafeService = new FakeAvatarSafeService({
-      [oldAvatarInput]: sharedSafe,
-      [newAvatarInput]: sharedSafe
+      [oldAvatarInput]: {safe: sharedSafe, timestamp: 100},
+      [newAvatarInput]: {safe: sharedSafe, timestamp: 200}
     });
-    const mappingStore = new FakeAvatarSafeMappingStore({
-      [oldAvatarInput]: sharedSafe
-    });
+    const oldAvatar = getAddress(oldAvatarInput);
+    const newAvatar = getAddress(newAvatarInput);
+    const mappingStore = new FakeAvatarSafeMappingStore(
+      {[oldAvatarInput]: sharedSafe},
+      {
+        [sharedSafe]: {
+          trustedAvatar: oldAvatar,
+          trustedTimestamp: "100",
+          switchCount: 0
+        }
+      }
+    );
     const groupService = new FakeGroupService();
 
     const deps = makeDeps({circlesRpc, avatarSafeService, avatarSafeMappingStore: mappingStore, groupService});
     const cfg = makeConfig();
 
     const outcome = await runOnce(deps, cfg);
-
-    const oldAvatar = getAddress(oldAvatarInput);
-    const newAvatar = getAddress(newAvatarInput);
 
     expect(outcome.safeReassignmentUntrustedAvatars).toEqual([oldAvatar]);
     expect(outcome.untrustedAvatars).toContain(oldAvatar);
@@ -309,29 +341,37 @@ describe("gp-crc runOnce (query-based)", () => {
     const saved = mappingStore.getSavedMapping();
     expect(saved.get(newAvatar)).toBe(sharedSafe);
     expect(saved.has(oldAvatar)).toBe(false);
+
+    const safeState = mappingStore.getSavedSafeTrustState().get(sharedSafe);
+    expect(safeState).toEqual({
+      trustedAvatar: newAvatar,
+      trustedTimestamp: "200",
+      switchCount: 1
+    });
   });
 
-  it("keeps stored winner when all conflict claimants were previously seen (no loop)", async () => {
-    const avatarA = "0x1111000000000000000000000000000000000000";
-    const avatarB = "0x2222000000000000000000000000000000000000";
+  it("keeps the existing trusted owner when candidate timestamp is not newer", async () => {
+    const oldAvatarInput = "0x1111000000000000000000000000000000000000";
+    const candidateAvatarInput = "0x2222000000000000000000000000000000000000";
     const sharedSafe = "0xSAFE000000000000000000000000000000000001";
-    // Both avatars are registered humans so they appear in the conflict.
-    registerHumanPages = [[avatarA, avatarB]];
+    registerHumanPages = [[candidateAvatarInput]];
 
     const circlesRpc = new FakeCirclesRpc();
-    // A is already trusted in the group (winner from a previous run).
-    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarA];
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [oldAvatarInput];
 
     const avatarSafeService = new FakeAvatarSafeService({
-      [avatarA]: sharedSafe,
-      [avatarB]: sharedSafe
+      [candidateAvatarInput]: {safe: sharedSafe, timestamp: 250}
     });
-
-    // Stored mapping says A owns the safe.
+    const oldAvatar = getAddress(oldAvatarInput);
     const mappingStore = new FakeAvatarSafeMappingStore(
-      {[avatarA]: sharedSafe},
-      // Conflict history already knows about both A and B.
-      {[sharedSafe]: [getAddress(avatarA), getAddress(avatarB)]}
+      {[oldAvatarInput]: sharedSafe},
+      {
+        [sharedSafe]: {
+          trustedAvatar: oldAvatar,
+          trustedTimestamp: "300",
+          switchCount: 1
+        }
+      }
     );
     const groupService = new FakeGroupService();
 
@@ -340,37 +380,34 @@ describe("gp-crc runOnce (query-based)", () => {
 
     const outcome = await runOnce(deps, cfg);
 
-    // No trust/untrust should happen — conflict is stable.
     expect(outcome.safeReassignmentUntrustedAvatars).toEqual([]);
     expect(outcome.untrustedAvatars).toEqual([]);
     expect(outcome.trustedAvatars).toEqual([]);
-
-    // Mapping should still have A as the winner.
-    const saved = mappingStore.getSavedMapping();
-    expect(saved.get(getAddress(avatarA))).toBe(sharedSafe);
+    expect(mappingStore.getSavedMapping().get(oldAvatar)).toBe(sharedSafe);
   });
 
-  it("switches trust only when a genuinely new claimant appears", async () => {
-    const avatarA = "0x1111000000000000000000000000000000000000";
-    const avatarB = "0x2222000000000000000000000000000000000000";
-    const avatarC = "0x3333000000000000000000000000000000000000";
+  it("keeps the existing trusted owner after two switches even when a newer timestamp appears", async () => {
+    const oldAvatarInput = "0x1111000000000000000000000000000000000000";
+    const candidateAvatarInput = "0x2222000000000000000000000000000000000000";
     const sharedSafe = "0xSAFE000000000000000000000000000000000001";
-    registerHumanPages = [[avatarA, avatarB, avatarC]];
+    registerHumanPages = [[candidateAvatarInput]];
 
     const circlesRpc = new FakeCirclesRpc();
-    // A is currently trusted.
-    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarA];
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [oldAvatarInput];
 
     const avatarSafeService = new FakeAvatarSafeService({
-      [avatarA]: sharedSafe,
-      [avatarB]: sharedSafe,
-      [avatarC]: sharedSafe
+      [candidateAvatarInput]: {safe: sharedSafe, timestamp: 500}
     });
-
-    // A is stored winner. History knows A and B but NOT C.
+    const oldAvatar = getAddress(oldAvatarInput);
     const mappingStore = new FakeAvatarSafeMappingStore(
-      {[avatarA]: sharedSafe},
-      {[sharedSafe]: [getAddress(avatarA), getAddress(avatarB)]}
+      {[oldAvatarInput]: sharedSafe},
+      {
+        [sharedSafe]: {
+          trustedAvatar: oldAvatar,
+          trustedTimestamp: "300",
+          switchCount: 2
+        }
+      }
     );
     const groupService = new FakeGroupService();
 
@@ -379,61 +416,16 @@ describe("gp-crc runOnce (query-based)", () => {
 
     const outcome = await runOnce(deps, cfg);
 
-    const normalA = getAddress(avatarA);
-    const normalC = getAddress(avatarC);
-
-    // C is genuinely new → A should be untrusted, C trusted.
-    expect(outcome.safeReassignmentUntrustedAvatars).toEqual([normalA]);
-    expect(outcome.untrustedAvatars).toContain(normalA);
-    expect(outcome.trustedAvatars).toContain(normalC);
-
-    // Mapping updated to C.
-    const saved = mappingStore.getSavedMapping();
-    expect(saved.get(normalC)).toBe(sharedSafe);
-    expect(saved.has(normalA)).toBe(false);
-
-    // History now includes all three.
-    const history = mappingStore.getSavedConflictHistory();
-    const safeHistory = history.get(sharedSafe)!.map((a) => a.toLowerCase());
-    expect(safeHistory).toContain(normalA.toLowerCase());
-    expect(safeHistory).toContain(getAddress(avatarB).toLowerCase());
-    expect(safeHistory).toContain(normalC.toLowerCase());
-  });
-
-  it("initializes conflict history on first-time conflict", async () => {
-    const avatarA = "0x1111000000000000000000000000000000000000";
-    const avatarB = "0x2222000000000000000000000000000000000000";
-    const sharedSafe = "0xSAFE000000000000000000000000000000000001";
-    registerHumanPages = [[avatarA, avatarB]];
-
-    const avatarSafeService = new FakeAvatarSafeService({
-      [avatarA]: sharedSafe,
-      [avatarB]: sharedSafe
-    });
-
-    // No prior mapping or history at all.
-    const mappingStore = new FakeAvatarSafeMappingStore();
-    const groupService = new FakeGroupService();
-
-    const deps = makeDeps({avatarSafeService, avatarSafeMappingStore: mappingStore, groupService});
-    const cfg = makeConfig();
-
-    const outcome = await runOnce(deps, cfg);
-
-    const normalB = getAddress(avatarB);
-
-    // Should pick last claimant (B) as winner.
-    expect(outcome.trustedAvatars).toContain(normalB);
     expect(outcome.safeReassignmentUntrustedAvatars).toEqual([]);
+    expect(outcome.untrustedAvatars).toEqual([]);
+    expect(outcome.trustedAvatars).toEqual([]);
+    expect(mappingStore.getSavedMapping().get(oldAvatar)).toBe(sharedSafe);
 
-    // Mapping should store B.
-    const saved = mappingStore.getSavedMapping();
-    expect(saved.get(normalB)).toBe(sharedSafe);
-
-    // Conflict history should now contain both A and B.
-    const history = mappingStore.getSavedConflictHistory();
-    const safeHistory = history.get(sharedSafe)!.map((a) => a.toLowerCase());
-    expect(safeHistory).toContain(getAddress(avatarA).toLowerCase());
-    expect(safeHistory).toContain(normalB.toLowerCase());
+    const safeState = mappingStore.getSavedSafeTrustState().get(sharedSafe);
+    expect(safeState).toEqual({
+      trustedAvatar: oldAvatar,
+      trustedTimestamp: "300",
+      switchCount: 2
+    });
   });
 });

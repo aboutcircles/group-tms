@@ -54,6 +54,7 @@ const TRUST_BATCH_MAX_ATTEMPTS = 3;
 const TRUST_BATCH_RETRY_DELAY_MS = 1_500;
 const UNTRUST_BATCH_MAX_ATTEMPTS = 3;
 const UNTRUST_BATCH_RETRY_DELAY_MS = 1_500;
+const MAX_SAFE_OWNER_SWITCHES = 2;
 
 export async function runOnce(
   deps: Deps,
@@ -130,35 +131,16 @@ export async function runOnce(
   const allowedAvatars = uniqueAvatars.filter((avatar) => allowedLowerSet.has(avatar.toLowerCase()));
   const blacklistedAvatars = uniqueAvatars.filter((avatar) => blacklistedLowerSet.has(avatar.toLowerCase()));
 
-  const eligibleCandidates: string[] = [];
-  const avatarsWithoutSafe: string[] = [];
+  let eligibleCandidates: string[] = [];
+  let avatarsWithoutSafe: string[] = [];
   let avatarsWithSafes = new Map<string, string>();
-  let safeConflicts = new Map<string, string[]>();
+  let selectedOwnersBySafe = new Map<string, { avatar: string; timestamp: string }>();
+
   if (allowedCandidates.length > 0) {
     logger.info(`Checking configured safes for ${allowedCandidates.length} allowed avatar(s).`);
     const safeResult = await avatarSafeService.findAvatarsWithSafes(allowedCandidates);
     avatarsWithSafes = safeResult.mappings;
-    safeConflicts = safeResult.safeConflicts;
-
-    for (const avatar of allowedCandidates) {
-      if (avatarsWithSafes.has(avatar)) {
-        eligibleCandidates.push(avatar);
-      } else {
-        avatarsWithoutSafe.push(avatar);
-      }
-    }
-
-    logger.info(
-      `Avatar safe summary: ${eligibleCandidates.length} with safes, ${avatarsWithoutSafe.length} without safes` +
-      `${safeConflicts.size > 0 ? `, ${safeConflicts.size} safe conflict(s)` : ""}.`
-    );
-
-    if (avatarsWithoutSafe.length > 0) {
-      logger.info(`Skipping ${avatarsWithoutSafe.length} avatar(s) without configured safes.`);
-      if (dryRun) {
-        logger.debug(`Avatars without safes: ${avatarsWithoutSafe.join(", ")}`);
-      }
-    }
+    selectedOwnersBySafe = safeResult.selectedOwnersBySafe;
   } else {
     logger.info(`No allowed avatars to verify for safes.`);
   }
@@ -167,123 +149,124 @@ export async function runOnce(
   if (avatarSafeMappingStore) {
     const storedMapping = await avatarSafeMappingStore.load();
     logger.info(`Loaded avatar-safe mapping with ${storedMapping.size} stored entry/entries.`);
-
-    const storedConflictHistory = await avatarSafeMappingStore.loadConflictHistory();
+    const storedSafeTrustState = await avatarSafeMappingStore.loadSafeTrustState();
 
     const storedSafeToAvatar = new Map<string, string>();
     for (const [storedAvatar, storedSafe] of storedMapping.entries()) {
       storedSafeToAvatar.set(storedSafe, storedAvatar);
     }
 
-    // Resolve safe conflicts using the stored mapping and conflict history.
-    // Only trigger a trust switch when a genuinely new claimant appears
-    // (one that was never seen in any previous run for this safe).
-    for (const [conflictedSafe, claimants] of safeConflicts.entries()) {
-      const previousAvatar = storedSafeToAvatar.get(conflictedSafe);
-      const knownClaimants = storedConflictHistory.get(conflictedSafe) ?? [];
-      const knownSet = new Set(knownClaimants.map((a) => a.toLowerCase()));
-
-      // Merge current claimants into the conflict history.
-      const updatedKnown = [...knownClaimants];
-      for (const c of claimants) {
-        if (!knownSet.has(c.toLowerCase())) {
-          updatedKnown.push(c);
-          knownSet.add(c.toLowerCase());
-        }
-      }
-      storedConflictHistory.set(conflictedSafe, updatedKnown);
-
-      // Identify genuinely new claimants (never seen before in any prior run).
-      const genuinelyNew = claimants.filter(
-        (c) => !new Set(knownClaimants.map((k) => k.toLowerCase())).has(c.toLowerCase())
-      );
+    const effectiveOwnersBySafe = new Map(selectedOwnersBySafe);
+    for (const [safe, selected] of selectedOwnersBySafe.entries()) {
+      const previousState = storedSafeTrustState.get(safe);
+      const previousAvatar = previousState?.trustedAvatar ?? storedSafeToAvatar.get(safe);
 
       if (!previousAvatar) {
-        // No stored winner — first-time conflict.
-        if (claimants.length >= 2) {
-          const picked = claimants[claimants.length - 1];
-          logger.info(
-            `Safe ${conflictedSafe} has ${claimants.length} claimants but no stored mapping. ` +
-            `Picking last claimant ${picked} as owner.`
-          );
-          avatarsWithSafes.set(picked, conflictedSafe);
-          eligibleCandidates.push(picked);
-          storedMapping.set(picked, conflictedSafe);
-        } else {
-          logger.info(
-            `Safe ${conflictedSafe} has ${claimants.length} claimant(s) but no stored mapping. ` +
-            `Skipping conflict resolution until next run.`
-          );
-        }
+        storedSafeTrustState.set(safe, {
+          trustedAvatar: selected.avatar,
+          trustedTimestamp: selected.timestamp,
+          switchCount: 0
+        });
         continue;
       }
 
-      if (genuinelyNew.length === 0) {
-        // All current claimants were seen before — keep stored winner, no untrust.
+      if (previousAvatar.toLowerCase() === selected.avatar.toLowerCase()) {
+        const updatedTimestamp = previousState?.trustedTimestamp
+          ? (compareTimestamp(selected.timestamp, previousState.trustedTimestamp) > 0
+              ? selected.timestamp
+              : previousState.trustedTimestamp)
+          : selected.timestamp;
+
+        storedSafeTrustState.set(safe, {
+          trustedAvatar: selected.avatar,
+          trustedTimestamp: updatedTimestamp,
+          switchCount: normalizeSwitchCount(previousState?.switchCount ?? 0)
+        });
+        continue;
+      }
+
+      const currentSwitchCount = normalizeSwitchCount(previousState?.switchCount ?? 0);
+      const previousTimestamp = previousState?.trustedTimestamp ?? selected.timestamp;
+      const isNewer = compareTimestamp(selected.timestamp, previousTimestamp) > 0;
+      const canSwitch = isNewer && currentSwitchCount < MAX_SAFE_OWNER_SWITCHES;
+
+      if (canSwitch) {
         logger.info(
-          `Safe ${conflictedSafe} conflict is stable (${claimants.length} claimants, all previously seen). ` +
-          `Keeping stored winner ${previousAvatar}.`
+          `Safe ${safe} reassigned ${previousAvatar} -> ${selected.avatar} (timestamp ${previousTimestamp} -> ${selected.timestamp}). ` +
+          `Switch ${currentSwitchCount + 1}/${MAX_SAFE_OWNER_SWITCHES}.`
         );
-        avatarsWithSafes.set(previousAvatar, conflictedSafe);
-        eligibleCandidates.push(previousAvatar);
+        safeReassignmentUntrustedAvatars.push(previousAvatar);
+        storedSafeTrustState.set(safe, {
+          trustedAvatar: selected.avatar,
+          trustedTimestamp: selected.timestamp,
+          switchCount: currentSwitchCount + 1
+        });
         continue;
       }
 
-      // Genuinely new claimant(s) found — switch ownership.
-      const picked = genuinelyNew[genuinelyNew.length - 1];
+      const reason = isNewer
+        ? `switch limit reached (${currentSwitchCount}/${MAX_SAFE_OWNER_SWITCHES})`
+        : `new timestamp ${selected.timestamp} is not newer than trusted ${previousTimestamp}`;
       logger.info(
-        `Safe ${conflictedSafe} has ${genuinelyNew.length} genuinely new claimant(s) ` +
-        `(never seen before). Resolving: ${previousAvatar} (old) → ${picked} (new). ` +
-        `Promoting ${picked} to eligible and marking ${previousAvatar} for forced untrust.`
+        `Safe ${safe} keeps trusted avatar ${previousAvatar}; candidate ${selected.avatar} ignored (${reason}).`
       );
-      avatarsWithSafes.set(picked, conflictedSafe);
-      eligibleCandidates.push(picked);
-      safeReassignmentUntrustedAvatars.push(previousAvatar);
-      storedMapping.delete(previousAvatar);
-      storedMapping.set(picked, conflictedSafe);
+      effectiveOwnersBySafe.set(safe, {
+        avatar: previousAvatar,
+        timestamp: previousTimestamp
+      });
+      storedSafeTrustState.set(safe, {
+        trustedAvatar: previousAvatar,
+        trustedTimestamp: previousTimestamp,
+        switchCount: currentSwitchCount
+      });
     }
 
-    // Detect reassignments from clean mappings (no conflict case).
-    for (const [currentAvatar, currentSafe] of avatarsWithSafes.entries()) {
-      const previousAvatar = storedSafeToAvatar.get(currentSafe);
-      if (previousAvatar && previousAvatar !== currentAvatar) {
-        if (!safeReassignmentUntrustedAvatars.includes(previousAvatar)) {
-          logger.info(
-            `Safe ${currentSafe} reassigned from ${previousAvatar} to ${currentAvatar}. ` +
-            `Marking ${previousAvatar} for forced untrust.`
-          );
-          safeReassignmentUntrustedAvatars.push(previousAvatar);
-          storedMapping.delete(previousAvatar);
-        }
-      }
-
-      const previousSafe = storedMapping.get(currentAvatar);
-      if (previousSafe && previousSafe !== currentSafe) {
-        logger.info(`Avatar ${currentAvatar} changed safe from ${previousSafe} to ${currentSafe}.`);
-      }
-
-      storedMapping.set(currentAvatar, currentSafe);
+    avatarsWithSafes = new Map<string, string>();
+    for (const [safe, owner] of effectiveOwnersBySafe.entries()) {
+      avatarsWithSafes.set(owner.avatar, safe);
     }
 
-    // Remove stale entries for avatars that were evaluated but no longer have a safe.
+    const updatedMapping = new Map<string, string>();
+    const effectiveAvatarLowerSet = new Set(Array.from(avatarsWithSafes.keys()).map((a) => a.toLowerCase()));
     const evaluationCandidateLowerSet = new Set(
       evaluationCandidates.map((a) => a.toLowerCase())
     );
     for (const [storedAvatar] of Array.from(storedMapping.entries())) {
       if (
-        evaluationCandidateLowerSet.has(storedAvatar.toLowerCase()) &&
-        !avatarsWithSafes.has(storedAvatar)
+        !evaluationCandidateLowerSet.has(storedAvatar.toLowerCase()) ||
+        effectiveAvatarLowerSet.has(storedAvatar.toLowerCase())
       ) {
-        logger.info(
-          `Removing stale mapping entry for avatar ${storedAvatar} (evaluated but no safe found).`
-        );
-        storedMapping.delete(storedAvatar);
+        updatedMapping.set(storedAvatar, storedMapping.get(storedAvatar)!);
       }
     }
+    for (const [avatar, safe] of avatarsWithSafes.entries()) {
+      updatedMapping.set(avatar, safe);
+    }
 
-    await avatarSafeMappingStore.save(storedMapping);
-    await avatarSafeMappingStore.saveConflictHistory(storedConflictHistory);
-    logger.info(`Saved updated avatar-safe mapping with ${storedMapping.size} entry/entries.`);
+    await avatarSafeMappingStore.save(updatedMapping);
+    await avatarSafeMappingStore.saveSafeTrustState(storedSafeTrustState);
+    logger.info(
+      `Saved updated avatar-safe mapping with ${updatedMapping.size} entry/entries and ${storedSafeTrustState.size} safe state entry/entries.`
+    );
+  }
+
+  for (const avatar of allowedCandidates) {
+    if (avatarsWithSafes.has(avatar)) {
+      eligibleCandidates.push(avatar);
+    } else {
+      avatarsWithoutSafe.push(avatar);
+    }
+  }
+
+  logger.info(
+    `Avatar safe summary: ${eligibleCandidates.length} with safes, ${avatarsWithoutSafe.length} without safes.`
+  );
+
+  if (avatarsWithoutSafe.length > 0) {
+    logger.info(`Skipping ${avatarsWithoutSafe.length} avatar(s) without configured safes.`);
+    if (dryRun) {
+      logger.debug(`Avatars without safes: ${avatarsWithoutSafe.join(", ")}`);
+    }
   }
 
   const trustedAvatars: string[] = [];
@@ -601,21 +584,6 @@ async function fetchBlacklistVerdictsWithRetry(
   throw new Error("Failed to fetch blacklist verdicts after retries");
 }
 
-async function timedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, {...init, signal: controller.signal});
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 429 || status >= 500;
-}
-
 function isRetryableFetchError(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return true;
@@ -687,6 +655,36 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export const __testables = {
-  timedFetch
-};
+function normalizeSwitchCount(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
+function compareTimestamp(left: string, right: string): number {
+  const leftComparable = toComparableBigInt(left);
+  const rightComparable = toComparableBigInt(right);
+
+  if (leftComparable !== null && rightComparable !== null) {
+    if (leftComparable > rightComparable) return 1;
+    if (leftComparable < rightComparable) return -1;
+    return 0;
+  }
+
+  return left.localeCompare(right);
+}
+
+function toComparableBigInt(value: string): bigint | null {
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return BigInt(trimmed);
+  }
+
+  const parsedDate = Date.parse(trimmed);
+  if (!Number.isNaN(parsedDate)) {
+    return BigInt(parsedDate);
+  }
+
+  return null;
+}

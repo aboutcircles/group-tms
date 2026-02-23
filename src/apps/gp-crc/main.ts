@@ -15,6 +15,7 @@ import {
 import {formatErrorWithCauses} from "../../formatError";
 import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
+import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gp-crc");
@@ -112,6 +113,12 @@ async function mainLoop(): Promise<void> {
   while (true) {
     const runStartedAt = Date.now();
     try {
+      await ensureRpcHealthyOrNotify({
+        appName: "gp-crc",
+        rpcUrl,
+        slackService,
+        logger: rootLogger
+      });
       await refreshBlacklist();
       const outcome = await runOnce(
         {

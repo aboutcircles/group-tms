@@ -1,8 +1,8 @@
-import {IAvatarSafeMappingStore} from "../interfaces/IAvatarSafeMappingStore";
+import {IAvatarSafeMappingStore, SafeTrustState} from "../interfaces/IAvatarSafeMappingStore";
 
 export class InMemoryAvatarSafeMappingStore implements IAvatarSafeMappingStore {
   private mapping = new Map<string, string>();
-  private conflictHistory = new Map<string, string[]>();
+  private safeTrustState = new Map<string, SafeTrustState>();
 
   async load(): Promise<Map<string, string>> {
     return new Map(this.mapping);
@@ -12,15 +12,15 @@ export class InMemoryAvatarSafeMappingStore implements IAvatarSafeMappingStore {
     this.mapping = new Map(mapping);
   }
 
-  async loadConflictHistory(): Promise<Map<string, string[]>> {
+  async loadSafeTrustState(): Promise<Map<string, SafeTrustState>> {
     return new Map(
-      Array.from(this.conflictHistory.entries()).map(([k, v]) => [k, [...v]])
+      Array.from(this.safeTrustState.entries()).map(([safe, state]) => [safe, {...state}])
     );
   }
 
-  async saveConflictHistory(history: Map<string, string[]>): Promise<void> {
-    this.conflictHistory = new Map(
-      Array.from(history.entries()).map(([k, v]) => [k, [...v]])
+  async saveSafeTrustState(state: Map<string, SafeTrustState>): Promise<void> {
+    this.safeTrustState = new Map(
+      Array.from(state.entries()).map(([safe, value]) => [safe, {...value}])
     );
   }
 }

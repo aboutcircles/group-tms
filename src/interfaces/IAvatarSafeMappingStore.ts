@@ -1,3 +1,9 @@
+export type SafeTrustState = {
+  trustedAvatar: string;
+  trustedTimestamp: string;
+  switchCount: number;
+};
+
 export interface IAvatarSafeMappingStore {
   /**
    * Loads the previously persisted avatar → safe mapping.
@@ -12,15 +18,9 @@ export interface IAvatarSafeMappingStore {
    */
   save(mapping: Map<string, string>): Promise<void>;
 
-  /**
-   * Loads the stored conflict history: safe → all known claimant avatars
-   * ever observed across all previous runs.
-   * Returns an empty map when no prior state exists.
-   */
-  loadConflictHistory(): Promise<Map<string, string[]>>;
+  /** Loads per-safe trust state used for switch-capping logic. */
+  loadSafeTrustState(): Promise<Map<string, SafeTrustState>>;
 
-  /**
-   * Persists the conflict history, fully replacing the previous state.
-   */
-  saveConflictHistory(history: Map<string, string[]>): Promise<void>;
+  /** Persists per-safe trust state, fully replacing the previous state. */
+  saveSafeTrustState(state: Map<string, SafeTrustState>): Promise<void>;
 }

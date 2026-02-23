@@ -14,6 +14,7 @@ import {formatErrorWithCauses} from "../../formatError";
 import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {InMemoryRouterEnablementStore} from "./enablementStore";
+import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const routerAddress = process.env.ROUTER_ADDRESS || "0xdc287474114cc0551a81ddc2eb51783fbf34802f";
@@ -99,6 +100,12 @@ async function mainLoop(): Promise<void> {
   while (true) {
     const runStartedAt = Date.now();
     try {
+      await ensureRpcHealthyOrNotify({
+        appName: "router-tms",
+        rpcUrl,
+        slackService,
+        logger: rootLogger
+      });
       await refreshBlacklist();
       const outcome = await runOnce(
         {

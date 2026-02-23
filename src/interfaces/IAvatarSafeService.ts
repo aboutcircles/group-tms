@@ -1,17 +1,19 @@
+export type SafeOwnerSelection = {
+  avatar: string;
+  timestamp: string;
+};
+
 export type AvatarSafeResult = {
-  /** Clean 1:1 avatar → safe mappings (no conflicts). */
+  /** Selected avatar → safe mapping (one avatar per safe). */
   mappings: Map<string, string>;
-  /** Safes that have multiple avatar claimants: safe → avatars[]. */
-  safeConflicts: Map<string, string[]>;
+  /** Per-safe selected owner (latest timestamp among requested avatars). */
+  selectedOwnersBySafe: Map<string, SafeOwnerSelection>;
 };
 
 export interface IAvatarSafeService {
   /**
-   * Returns avatar → safe mappings together with conflict information.
-   *
-   * Clean 1:1 pairs go into `mappings`. Avatars linked to more than one
-   * safe module are omitted from `mappings`. Safes linked to more than
-   * one avatar are omitted from `mappings` and reported in `safeConflicts`.
+   * Returns avatar → safe mappings based only on latest owner timestamp.
+   * Exactly one owner is selected per safe.
    */
   findAvatarsWithSafes(avatars: string[]): Promise<AvatarSafeResult>;
 }

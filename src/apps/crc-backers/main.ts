@@ -9,6 +9,7 @@ import {runOnce} from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
 import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
+import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
@@ -103,6 +104,13 @@ async function loop() {
   while (true) {
     const runStartedAt = Date.now();
     try {
+      await ensureRpcHealthyOrNotify({
+        appName: "crc-backers",
+        rpcUrl,
+        slackService,
+        logger: rootLogger
+      });
+
       rootLogger.info("Checking for new backers...");
       await refreshBlacklist();
 
