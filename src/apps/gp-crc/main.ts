@@ -83,7 +83,6 @@ rootLogger.info(`  - pollIntervalMs=${pollIntervalMs}`);
 rootLogger.info(`  - groupAddress=${groupAddress}`);
 rootLogger.info(`  - groupBatchSize=${groupBatchSize}`);
 rootLogger.info(`  - metriSafeGraphqlUrl=${metriSafeGraphqlUrl}`);
-rootLogger.info(`  - metriSafeApiKeyConfigured=${metriSafeApiKey.trim().length > 0}`);
 rootLogger.info(`  - safeAddress=${safeAddress || "(not set)"}`);
 rootLogger.info(`  - safeSignerConfigured=${safeSignerPrivateKey.trim().length > 0}`);
 rootLogger.info(`  - dryRun=${dryRun}`);

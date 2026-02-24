@@ -1,7 +1,7 @@
 import {runIncremental, type IncrementalState, createInitialIncrementalState} from "./logic";
 import {CirclesRpcService} from "../../services/circlesRpcService";
 import {ChainRpcService} from "../../services/chainRpcService";
-import {SafeGroupService} from "../../services/safeGroupService";
+import {GroupService} from "../../services/groupService";
 import {AffiliateGroupEventsService} from "../../services/affiliateGroupEventsService";
 import {SlackService} from "../../services/slackService";
 import {LoggerService} from "../../services/loggerService";
@@ -10,16 +10,17 @@ import {startMetricsServer, recordRunSuccess, recordRunError} from "../../servic
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {formatErrorWithCauses} from "../../formatError";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {Wallet} from "ethers";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const oicGroupAddress = (process.env.OIC_GROUP_ADDRESS || "0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5").toLowerCase();
 const metaOrgAddress = (process.env.OIC_META_ORG_ADDRESS || "").toLowerCase();
 const affiliateRegistryAddress = (process.env.AFFILIATE_REGISTRY_ADDRESS || "0xca8222e780d046707083f51377b5fd85e2866014").toLowerCase();
-const safeAddress = (process.env.OIC_SAFE_ADDRESS || "").toLowerCase();
-const safeSignerPrivateKey = process.env.OIC_SAFE_SIGNER_PRIVATE_KEY || "";
-const deployedAtBlock = Number.parseInt(process.env.START_AT_BLOCK || "41734312");
+const servicePrivateKey = process.env.OIC_SERVICE_PRIVATE_KEY || process.env.OIC_SAFE_SIGNER_PRIVATE_KEY || "";
+const configuredServiceEoa = (process.env.OIC_SERVICE_EOA || "").toLowerCase();
+const deployedAtBlock = 41_734_312;
 const confirmationBlocks = Number.parseInt(process.env.CONFIRMATION_BLOCKS || "10");
-const refreshIntervalSec = Number.parseInt(process.env.REFRESH_INTERVAL_SEC || "60");
+const refreshIntervalSec = Number.parseInt(process.env.REFRESH_INTERVAL_SEC || "3600");
 const dryRun = process.env.DRY_RUN === "1";
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const outputBatchSize = 20;
@@ -28,7 +29,7 @@ const rootLogger = new LoggerService(verboseLogging);
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const chainRpc = new ChainRpcService(rpcUrl);
 let groupService: IGroupService;
-const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl);
+const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl, rootLogger.child("oic:affiliate-registry"));
 
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackService = new SlackService(slackWebhookUrl);
@@ -40,14 +41,21 @@ validateConfig();
 if (dryRun) {
   groupService = createDryRunGroupService();
 } else {
-  groupService = new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress);
+  groupService = new GroupService(rpcUrl, servicePrivateKey);
 }
 
 function validateConfig() {
   if (!oicGroupAddress) throw new Error("OIC_GROUP_ADDRESS is required");
   if (!metaOrgAddress) throw new Error("OIC_META_ORG_ADDRESS is required");
-  if (!safeAddress && !dryRun) throw new Error("OIC_SAFE_ADDRESS is required when not in dry-run");
-  if (!safeSignerPrivateKey && !dryRun) throw new Error("OIC_SAFE_SIGNER_PRIVATE_KEY is required when not in dry-run");
+  if (!servicePrivateKey && !dryRun) throw new Error("OIC_SERVICE_PRIVATE_KEY is required when not in dry-run");
+  if (configuredServiceEoa && !dryRun) {
+    const signerAddress = new Wallet(servicePrivateKey).address.toLowerCase();
+    if (signerAddress !== configuredServiceEoa) {
+      throw new Error(
+        `Configured OIC_SERVICE_EOA (${configuredServiceEoa}) does not match signer address (${signerAddress}).`
+      );
+    }
+  }
 }
 
 function createDryRunGroupService(): IGroupService {
@@ -105,8 +113,8 @@ process.on('unhandledRejection', async (reason: any) => {
       `- Group: ${oicGroupAddress}\n` +
       `- MetaOrg: ${metaOrgAddress}\n` +
       `- AffiliateRegistry: ${affiliateRegistryAddress}\n` +
-      `- Safe: ${safeAddress || "(not set)"}\n` +
-      `- Safe signer configured: ${safeSignerPrivateKey.trim().length > 0}\n` +
+      `- Service EOA: ${configuredServiceEoa || "(not set)"}\n` +
+      `- Service key configured: ${servicePrivateKey.trim().length > 0}\n` +
       `- Start Block: ${deployedAtBlock}\n` +
       `- Confirmations: ${confirmationBlocks}\n` +
       `- Refresh (s): ${refreshIntervalSec}\n` +
@@ -151,7 +159,7 @@ async function loop() {
         LOG.debug(`Group: ${oicGroupAddress}`);
         LOG.debug(`MetaOrg: ${metaOrgAddress}`);
         LOG.debug(`AffiliateRegistry: ${affiliateRegistryAddress}`);
-        LOG.debug(`Safe: ${safeAddress}`);
+        LOG.debug(`Service EOA: ${configuredServiceEoa || "(not set)"}`);
         LOG.debug(`DryRun: ${dryRun}`);
         printedStartupLogs = true;
       }

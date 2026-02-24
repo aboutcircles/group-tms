@@ -264,9 +264,6 @@ export async function runOnce(
 
   if (avatarsWithoutSafe.length > 0) {
     logger.info(`Skipping ${avatarsWithoutSafe.length} avatar(s) without configured safes.`);
-    if (dryRun) {
-      logger.debug(`Avatars without safes: ${avatarsWithoutSafe.join(", ")}`);
-    }
   }
 
   const trustedAvatars: string[] = [];
@@ -301,9 +298,6 @@ export async function runOnce(
     logger.info(
       `Skipping ${alreadyTrustedFromEvents.length} avatar(s) already trusted in group ${groupAddress}.`
     );
-    if (dryRun) {
-      logger.debug(`Already trusted avatars: ${alreadyTrustedFromEvents.join(", ")}`);
-    }
   }
 
   if (avatarsToUntrust.length > 0) {
@@ -313,7 +307,7 @@ export async function runOnce(
         `Dry-run mode enabled; would untrust ${avatarsToUntrust.length} avatar(s) in group ${groupAddress} across ${batches.length} batch(es).`
       );
       batches.forEach((batch, index) => {
-        logger.info(`DRY RUN untrust batch ${index + 1}/${batches.length}: ${batch.length} avatars -> ${batch.join(", ")}`);
+        logger.info(`DRY RUN untrust batch ${index + 1}/${batches.length}: ${batch.length} avatar(s).`);
       });
       untrustedAvatars.push(...avatarsToUntrust);
     } else {
@@ -345,7 +339,7 @@ export async function runOnce(
         `Dry-run mode enabled; would trust ${avatarsToTrust.length} avatar(s) in group ${groupAddress} across ${batches.length} batch(es).`
       );
       batches.forEach((batch, index) => {
-        logger.info(`DRY RUN trust batch ${index + 1}/${batches.length}: ${batch.length} avatars -> ${batch.join(", ")}`);
+        logger.info(`DRY RUN trust batch ${index + 1}/${batches.length}: ${batch.length} avatar(s).`);
       });
       trustedAvatars.push(...avatarsToTrust);
     } else {

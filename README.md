@@ -133,12 +133,12 @@ OIC_GROUP_ADDRESS=0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5
 OIC_META_ORG_ADDRESS=                    # REQUIRED - Meta organization address
 AFFILIATE_REGISTRY_ADDRESS=0xca8222e780d046707083f51377b5fd85e2866014
 
-# Safe execution (required unless dry run)
-OIC_SAFE_ADDRESS=                        # Safe that controls the OIC group service role
-OIC_SAFE_SIGNER_PRIVATE_KEY=             # Private key for one Safe signer
+# EOA execution (required unless dry run)
+OIC_SERVICE_EOA=                         # Optional: expected service EOA address for key validation
+OIC_SERVICE_PRIVATE_KEY=                 # Private key for the group service EOA
 
 # Scan window / timing
-START_AT_BLOCK=41734312
+# Start block is hardcoded in OIC code to 41734312
 CONFIRMATION_BLOCKS=10
 REFRESH_INTERVAL_SEC=60
 
@@ -299,7 +299,9 @@ VERBOSE_LOGGING=1
 * `DRY_RUN=1` will log intended trust batches without submitting transactions
 
 ### OIC App  
-* `OIC_SAFE_ADDRESS` must be the OIC group's **service**; the signer key must belong to that Safe
+* `OIC_SERVICE_PRIVATE_KEY` is used for direct EOA execution when `DRY_RUN=0`
+* If set, `OIC_SERVICE_EOA` must match the address derived from `OIC_SERVICE_PRIVATE_KEY`
+* OIC start block is hardcoded to `41734312`
 * `OIC_META_ORG_ADDRESS` is required - this is the MetaOrg whose trustees will be monitored
 * Use `DRY_RUN=1` for testing without making actual blockchain transactions
 * Service maintains incremental state to avoid re-processing old events
