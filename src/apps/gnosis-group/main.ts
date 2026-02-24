@@ -129,12 +129,12 @@ async function mainLoop(): Promise<void> {
   while (true) {
     const runStartedAt = Date.now();
     try {
-      await ensureRpcHealthyOrNotify({
+      const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gnosis-group",
         rpcUrl,
-        slackService,
         logger: rootLogger
       });
+      if (!isHealthy) { await delay(runIntervalMs); continue; }
       await refreshBlacklist();
       const outcome = await runOnce(
         {

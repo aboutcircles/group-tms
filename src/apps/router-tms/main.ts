@@ -100,12 +100,12 @@ async function mainLoop(): Promise<void> {
   while (true) {
     const runStartedAt = Date.now();
     try {
-      await ensureRpcHealthyOrNotify({
+      const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "router-tms",
         rpcUrl,
-        slackService,
         logger: rootLogger
       });
+      if (!isHealthy) { await delay(pollIntervalMs); continue; }
       await refreshBlacklist();
       const outcome = await runOnce(
         {

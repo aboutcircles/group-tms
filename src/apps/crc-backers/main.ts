@@ -104,12 +104,12 @@ async function loop() {
   while (true) {
     const runStartedAt = Date.now();
     try {
-      await ensureRpcHealthyOrNotify({
+      const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "crc-backers",
         rpcUrl,
-        slackService,
         logger: rootLogger
       });
+      if (!isHealthy) { await delay(60 * 1000); continue; }
 
       rootLogger.info("Checking for new backers...");
       await refreshBlacklist();

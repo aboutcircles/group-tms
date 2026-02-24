@@ -130,12 +130,12 @@ async function mainLoop(): Promise<void> {
     }
 
     try {
-      await ensureRpcHealthyOrNotify({
+      const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "dublin-tms",
         rpcUrl,
-        slackService,
         logger: rootLogger
       });
+      if (!isHealthy) { await delay(pollIntervalMs); continue; }
       const runConfig: RunConfig = {
         ...staticConfig,
         fromBlock: nextFromBlock,

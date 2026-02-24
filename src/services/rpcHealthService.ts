@@ -1,5 +1,5 @@
 import {ILoggerService} from "../interfaces/ILoggerService";
-import {ISlackService} from "../interfaces/ISlackService";
+import {recordRpcHealth} from "./metricsService";
 
 type RpcHealthResponse = {
   result?: unknown;
@@ -73,31 +73,18 @@ export async function checkRpcHealth(
 export async function ensureRpcHealthyOrNotify(params: {
   appName: string;
   rpcUrl: string;
-  slackService: ISlackService;
   logger: ILoggerService;
   timeoutMs?: number;
 }): Promise<boolean> {
   const health = await checkRpcHealth(params.rpcUrl, params.timeoutMs);
-  if (health.healthy) {
-    return true;
+  recordRpcHealth(params.appName, health.healthy);
+
+  if (!health.healthy) {
+    const detail = health.error ?? "unknown error";
+    params.logger.warn(
+      `[rpc-health] ${params.appName}: unhealthy RPC endpoint '${params.rpcUrl}' (${detail}). Skipping run.`
+    );
   }
 
-  const detail = health.error || "unknown error";
-  const message =
-    `⚠️ *${params.appName} RPC health check failed*\n\n` +
-    `- RPC: ${params.rpcUrl}\n` +
-    `- Reason: ${detail}\n` +
-    `- Action: Run will proceed; investigate RPC health`;
-
-  params.logger.warn(
-    `[rpc-health] ${params.appName}: unhealthy RPC endpoint '${params.rpcUrl}' (${detail}). Skipping run.`
-  );
-
-  try {
-    await params.slackService.notifySlackStartOrCrash(message);
-  } catch (error) {
-    params.logger.warn(`[rpc-health] Failed to send Slack RPC health notification:`, error);
-  }
-
-  return false;
+  return health.healthy;
 }

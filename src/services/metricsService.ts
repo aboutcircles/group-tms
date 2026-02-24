@@ -40,6 +40,13 @@ const errorsTotal = new Counter({
   registers: [registry]
 });
 
+const rpcHealthy = new Gauge({
+  name: "group_tms_rpc_healthy",
+  help: "1 if the RPC endpoint is reachable, 0 otherwise",
+  labelNames: ["app"] as const,
+  registers: [registry]
+});
+
 export function startMetricsServer(
   appName: string,
   port: number = Number.parseInt(process.env.METRICS_PORT || "9091", 10)
@@ -75,6 +82,10 @@ export function recordRunSuccess(appName: string, durationMs: number): void {
 export function recordRunError(appName: string): void {
   runsTotal.labels(appName, "error").inc();
   errorsTotal.labels(appName).inc();
+}
+
+export function recordRpcHealth(appName: string, healthy: boolean): void {
+  rpcHealthy.labels(appName).set(healthy ? 1 : 0);
 }
 
 export function getRegistry(): Registry {

@@ -145,12 +145,12 @@ async function loop() {
     const runStartedAt = Date.now();
     try {
       const LOG = rootLogger.child("oic");
-      await ensureRpcHealthyOrNotify({
+      const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "oic",
         rpcUrl,
-        slackService,
         logger: rootLogger
       });
+      if (!isHealthy) { await delay(refreshIntervalSec * 1000); continue; }
 
       if (!printedStartupLogs) {
         LOG.info("OIC app starting (monitor + reconcile trust)...");
