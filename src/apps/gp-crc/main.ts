@@ -14,9 +14,10 @@ import {
   DEFAULT_GROUP_BATCH_SIZE
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gp-crc");
@@ -111,8 +112,15 @@ process.on("SIGTERM", async () => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gp-crc");
+  const leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService
+  );
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+    if (leaderElection) setLeaderStatus("gp-crc", leaderElection.isLeader);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gp-crc",
@@ -130,7 +138,7 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           avatarSafeMappingStore
         },
-        config
+        { ...config, dryRun: effectiveDryRun }
       );
       recordRunSuccess("gp-crc", Date.now() - runStartedAt);
       errorTracker.recordSuccess();

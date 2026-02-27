@@ -47,12 +47,25 @@ const rpcHealthy = new Gauge({
   registers: [registry]
 });
 
+const leaderGauge = new Gauge({
+  name: "group_tms_leader",
+  help: "Whether this instance is the active leader (1=leader, 0=standby)",
+  labelNames: ["app"] as const,
+  registers: [registry]
+});
+
 /** Track per-app RPC readiness for the /health/ready endpoint. */
 const rpcHealthState = new Map<string, boolean>();
+const leaderState = new Map<string, boolean>();
 
 export function setRpcHealthy(appName: string, healthy: boolean): void {
   rpcHealthState.set(appName, healthy);
   rpcHealthy.labels(appName).set(healthy ? 1 : 0);
+}
+
+export function setLeaderStatus(appName: string, isLeader: boolean): void {
+  leaderState.set(appName, isLeader);
+  leaderGauge.labels(appName).set(isLeader ? 1 : 0);
 }
 
 export function startMetricsServer(
@@ -64,6 +77,7 @@ export function startMetricsServer(
   lastSuccessTimestamp.labels(appName).set(0);
   rpcHealthy.labels(appName).set(0);
   rpcHealthState.set(appName, false);
+  leaderGauge.labels(appName).set(0);
 
   const server = http.createServer(async (req, res) => {
     const url = req.url || "/";
@@ -78,9 +92,13 @@ export function startMetricsServer(
     // GET /health/ready — RPC readiness (200 if healthy, 503 if not)
     if (url === "/health/ready") {
       const healthy = rpcHealthState.get(appName) === true;
+      const leader = leaderState.get(appName);
       const code = healthy ? 200 : 503;
       res.writeHead(code, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ status: healthy ? "ready" : "unavailable" }));
+      res.end(JSON.stringify({
+        status: healthy ? "ready" : "unavailable",
+        ...(leader !== undefined && { leader })
+      }));
       return;
     }
 

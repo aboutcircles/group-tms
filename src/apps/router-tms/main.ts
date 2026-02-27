@@ -12,10 +12,11 @@ import {
   DEFAULT_BASE_GROUP_ADDRESS
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {InMemoryRouterEnablementStore} from "./enablementStore";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const routerAddress = process.env.ROUTER_ADDRESS || "0xdc287474114cc0551a81ddc2eb51783fbf34802f";
@@ -99,8 +100,15 @@ process.on("SIGTERM", async () => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("router-tms");
+  const leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService
+  );
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+    if (leaderElection) setLeaderStatus("router-tms", leaderElection.isLeader);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "router-tms",
@@ -117,7 +125,7 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           enablementStore
         },
-        config
+        { ...config, dryRun: effectiveDryRun }
       );
       recordRunSuccess("router-tms", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
