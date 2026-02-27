@@ -11,13 +11,20 @@ export class LeaderElection {
   private pool: Pool;
   private instanceId: string;
   private notifier: LeaderElectionNotifier | undefined;
+  private onStatusUpdate: ((isLeader: boolean) => void) | undefined;
   private _isLeader = false;
   private heartbeatTimer: NodeJS.Timeout | null = null;
 
-  constructor(dbUrl: string, instanceId: string, notifier?: LeaderElectionNotifier) {
+  constructor(
+    dbUrl: string,
+    instanceId: string,
+    notifier?: LeaderElectionNotifier,
+    onStatusUpdate?: (isLeader: boolean) => void
+  ) {
     this.pool = new Pool({ connectionString: dbUrl, max: 2 });
     this.instanceId = instanceId;
     this.notifier = notifier;
+    this.onStatusUpdate = onStatusUpdate;
   }
 
   /**
@@ -27,10 +34,11 @@ export class LeaderElection {
   static async create(
     dbUrl?: string,
     instanceId?: string,
-    notifier?: LeaderElectionNotifier
+    notifier?: LeaderElectionNotifier,
+    onStatusUpdate?: (isLeader: boolean) => void
   ): Promise<LeaderElection | null> {
     if (!dbUrl || !instanceId) return null;
-    const le = new LeaderElection(dbUrl, instanceId, notifier);
+    const le = new LeaderElection(dbUrl, instanceId, notifier, onStatusUpdate);
     await le.start();
     return le;
   }
@@ -82,6 +90,8 @@ export class LeaderElection {
       console.log(`[leader-election] Lost leadership (instance=${this.instanceId})`);
       this.notifySlack(`🔴 Lost leadership — switching to dry-run`);
     }
+
+    this.onStatusUpdate?.(this._isLeader);
   }
 
   private notifySlack(message: string): void {

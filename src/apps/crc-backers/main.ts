@@ -107,7 +107,6 @@ async function loop(leaderElection: LeaderElection | null) {
   while (true) {
     const runStartedAt = Date.now();
     const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-    if (leaderElection) setLeaderStatus("crc-backers", leaderElection.isLeader);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "crc-backers",
@@ -194,7 +193,8 @@ async function main() {
   const leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
-    slackService
+    slackService,
+    (isLeader) => setLeaderStatus("crc-backers", isLeader)
   );
   await sendStartupNotification();
   await loop(leaderElection);

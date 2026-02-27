@@ -143,7 +143,8 @@ async function loop() {
   const leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
-    slackService
+    slackService,
+    (isLeader) => setLeaderStatus("oic", isLeader)
   );
   const state: IncrementalState = createInitialIncrementalState();
   state.lastSafeHeadScanned = Math.max(0, deployedAtBlock - 1);
@@ -152,7 +153,6 @@ async function loop() {
   while (true) {
     const runStartedAt = Date.now();
     const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-    if (leaderElection) setLeaderStatus("oic", leaderElection.isLeader);
     try {
       const LOG = rootLogger.child("oic");
       const isHealthy = await ensureRpcHealthyOrNotify({
