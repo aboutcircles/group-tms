@@ -6,8 +6,11 @@ export class SlackService implements ISlackService {
 
   constructor(private webhookUrl: string) {
     const env = process.env.ENVIRONMENT || "unknown";
+    const instance = process.env.INSTANCE_ID || "";
     const app = process.env.APP_NAME || "group-tms";
-    this.tag = `[${env} | ${app}]`;
+    this.tag = instance
+      ? `[${env}:${instance} | ${app}]`
+      : `[${env} | ${app}]`;
   }
 
   async notifyBackingNotCompleted(e: CrcV2_CirclesBackingInitiated, reason: string): Promise<void> {
