@@ -10,7 +10,7 @@ import {
   IBackingInstanceService,
   ResetCowSwapOrderResult
 } from "../src/interfaces/IBackingInstanceService";
-import {ISlackService} from "../src/interfaces/ISlackService";
+import {ISlackService, SlackSeverity} from "../src/interfaces/ISlackService";
 import {ILoggerService} from "../src/interfaces/ILoggerService";
 import {AffiliateGroupChanged, IAffiliateGroupEventsService} from "../src/interfaces/IAffiliateGroupEventsService";
 import {
@@ -266,14 +266,14 @@ export class FakeBackingInstanceService implements IBackingInstanceService {
 
 export class FakeSlack implements ISlackService {
   notifications: { event: CrcV2_CirclesBackingInitiated; reason: string }[] = [];
-  generalNotifications: string[] = [];
+  generalNotifications: { message: string; severity: SlackSeverity }[] = [];
 
   async notifyBackingNotCompleted(backingInitiatedEvent: CrcV2_CirclesBackingInitiated, reason: string): Promise<void> {
     this.notifications.push({event: backingInitiatedEvent, reason});
   }
 
-  async notifySlackStartOrCrash(message: string): Promise<void> {
-    this.generalNotifications.push(message);
+  async notifySlackStartOrCrash(message: string, severity: SlackSeverity = SlackSeverity.CRITICAL): Promise<void> {
+    this.generalNotifications.push({message, severity});
   }
 }
 

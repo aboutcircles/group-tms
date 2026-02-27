@@ -1,6 +1,7 @@
 import {CirclesRpcService} from "../../services/circlesRpcService";
 import {LoggerService} from "../../services/loggerService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {RouterService} from "../../services/routerService";
 import {BlacklistingService} from "../../services/blacklistingService";
 import {
@@ -25,12 +26,13 @@ const pollIntervalMs = parseEnvInt("ROUTER_POLL_INTERVAL_MS", 30 * 60 * 1000);
 const enableBatchSize = parseEnvInt("ROUTER_ENABLE_BATCH_SIZE", DEFAULT_ENABLE_BATCH_SIZE);
 const fetchPageSize = parseEnvInt("ROUTER_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
+const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const safeAddress = process.env.ROUTER_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.ROUTER_SAFE_SIGNER_PRIVATE_KEY || "";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 
 const rootLogger = new LoggerService(verboseLogging, "router-tms");
-const slackService = new SlackService(slackWebhookUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
@@ -76,7 +78,7 @@ void notifySlackStartup();
 process.on("SIGINT", async () => {
   try {
     await slackService.notifySlackStartOrCrash(
-      `🔄 *Router-TMS Service shutting down*\n\nService received SIGINT signal.`
+      `🔄 *Router-TMS Service shutting down*\n\nService received SIGINT signal.`, SlackSeverity.INFO
     );
   } catch (error) {
     rootLogger.error("Failed to send shutdown notification:", error);
@@ -87,7 +89,7 @@ process.on("SIGINT", async () => {
 process.on("SIGTERM", async () => {
   try {
     await slackService.notifySlackStartOrCrash(
-      `🔄 *Router-TMS Service shutting down*\n\nService received SIGTERM signal.`
+      `🔄 *Router-TMS Service shutting down*\n\nService received SIGTERM signal.`, SlackSeverity.INFO
     );
   } catch (error) {
     rootLogger.error("Failed to send shutdown notification:", error);
@@ -154,7 +156,7 @@ start().catch((cause) => {
   rootLogger.error("Router-TMS service crashed:");
   rootLogger.error(formatErrorWithCauses(error));
   void slackService.notifySlackStartOrCrash(
-    `🚨 *Router-TMS Service crashed*\n\nLast error: ${error.message}`
+    `🚨 *Router-TMS Service crashed*\n\nLast error: ${error.message}`, SlackSeverity.CRITICAL
   ).catch((slackError: unknown) => {
     rootLogger.warn("Failed to send crash notification to Slack:", slackError);
   });
@@ -175,7 +177,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Dry Run: ${dryRun}`;
 
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack startup notification sent.");
     } else {
@@ -189,7 +191,7 @@ async function notifySlackStartup(): Promise<void> {
 async function notifySlackRunError(error: Error, consecutiveErrors: number): Promise<void> {
   const message = `⚠️ *Router-TMS run failed* (${consecutiveErrors} consecutive failures)\n\n${formatErrorWithCauses(error)}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
   } catch (slackError) {
     rootLogger.warn("Failed to send Slack run-error notification:", slackError);
   }
