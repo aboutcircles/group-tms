@@ -115,12 +115,12 @@ async function mainLoop(): Promise<void> {
   const leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
-    slackService
+    slackService,
+    (isLeader) => setLeaderStatus("gp-crc", isLeader)
   );
   while (true) {
     const runStartedAt = Date.now();
     const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-    if (leaderElection) setLeaderStatus("gp-crc", leaderElection.isLeader);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gp-crc",
