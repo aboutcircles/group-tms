@@ -18,9 +18,10 @@ import {
   RunOutcome
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gnosis-group");
@@ -126,8 +127,15 @@ process.on("unhandledRejection", async (reason) => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gnosis-group");
+  const leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService
+  );
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+    if (leaderElection) setLeaderStatus("gnosis-group", leaderElection.isLeader);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gnosis-group",
@@ -144,7 +152,7 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           scoreCache
         },
-        config
+        { ...config, dryRun: effectiveDryRun }
       );
 
       recordRunSuccess("gnosis-group", Date.now() - runStartedAt);

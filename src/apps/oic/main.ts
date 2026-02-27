@@ -6,10 +6,11 @@ import {AffiliateGroupEventsService} from "../../services/affiliateGroupEventsSe
 import {SlackService} from "../../services/slackService";
 import {LoggerService} from "../../services/loggerService";
 import {IGroupService} from "../../interfaces/IGroupService";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {formatErrorWithCauses} from "../../formatError";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {Wallet} from "ethers";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
@@ -137,12 +138,19 @@ function delay(ms: number): Promise<void> {
 
 async function loop() {
   startMetricsServer("oic");
+  const leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService
+  );
   const state: IncrementalState = createInitialIncrementalState();
   state.lastSafeHeadScanned = Math.max(0, deployedAtBlock - 1);
   // Only print startup/info logs once per process lifetime
   let printedStartupLogs = false;
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+    if (leaderElection) setLeaderStatus("oic", leaderElection.isLeader);
     try {
       const LOG = rootLogger.child("oic");
       const isHealthy = await ensureRpcHealthyOrNotify({
@@ -173,7 +181,7 @@ async function loop() {
           affiliateRegistryAddress,
           outputBatchSize,
           deployedAtBlock,
-          dryRun,
+          dryRun: effectiveDryRun,
         },
         state,
       );

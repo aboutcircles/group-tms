@@ -7,9 +7,10 @@ import {SlackService} from "../../services/slackService";
 import {LoggerService} from "../../services/loggerService";
 import {runOnce} from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
@@ -100,9 +101,11 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function loop() {
+async function loop(leaderElection: LeaderElection | null) {
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+    if (leaderElection) setLeaderStatus("crc-backers", leaderElection.isLeader);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "crc-backers",
@@ -131,7 +134,7 @@ async function loop() {
           fromBlock: nextFromBlock,
           expectedTimeTillCompletion,
           confirmationBlocks,
-          dryRun
+          dryRun: effectiveDryRun
         }
       );
       nextFromBlock = outcome.nextFromBlock;
@@ -186,8 +189,13 @@ async function refreshBlacklist(): Promise<void> {
 
 async function main() {
   startMetricsServer("crc-backers");
+  const leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService
+  );
   await sendStartupNotification();
-  await loop();
+  await loop(leaderElection);
 }
 
 main().catch(async (err) => {
