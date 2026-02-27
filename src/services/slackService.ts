@@ -10,8 +10,11 @@ export class SlackService implements ISlackService {
     this.alertWebhookUrl = alertWebhookUrl;
     this.infoWebhookUrl = infoWebhookUrl?.trim() || undefined;
     const env = process.env.ENVIRONMENT || "unknown";
+    const instance = process.env.INSTANCE_ID || "";
     const app = process.env.APP_NAME || "group-tms";
-    this.tag = `[${env} | ${app}]`;
+    this.tag = instance
+      ? `[${env}:${instance} | ${app}]`
+      : `[${env} | ${app}]`;
   }
 
   private selectWebhook(severity: SlackSeverity): string {
