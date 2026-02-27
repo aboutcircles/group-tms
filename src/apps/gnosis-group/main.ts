@@ -4,6 +4,7 @@ import {CirclesRpcService} from "../../services/circlesRpcService";
 import {IGroupService} from "../../interfaces/IGroupService";
 import {SafeGroupService} from "../../services/safeGroupService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {
   runOnce,
   RunConfig,
@@ -34,6 +35,7 @@ const safeAddress = process.env.GNOSIS_GROUP_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY || "";
 const dryRun = process.env.DRY_RUN === "1";
 const slackWebhookUrl = process.env.GNOSIS_GROUP_SLACK_WEBHOOK_URL || "";
+const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const runIntervalMinutes = Math.max(1, parseEnvInt("GNOSIS_GROUP_RUN_INTERVAL_MINUTES", 30));
 const runIntervalMs = runIntervalMinutes * 60 * 1_000;
 
@@ -49,7 +51,7 @@ const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFA
 
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const circlesRpc = new CirclesRpcService(rpcUrl);
-const slackService = new SlackService(slackWebhookUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const scoreCache = new ScoreCache();
 const errorTracker = new ConsecutiveErrorTracker(3);
@@ -249,7 +251,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Slack Configured: ${slackConfigured}`;
 
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack startup notification sent.");
     } else {
@@ -262,7 +264,7 @@ async function notifySlackStartup(): Promise<void> {
 
 async function notifySlackShutdown(signal: NodeJS.Signals): Promise<void> {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *Gnosis Group Service shutting down*\n\nReceived ${signal}.`);
+    await slackService.notifySlackStartOrCrash(`🔄 *Gnosis Group Service shutting down*\n\nReceived ${signal}.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.warn("Failed to send Slack shutdown notification:", error);
   }
@@ -313,7 +315,7 @@ async function notifySlackRunSummary(outcome: RunOutcome): Promise<void> {
   }
 
   try {
-    await slackService.notifySlackStartOrCrash(lines.join("\n"));
+    await slackService.notifySlackStartOrCrash(lines.join("\n"), SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack run summary notification sent.");
     }
@@ -325,7 +327,7 @@ async function notifySlackRunSummary(outcome: RunOutcome): Promise<void> {
 async function notifySlackRunError(error: Error, consecutiveErrors: number): Promise<void> {
   const message = `⚠️ *Gnosis Group run failed* (${consecutiveErrors} consecutive failures)\n\n${formatErrorWithCauses(error)}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
     if (slackConfigured) {
       rootLogger.info("Slack run error notification sent.");
     }
@@ -337,7 +339,7 @@ async function notifySlackRunError(error: Error, consecutiveErrors: number): Pro
 async function notifySlackFatal(error: Error): Promise<void> {
   const message = `🚨 *Gnosis Group Service crashed*\n\n${error.message}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.CRITICAL);
   } catch (slackError) {
     rootLogger.warn("Failed to send Slack fatal notification:", slackError);
   }

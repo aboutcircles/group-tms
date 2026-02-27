@@ -4,6 +4,7 @@ import {BlacklistingService} from "../../services/blacklistingService";
 import {SafeGroupService} from "../../services/safeGroupService";
 import {BackingInstanceService} from "../../services/backingInstanceService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {LoggerService} from "../../services/loggerService";
 import {runOnce} from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
@@ -18,6 +19,7 @@ const backingFactoryAddress = process.env.BACKING_FACTORY_ADDRESS || "0xeced9123
 const deployedAtBlock = Number.parseInt(process.env.START_AT_BLOCK || "39743285");
 const expectedTimeTillCompletion = Number.parseInt(process.env.EXPECTED_SECONDS_TILL_COMPLETION || "60");
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
+const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const confirmationBlocks = Number.parseInt(process.env.CONFIRMATION_BLOCKS || "2");
 const safeAddress = process.env.CRC_BACKERS_SAFE_ADDRESS || "";
@@ -43,7 +45,7 @@ if (!dryRun) {
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const chainRpc = new ChainRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
-const slackService = new SlackService(slackWebhookUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const groupService = dryRun ? undefined : new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress);
 // In dry-run mode, skip passing signer keys so BackingInstanceService doesn't
 // eagerly initialise Safe Protocol Kit (which calls eth_chainId via viem).
@@ -58,7 +60,7 @@ let nextFromBlock = deployedAtBlock;
 
 process.on('SIGTERM', async () => {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`);
+    await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
@@ -67,7 +69,7 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received SIGINT signal. Graceful shutdown initiated.`);
+    await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received SIGINT signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
@@ -87,7 +89,7 @@ async function sendStartupNotification(): Promise<void> {
     `- Error Threshold: ${errorsBeforeCrash}`;
 
   try {
-    await slackService.notifySlackStartOrCrash(startupMessage);
+    await slackService.notifySlackStartOrCrash(startupMessage, SlackSeverity.INFO);
     rootLogger.info("Slack startup notification sent successfully.");
   } catch (slackError) {
     rootLogger.warn("Failed to send Slack startup notification:", slackError);
@@ -157,7 +159,7 @@ async function loop() {
             `Last error: ${baseError.message}\n\n` +
             `Service will exit with code 1. Please investigate and restart.`;
 
-          await slackService.notifySlackStartOrCrash(crashMessage);
+          await slackService.notifySlackStartOrCrash(crashMessage, SlackSeverity.CRITICAL);
           rootLogger.info("Slack crash notification sent successfully.");
         } catch (slackError) {
           rootLogger.error("Failed to send Slack crash notification:", slackError);
@@ -199,7 +201,7 @@ main().catch(async (err) => {
     const crashMessage = `🚨 *Backers Group TMS Service is CRASHING*\n\n` +
       `Fatal error in main(): ${asError.message}\n\n` +
       `Service will exit with code 1. Please investigate and restart.`;
-    await slackService.notifySlackStartOrCrash(crashMessage);
+    await slackService.notifySlackStartOrCrash(crashMessage, SlackSeverity.CRITICAL);
   } catch (slackError) {
     rootLogger.error("Failed to send Slack crash notification:", slackError);
   }

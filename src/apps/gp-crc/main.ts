@@ -1,6 +1,7 @@
 import {BlacklistingService} from "../../services/blacklistingService";
 import {LoggerService} from "../../services/loggerService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {MetriSafeService} from "../../services/metriSafeService";
 import {InMemoryAvatarSafeMappingStore} from "../../services/inMemoryAvatarSafeMappingStore";
 import {CirclesRpcService} from "../../services/circlesRpcService";
@@ -23,6 +24,7 @@ const rootLogger = new LoggerService(verboseLogging, "gp-crc");
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
+const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const groupAddress = process.env.GP_CRC_GROUP_ADDRESS || "0xb629a1e86f3efada0f87c83494da8cc34c3f84ef";
 const safeAddress = process.env.GP_CRC_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.GP_CRC_SAFE_SIGNER_PRIVATE_KEY || "";
@@ -37,7 +39,7 @@ const errorTracker = new ConsecutiveErrorTracker(3);
 
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
-const slackService = new SlackService(slackWebhookUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 let groupService: IGroupService | undefined;
 let avatarSafeService: MetriSafeService;
@@ -91,7 +93,7 @@ void notifySlackStartup();
 
 process.on("SIGINT", async () => {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGINT signal. Graceful shutdown initiated.`);
+    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGINT signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
@@ -100,7 +102,7 @@ process.on("SIGINT", async () => {
 
 process.on("SIGTERM", async () => {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`);
+    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
@@ -187,7 +189,7 @@ start().catch((cause) => {
   rootLogger.error("GP-CRC TMS Service encountered an unrecoverable error:");
   rootLogger.error(formatErrorWithCauses(error));
   void slackService.notifySlackStartOrCrash(
-    `🚨 *GP-CRC TMS Service crashed*\n\nLast error: ${error.message}`
+    `🚨 *GP-CRC TMS Service crashed*\n\nLast error: ${error.message}`, SlackSeverity.CRITICAL
   ).catch((slackError: unknown) => {
     rootLogger.warn("Failed to send crash notification to Slack:", slackError);
   });
@@ -209,7 +211,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Dry Run: ${dryRun}`;
 
   try {
-    await slackService.notifySlackStartOrCrash(startupMessage);
+    await slackService.notifySlackStartOrCrash(startupMessage, SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack startup notification sent successfully.");
     } else {
@@ -224,7 +226,7 @@ async function notifySlackStartup(): Promise<void> {
 async function notifySlackRunError(error: Error, consecutiveErrors: number): Promise<void> {
   const message = `⚠️ *GP-CRC TMS Service runOnce error* (${consecutiveErrors} consecutive failures)\n\n${formatErrorWithCauses(error)}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
   } catch (slackError) {
     rootLogger.warn("Failed to send run error notification to Slack:", slackError);
   }
