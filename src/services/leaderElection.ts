@@ -106,6 +106,22 @@ export class LeaderElection {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+    // Release leadership so the standby can acquire immediately instead of
+    // waiting for the staleness timeout (45s).
+    if (this._isLeader) {
+      try {
+        await this.pool.query(
+          `UPDATE group_tms_leader
+           SET last_heartbeat = now() - ($1 * INTERVAL '1 second')
+           WHERE instance_id = $2`,
+          [STALENESS_THRESHOLD_SEC + 1, this.instanceId]
+        );
+        console.log(`[leader-election] Released leadership on shutdown (instance=${this.instanceId})`);
+      } catch (err) {
+        console.warn(`[leader-election] Failed to release leadership on shutdown:`, err instanceof Error ? err.message : err);
+      }
+    }
+    this._isLeader = false;
     await this.pool.end();
   }
 }

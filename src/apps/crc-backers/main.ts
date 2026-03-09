@@ -31,6 +31,7 @@ const errorsBeforeCrash = 3;
 const rootLogger = new LoggerService(verboseLogging);
 
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 if (!dryRun) {
   if (!safeSignerPrivateKey || safeSignerPrivateKey.trim().length === 0) {
@@ -59,22 +60,38 @@ const cowSwapService = new BackingInstanceService(
 // Track the next block to scan purely in memory between loop iterations.
 let nextFromBlock = deployedAtBlock;
 
-process.on('SIGTERM', async () => {
+async function gracefulShutdown(signal: string) {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
+  try {
+    await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
   process.exit(0);
+}
+
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
+
+process.on('uncaughtException', async (err) => {
+  rootLogger.error("Uncaught exception:", formatErrorWithCauses(err instanceof Error ? err : new Error(String(err))));
+  try {
+    await slackService.notifySlackStartOrCrash(`💥 *crc-backers* Uncaught exception: ${err?.message || err}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
-process.on('SIGINT', async () => {
+process.on('unhandledRejection', async (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  rootLogger.error("Unhandled rejection:", formatErrorWithCauses(error));
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received SIGINT signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
-  } catch (error) {
-    rootLogger.error('Failed to send shutdown notification:', error);
-  }
-  process.exit(0);
+    await slackService.notifySlackStartOrCrash(`💥 *crc-backers* Unhandled rejection: ${error.message}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
 async function sendStartupNotification(): Promise<void> {
@@ -154,20 +171,12 @@ async function loop(leaderElection: LeaderElection | null) {
 
       if (errorTracker.shouldAlert()) {
         rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
-
-        try {
-          const crashMessage = `🚨 *Backers Group TMS Service is CRASHING*\n\n` +
-            `${consecutiveErrors} consecutive failures (threshold: ${errorsBeforeCrash}).\n` +
-            `Last error: ${baseError.message}\n\n` +
-            `Service will exit with code 1. Please investigate and restart.`;
-
-          await slackService.notifySlackStartOrCrash(crashMessage, SlackSeverity.CRITICAL);
-          rootLogger.info("Slack crash notification sent successfully.");
-        } catch (slackError) {
-          rootLogger.error("Failed to send Slack crash notification:", slackError);
-        }
-
-        process.exit(1);
+        void slackService.notifySlackStartOrCrash(
+          `🚨 *crc-backers* crashing after ${consecutiveErrors} consecutive failures.\nLast error: ${baseError.message}`,
+          SlackSeverity.CRITICAL
+        ).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
     }
 
@@ -190,7 +199,7 @@ async function refreshBlacklist(): Promise<void> {
 
 async function main() {
   startMetricsServer("crc-backers");
-  const leaderElection = await LeaderElection.create(
+  leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
     slackService,

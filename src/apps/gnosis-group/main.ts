@@ -55,7 +55,9 @@ const circlesRpc = new CirclesRpcService(rpcUrl);
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const scoreCache = new ScoreCache();
-const errorTracker = new ConsecutiveErrorTracker(3);
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 const runLogger = rootLogger.child("run");
 let groupService: IGroupService | undefined;
@@ -104,15 +106,18 @@ rootLogger.info(`  - slackConfigured=${slackConfigured}`);
 
 void notifySlackStartup();
 
-process.on("SIGINT", async () => {
-  await notifySlackShutdown("SIGINT");
+async function gracefulShutdown(signal: NodeJS.Signals) {
+  try {
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
+  await notifySlackShutdown(signal);
   process.exit(0);
-});
+}
 
-process.on("SIGTERM", async () => {
-  await notifySlackShutdown("SIGTERM");
-  process.exit(0);
-});
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
 
 process.on("uncaughtException", async (error) => {
   rootLogger.error("Uncaught exception:", formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
@@ -129,7 +134,7 @@ process.on("unhandledRejection", async (reason) => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gnosis-group");
-  const leaderElection = await LeaderElection.create(
+  leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
     slackService,
@@ -167,10 +172,13 @@ async function mainLoop(): Promise<void> {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
       recordRunError("gnosis-group");
-      rootLogger.error("gnosis-group run failed:");
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
-        await notifySlackRunError(error, consecutiveErrors);
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
     }
 
@@ -241,8 +249,8 @@ start().catch((cause) => {
   const error = cause instanceof Error ? cause : new Error(String(cause));
   rootLogger.error("gnosis-group run encountered an unrecoverable error:");
   rootLogger.error(formatErrorWithCauses(error));
-  void notifySlackFatal(error);
-  process.exitCode = 1;
+  void notifySlackFatal(error).catch(() => {});
+  setTimeout(() => process.exit(1), 3000).unref();
 });
 
 async function notifySlackStartup(): Promise<void> {
