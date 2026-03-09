@@ -37,7 +37,9 @@ const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = !!slackWebhookUrl;
-const errorTracker = new ConsecutiveErrorTracker(3);
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 validateConfig();
 
@@ -72,23 +74,22 @@ function createDryRunGroupService(): IGroupService {
   };
 }
 
-process.on('SIGTERM', async () => {
+async function gracefulShutdown(signal: string) {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *OIC Service Shutting Down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
+  try {
+    await slackService.notifySlackStartOrCrash(`🔄 *OIC Service Shutting Down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
   process.exit(0);
-});
+}
 
-process.on('SIGINT', async () => {
-  try {
-    await slackService.notifySlackStartOrCrash(`🔄 *OIC Service Shutting Down*\n\nService received SIGINT signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
-  } catch (error) {
-    rootLogger.error('Failed to send shutdown notification:', error);
-  }
-  process.exit(0);
-});
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
 
 process.on('uncaughtException', async (err) => {
   try {
@@ -140,7 +141,7 @@ function delay(ms: number): Promise<void> {
 
 async function loop() {
   startMetricsServer("oic");
-  const leaderElection = await LeaderElection.create(
+  leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
     slackService,
@@ -193,10 +194,13 @@ async function loop() {
       const error = err instanceof Error ? err : new Error(String(err));
       const consecutiveErrors = errorTracker.recordError();
       recordRunError("oic");
-      rootLogger.error("OIC runOnce failed:");
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
-        void notifySlackRunError(error, consecutiveErrors);
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
     }
 

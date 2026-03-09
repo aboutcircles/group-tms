@@ -36,7 +36,9 @@ const metriSafeApiKey = process.env.METRI_SAFE_API_KEY || "";
 const fetchPageSize = parseEnvInt("GP_CRC_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
 const pollIntervalMs = 10 * 60 * 1_000;
 const groupBatchSize = DEFAULT_GROUP_BATCH_SIZE;
-const errorTracker = new ConsecutiveErrorTracker(3);
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
@@ -92,27 +94,43 @@ rootLogger.info(`  - dryRun=${dryRun}`);
 
 void notifySlackStartup();
 
-process.on("SIGINT", async () => {
+async function gracefulShutdown(signal: string) {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGINT signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
+  try {
+    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
   process.exit(0);
+}
+
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
+
+process.on("uncaughtException", async (error) => {
+  rootLogger.error("Uncaught exception:", formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
+  try {
+    await slackService.notifySlackStartOrCrash(`💥 *gp-crc* Uncaught exception: ${error?.message || error}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
-process.on("SIGTERM", async () => {
+process.on("unhandledRejection", async (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  rootLogger.error("Unhandled rejection:", formatErrorWithCauses(error));
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
-  } catch (error) {
-    rootLogger.error('Failed to send shutdown notification:', error);
-  }
-  process.exit(0);
+    await slackService.notifySlackStartOrCrash(`💥 *gp-crc* Unhandled rejection: ${error.message}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gp-crc");
-  const leaderElection = await LeaderElection.create(
+  leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
     slackService,
@@ -146,10 +164,13 @@ async function mainLoop(): Promise<void> {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
       recordRunError("gp-crc");
-      rootLogger.error("runOnce failed:");
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
-        void notifySlackRunError(error, consecutiveErrors);
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
     }
 

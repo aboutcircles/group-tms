@@ -38,7 +38,9 @@ const slackConfigured = slackWebhookUrl.trim().length > 0;
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const enablementStore = new InMemoryRouterEnablementStore();
-const errorTracker = new ConsecutiveErrorTracker(3);
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 async function refreshBlacklist(): Promise<void> {
   try {
@@ -76,31 +78,45 @@ const runLogger = rootLogger.child("run");
 
 void notifySlackStartup();
 
-process.on("SIGINT", async () => {
+async function gracefulShutdown(signal: string) {
+  try {
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
   try {
     await slackService.notifySlackStartOrCrash(
-      `🔄 *Router-TMS Service shutting down*\n\nService received SIGINT signal.`, SlackSeverity.INFO
+      `🔄 *Router-TMS Service shutting down*\n\nService received ${signal} signal.`, SlackSeverity.INFO
     );
   } catch (error) {
     rootLogger.error("Failed to send shutdown notification:", error);
   }
   process.exit(0);
+}
+
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
+
+process.on("uncaughtException", async (error) => {
+  rootLogger.error("Uncaught exception:", formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
+  try {
+    await slackService.notifySlackStartOrCrash(`💥 *router-tms* Uncaught exception: ${error?.message || error}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
-process.on("SIGTERM", async () => {
+process.on("unhandledRejection", async (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  rootLogger.error("Unhandled rejection:", formatErrorWithCauses(error));
   try {
-    await slackService.notifySlackStartOrCrash(
-      `🔄 *Router-TMS Service shutting down*\n\nService received SIGTERM signal.`, SlackSeverity.INFO
-    );
-  } catch (error) {
-    rootLogger.error("Failed to send shutdown notification:", error);
-  }
-  process.exit(0);
+    await slackService.notifySlackStartOrCrash(`💥 *router-tms* Unhandled rejection: ${error.message}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("router-tms");
-  const leaderElection = await LeaderElection.create(
+  leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
     slackService,
@@ -144,10 +160,13 @@ async function mainLoop(): Promise<void> {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
       recordRunError("router-tms");
-      rootLogger.error("router-tms run failed:");
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
-        void notifySlackRunError(error, consecutiveErrors);
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
     }
 
