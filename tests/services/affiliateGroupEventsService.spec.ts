@@ -1,4 +1,5 @@
 import {AffiliateGroupEventsService} from "../../src/services/affiliateGroupEventsService";
+import {isTransientRpcError} from "../../src/services/retryWithBackoff";
 
 // --- Mock ethers provider ---
 const mockGetBlockNumber = jest.fn();
@@ -12,6 +13,30 @@ jest.mock("ethers", () => {
       getBlockNumber: mockGetBlockNumber,
       getLogs: mockGetLogs,
     })),
+  };
+});
+
+// Mock retryWithBackoff to run without delays but preserve retry semantics
+jest.mock("../../src/services/retryWithBackoff", () => {
+  const actual = jest.requireActual("../../src/services/retryWithBackoff");
+  return {
+    ...actual,
+    retryWithBackoff: jest.fn(async (fn: () => Promise<any>, opts?: any) => {
+      const maxRetries = opts?.maxRetries ?? 3;
+      let lastError: unknown;
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          return await fn();
+        } catch (err) {
+          lastError = err;
+          if (!actual.isTransientRpcError(err) || attempt >= maxRetries) {
+            throw err;
+          }
+          // No delay in tests
+        }
+      }
+      throw lastError;
+    }),
   };
 });
 
@@ -119,8 +144,6 @@ describe("AffiliateGroupEventsService", () => {
       .mockResolvedValueOnce([log]);
 
     const svc = new AffiliateGroupEventsService("http://rpc.invalid");
-    // Override retryDelayMs to 0 for fast tests
-    (svc as any).retryDelayMs = 0;
 
     const events = await svc.fetchAffiliateGroupChanged(REGISTRY, TARGET_GROUP, 1, 100);
     expect(mockGetLogs).toHaveBeenCalledTimes(2);
@@ -134,7 +157,6 @@ describe("AffiliateGroupEventsService", () => {
       .mockResolvedValueOnce([]);
 
     const svc = new AffiliateGroupEventsService("http://rpc.invalid");
-    (svc as any).retryDelayMs = 0;
 
     await svc.fetchAffiliateGroupChanged(REGISTRY, TARGET_GROUP, 1, 100);
     expect(mockGetLogs).toHaveBeenCalledTimes(2);
@@ -145,7 +167,6 @@ describe("AffiliateGroupEventsService", () => {
     mockGetLogs.mockRejectedValueOnce(fatalErr);
 
     const svc = new AffiliateGroupEventsService("http://rpc.invalid");
-    (svc as any).retryDelayMs = 0;
 
     await expect(
       svc.fetchAffiliateGroupChanged(REGISTRY, TARGET_GROUP, 1, 100)
@@ -158,7 +179,6 @@ describe("AffiliateGroupEventsService", () => {
     mockGetLogs.mockRejectedValue(timeoutErr);
 
     const svc = new AffiliateGroupEventsService("http://rpc.invalid");
-    (svc as any).retryDelayMs = 0;
 
     await expect(
       svc.fetchAffiliateGroupChanged(REGISTRY, TARGET_GROUP, 1, 100)
