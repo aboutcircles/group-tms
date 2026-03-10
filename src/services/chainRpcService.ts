@@ -9,6 +9,10 @@ export class ChainRpcService implements IChainRpc {
     this.provider = createProvider(rpcUrl) as JsonRpcProvider;
   }
 
+  destroy(): void {
+    this.provider.destroy();
+  }
+
   async getHeadBlock(): Promise<{ blockNumber: number; timestamp: number }> {
     const block = await this.provider.getBlock("latest");
     if (!block) {

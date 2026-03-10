@@ -57,6 +57,8 @@ describeIntegration("Integration: RPC Health", () => {
 describeIntegration("Integration: ChainRpcService", () => {
   const chain = new ChainRpcService(RPC_URL);
 
+  afterAll(() => chain.destroy());
+
   it("getHeadBlock returns a valid block with reasonable timestamp", async () => {
     const head = await chain.getHeadBlock();
     expect(head.blockNumber).toBeGreaterThan(30_000_000);
@@ -69,6 +71,10 @@ describeIntegration("Integration: ChainRpcService", () => {
 
 describeIntegration("Integration: CirclesRpcService", () => {
   const circles = new CirclesRpcService(RPC_URL);
+  // ChainRpcService used by circles_events tests — shared to avoid leaking providers
+  const chain = new ChainRpcService(RPC_URL);
+
+  afterAll(() => chain.destroy());
 
   it("isHuman returns boolean for a known address", async () => {
     const result = await circles.isHuman(KNOWN_HUMAN);
@@ -102,8 +108,6 @@ describeIntegration("Integration: CirclesRpcService", () => {
 
   describe("circles_events (the SDK workaround path)", () => {
     it("fetchBackingInitiatedEvents returns valid event shapes", async () => {
-      // Query a narrow recent range to keep it fast
-      const chain = new ChainRpcService(RPC_URL);
       const head = await chain.getHeadBlock();
       // Look back ~2 hours (~1440 blocks at 5s) — may be empty, that's OK
       const fromBlock = head.blockNumber - 1440;
@@ -122,7 +126,6 @@ describeIntegration("Integration: CirclesRpcService", () => {
     }, TIMEOUT_MS);
 
     it("fetchBackingCompletedEvents returns valid event shapes", async () => {
-      const chain = new ChainRpcService(RPC_URL);
       const head = await chain.getHeadBlock();
       const fromBlock = head.blockNumber - 1440;
 
@@ -147,6 +150,8 @@ describeIntegration("Integration: CirclesRpcService", () => {
 describeIntegration("Integration: BackingInstanceService", () => {
   const backing = new BackingInstanceService(RPC_URL);
 
+  afterAll(() => backing.destroy());
+
   it("simulateCreateLbp returns a known result string for a real instance", async () => {
     const result = await backing.simulateCreateLbp(KNOWN_BACKING_INSTANCE);
     // Should be one of the defined result types — not throw
@@ -169,12 +174,18 @@ describeIntegration("Integration: BackingInstanceService", () => {
 });
 
 describeIntegration("Integration: AffiliateGroupEventsService", () => {
+  const chain = new ChainRpcService(RPC_URL);
+  const svc = new AffiliateGroupEventsService(RPC_URL);
+
+  afterAll(() => {
+    chain.destroy();
+    svc.destroy();
+  });
+
   it("fetches events without error for a small block range", async () => {
-    const chain = new ChainRpcService(RPC_URL);
     const head = await chain.getHeadBlock();
     const fromBlock = head.blockNumber - 500;
 
-    const svc = new AffiliateGroupEventsService(RPC_URL);
     const events = await svc.fetchAffiliateGroupChanged(
       AFFILIATE_REGISTRY,
       OIC_GROUP,
