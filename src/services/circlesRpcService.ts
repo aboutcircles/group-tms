@@ -2,12 +2,13 @@ import {CirclesRpc, PagedQuery} from "@aboutcircles/sdk-rpc";
 import {getAddress} from "ethers";
 import {ICirclesRpc, BackingCompletedEvent, BackingInitiatedEvent} from "../interfaces/ICirclesRpc";
 import {ILoggerService} from "../interfaces/ILoggerService";
+import {primaryRpcUrl} from "./rpcProvider";
 
 export class CirclesRpcService implements ICirclesRpc {
   private readonly rpc: CirclesRpc;
 
   constructor(rpcUrl: string) {
-    this.rpc = new CirclesRpc(rpcUrl);
+    this.rpc = new CirclesRpc(primaryRpcUrl(rpcUrl));
   }
 
   async isHuman(address: string): Promise<boolean> {

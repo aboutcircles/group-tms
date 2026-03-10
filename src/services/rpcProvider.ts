@@ -13,6 +13,14 @@ export function parseRpcUrls(rpcUrl: string): string[] {
     .filter((u) => u.length > 0);
 }
 
+/** Return the first URL from a (possibly comma-separated) RPC_URL string.
+ *  Use this when passing a URL to third-party SDKs that only accept a single endpoint. */
+export function primaryRpcUrl(rpcUrl: string): string {
+  const urls = parseRpcUrls(rpcUrl);
+  if (urls.length === 0) throw new Error("RPC_URL must contain at least one URL");
+  return urls[0];
+}
+
 export function createProvider(rpcUrl: string): JsonRpcProvider | FallbackProvider {
   const urls = parseRpcUrls(rpcUrl);
   if (urls.length === 0) {
