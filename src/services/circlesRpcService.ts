@@ -47,9 +47,10 @@ export class CirclesRpcService implements ICirclesRpc {
   }
 
   async fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingCompletedEvent[]> {
+    // circles-nethermind-plugin expects block numbers as strings in circles_events
     return await this.rpc.query.events<BackingCompletedEvent>(
-      fromBlock,
-      toBlock ?? null,
+      String(fromBlock) as any,
+      toBlock != null ? String(toBlock) as any : null,
       ["CrcV2_CirclesBackingCompleted"] as any,
       backingFactoryAddress,
     );
@@ -57,8 +58,8 @@ export class CirclesRpcService implements ICirclesRpc {
 
   async fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingInitiatedEvent[]> {
     return await this.rpc.query.events<BackingInitiatedEvent>(
-      fromBlock,
-      toBlock ?? null,
+      String(fromBlock) as any,
+      toBlock != null ? String(toBlock) as any : null,
       ["CrcV2_CirclesBackingInitiated"] as any,
       backingFactoryAddress,
     );
