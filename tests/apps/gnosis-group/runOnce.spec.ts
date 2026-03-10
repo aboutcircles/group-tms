@@ -1,41 +1,3 @@
-let registerHumanPages: string[][] = [];
-
-jest.mock("@circles-sdk/data", () => {
-  class CirclesRpc {
-    constructor(public readonly url: string) {
-      // noop
-    }
-  }
-
-  class CirclesQuery<T> {
-    currentPage: {results: T[]} | null = null;
-    private pageIndex = 0;
-
-    constructor(public readonly rpc: CirclesRpc, public readonly options: any) {
-      // noop
-    }
-
-    async queryNextPage(): Promise<boolean> {
-      if (this.pageIndex >= registerHumanPages.length) {
-        return false;
-      }
-
-      const avatars = registerHumanPages[this.pageIndex++];
-      this.currentPage = {
-        results: avatars.map((avatar, index) => ({
-          avatar,
-          blockNumber: 100 + index,
-          transactionIndex: index,
-          logIndex: index
-        })) as unknown as T[]
-      };
-      return true;
-    }
-  }
-
-  return {CirclesRpc, CirclesQuery};
-});
-
 import {getAddress} from "ethers";
 import {runOnce, type Deps, type RunConfig} from "../../../src/apps/gnosis-group/logic";
 import {FakeBlacklist, FakeCirclesRpc, FakeGroupService, FakeLogger} from "../../../fakes/fakes";
@@ -102,19 +64,14 @@ describe("gnosis-group runOnce", () => {
   const trustedTarget = getAddress("0x3000000000000000000000000000000000000003");
   const customAutoTrustGroup = getAddress("0x4000000000000000000000000000000000000004");
 
-  beforeEach(() => {
-    registerHumanPages = [];
-  });
-
   it("fetches relative trust scores when running in dry-run mode", async () => {
     const highScoreRaw = "0x4000000000000000000000000000000000000004";
     const lowScoreRaw = "0x5000000000000000000000000000000000000005";
     const highScoreAddress = getAddress(highScoreRaw);
     const lowScoreAddress = getAddress(lowScoreRaw);
 
-    registerHumanPages = [[highScoreAddress, lowScoreAddress]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [highScoreAddress, lowScoreAddress];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
 
@@ -176,9 +133,8 @@ describe("gnosis-group runOnce", () => {
     const previousEnvThreshold = process.env.GNOSIS_GROUP_SCORE_THRESHOLD;
     process.env.GNOSIS_GROUP_SCORE_THRESHOLD = "42";
 
-    registerHumanPages = [[trustedTarget]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [trustedTarget];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
 
@@ -240,9 +196,8 @@ describe("gnosis-group runOnce", () => {
     const blockedAddress = getAddress(blockedRaw);
     const allowedAddress = getAddress(allowedRaw);
 
-    registerHumanPages = [[blockedAddress, allowedAddress]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [blockedAddress, allowedAddress];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
 
@@ -296,9 +251,8 @@ describe("gnosis-group runOnce", () => {
     const alreadyTrusted = getAddress(alreadyTrustedRaw);
     const eligible = getAddress(eligibleRaw);
 
-    registerHumanPages = [[alreadyTrusted, eligible]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [alreadyTrusted, eligible];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [alreadyTrusted];
 
@@ -358,9 +312,8 @@ describe("gnosis-group runOnce", () => {
     const second = getAddress("0xb00000000000000000000000000000000000000b");
     const third = getAddress("0xc00000000000000000000000000000000000000c");
 
-    registerHumanPages = [[first, second, third]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [first, second, third];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
 
@@ -424,9 +377,8 @@ describe("gnosis-group runOnce", () => {
     const failing = getAddress("0xd00000000000000000000000000000000000000d");
     const succeeding = getAddress("0xe00000000000000000000000000000000000000e");
 
-    registerHumanPages = [[failing, succeeding]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [failing, succeeding];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
 
@@ -492,9 +444,8 @@ describe("gnosis-group runOnce", () => {
     const stale = getAddress(staleRaw);
     const active = getAddress(activeRaw);
 
-    registerHumanPages = [[active]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [active];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [stale];
 
@@ -547,9 +498,8 @@ describe("gnosis-group runOnce", () => {
     const stale = getAddress("0xc00000000000000000000000000000000000000c");
     const active = getAddress("0xd00000000000000000000000000000000000000d");
 
-    registerHumanPages = [[active]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [active];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [stale];
 
@@ -595,9 +545,8 @@ describe("gnosis-group runOnce", () => {
     const stale = getAddress("0xe00000000000000000000000000000000000000e");
     const active = getAddress("0xf00000000000000000000000000000000000000f");
 
-    registerHumanPages = [[active]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [active];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [stale];
 
@@ -693,9 +642,8 @@ describe("gnosis-group runOnce", () => {
   });
 
   it("returns early when the RegisterHuman table is empty", async () => {
-    registerHumanPages = [];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
 
@@ -729,9 +677,8 @@ describe("gnosis-group runOnce", () => {
     const autoTrustedRaw = "0xc00000000000000000000000000000000000000c";
     const autoTrusted = getAddress(autoTrustedRaw);
 
-    registerHumanPages = [[autoTrusted]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [autoTrusted];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
     circlesRpc.trusteesByTruster[customAutoTrustGroup.toLowerCase()] = [autoTrusted];

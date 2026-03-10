@@ -9,40 +9,6 @@ import {
   FakeLogger
 } from "../../../fakes/fakes";
 
-let registerHumanPages: string[][] = [];
-
-// Mock the Circles SDK query layer so runOnce can page through RegisterHuman rows.
-jest.mock("@circles-sdk/data", () => {
-  class CirclesRpc {
-    constructor(public readonly url: string) {}
-  }
-
-  class CirclesQuery<T> {
-    currentPage: {results: T[]} | null = null;
-    private pageIndex = 0;
-
-    constructor(public readonly rpc: CirclesRpc, public readonly options: any) {}
-
-    async queryNextPage(): Promise<boolean> {
-      if (this.pageIndex >= registerHumanPages.length) {
-        return false;
-      }
-      const avatars = registerHumanPages[this.pageIndex++];
-      this.currentPage = {
-        results: avatars.map((avatar, index) => ({
-          avatar,
-          blockNumber: 100 + index,
-          transactionIndex: index,
-          logIndex: index
-        })) as unknown as T[]
-      };
-      return true;
-    }
-  }
-
-  return {CirclesRpc, CirclesQuery};
-});
-
 const RPC_URL = "https://rpc.stub";
 const GROUP_ADDRESS = "0x1000000000000000000000000000000000000000";
 
@@ -75,10 +41,6 @@ function makeConfig(overrides?: Partial<RunConfig>): RunConfig {
 }
 
 describe("gp-crc runOnce (query-based)", () => {
-  beforeEach(() => {
-    registerHumanPages = [];
-  });
-
   it("throws when configured group address is invalid", async () => {
     const deps = makeDeps();
     const cfg = makeConfig({groupAddress: "not-an-address"});
@@ -96,13 +58,15 @@ describe("gp-crc runOnce (query-based)", () => {
   it("trusts allowed avatars with safes and skips blacklisted ones", async () => {
     const allowedInput = "0xaaaa000000000000000000000000000000000000";
     const blockedInput = "0xbbbb000000000000000000000000000000000000";
-    registerHumanPages = [[allowedInput, blockedInput, allowedInput]];
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [allowedInput, blockedInput, allowedInput];
 
     const blacklistingService = new FakeBlacklist(new Set([blockedInput]));
     const avatarSafeService = new FakeAvatarSafeService({[allowedInput]: "0xsafe1"});
     const groupService = new FakeGroupService();
 
-    const deps = makeDeps({blacklistingService, avatarSafeService, groupService});
+    const deps = makeDeps({circlesRpc, blacklistingService, avatarSafeService, groupService});
     const cfg = makeConfig();
 
     const outcome = await runOnce(deps, cfg);
@@ -121,9 +85,9 @@ describe("gp-crc runOnce (query-based)", () => {
   it("skips avatars that are already trusted in the group", async () => {
     const alreadyTrusted = "0x1111000000000000000000000000000000000000";
     const newcomer = "0x2222000000000000000000000000000000000000";
-    registerHumanPages = [[alreadyTrusted, newcomer]];
 
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [alreadyTrusted, newcomer];
     circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [alreadyTrusted];
 
     const avatarSafeService = new FakeAvatarSafeService({
@@ -149,14 +113,16 @@ describe("gp-crc runOnce (query-based)", () => {
   it("skips allowed avatars without configured safes", async () => {
     const withSafe = "0x1111000000000000000000000000000000000000";
     const withoutSafe = "0x2222000000000000000000000000000000000000";
-    registerHumanPages = [[withSafe, withoutSafe]];
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [withSafe, withoutSafe];
 
     const avatarSafeService = new FakeAvatarSafeService({
       [withSafe]: "0xsafe1111"
     });
     const groupService = new FakeGroupService();
 
-    const deps = makeDeps({avatarSafeService, groupService});
+    const deps = makeDeps({circlesRpc, avatarSafeService, groupService});
     const cfg = makeConfig();
 
     const outcome = await runOnce(deps, cfg);
@@ -168,10 +134,12 @@ describe("gp-crc runOnce (query-based)", () => {
 
   it("supports dry-run mode by skipping on-chain trust calls", async () => {
     const avatarInput = "0xcccc000000000000000000000000000000000000";
-    registerHumanPages = [[avatarInput]];
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
 
     const groupService = new FakeGroupService();
-    const deps = makeDeps({groupService});
+    const deps = makeDeps({circlesRpc, groupService});
     const cfg = makeConfig({dryRun: true});
 
     const outcome = await runOnce(deps, cfg);
@@ -184,7 +152,9 @@ describe("gp-crc runOnce (query-based)", () => {
 
   it("retries trust batches on retryable errors before succeeding", async () => {
     const avatarInput = "0xdddd000000000000000000000000000000000000";
-    registerHumanPages = [[avatarInput]];
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
 
     class FlakyGroupService extends FakeGroupService {
       attempts = 0;
@@ -200,7 +170,7 @@ describe("gp-crc runOnce (query-based)", () => {
     }
 
     const groupService = new FlakyGroupService();
-    const deps = makeDeps({groupService});
+    const deps = makeDeps({circlesRpc, groupService});
     const cfg = makeConfig();
 
     const outcome = await runOnce(deps, cfg);
@@ -211,7 +181,9 @@ describe("gp-crc runOnce (query-based)", () => {
 
   it("retries blacklist checks on retryable errors", async () => {
     const avatarInput = "0xffff111100000000000000000000000000000000";
-    registerHumanPages = [[avatarInput]];
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
 
     class FlakyBlacklistService extends FakeBlacklist {
       attempts = 0;
@@ -227,7 +199,7 @@ describe("gp-crc runOnce (query-based)", () => {
     }
 
     const blacklistingService = new FlakyBlacklistService();
-    const deps = makeDeps({blacklistingService});
+    const deps = makeDeps({circlesRpc, blacklistingService});
     const cfg = makeConfig();
 
     const outcome = await runOnce(deps, cfg);
@@ -238,9 +210,9 @@ describe("gp-crc runOnce (query-based)", () => {
 
   it("untrusts avatars that become blacklisted", async () => {
     const avatarInput = "0x4444000000000000000000000000000000000000";
-    registerHumanPages = [[]]; // No new humans; trust list only
 
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = []; // No new humans; trust list only
     circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarInput];
 
     const blacklistingService = new FakeBlacklist(new Set([avatarInput]));
@@ -258,9 +230,9 @@ describe("gp-crc runOnce (query-based)", () => {
 
   it("untrusts avatars that no longer have an associated safe", async () => {
     const avatarInput = "0x5555000000000000000000000000000000000000";
-    registerHumanPages = [[]];
 
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [];
     circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarInput];
 
     const avatarSafeService = new FakeAvatarSafeService({}); // no safes
@@ -280,7 +252,9 @@ describe("gp-crc runOnce (query-based)", () => {
     const avatarA = "0x1111000000000000000000000000000000000000";
     const avatarB = "0x2222000000000000000000000000000000000000";
     const sharedSafe = "0xSAFE000000000000000000000000000000000001";
-    registerHumanPages = [[avatarA, avatarB]];
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarA, avatarB];
 
     const avatarSafeService = new FakeAvatarSafeService({
       [avatarA]: {safe: sharedSafe, timestamp: 100},
@@ -288,7 +262,7 @@ describe("gp-crc runOnce (query-based)", () => {
     });
 
     const groupService = new FakeGroupService();
-    const deps = makeDeps({avatarSafeService, groupService});
+    const deps = makeDeps({circlesRpc, avatarSafeService, groupService});
     const cfg = makeConfig();
 
     const outcome = await runOnce(deps, cfg);
@@ -306,9 +280,9 @@ describe("gp-crc runOnce (query-based)", () => {
     const oldAvatarInput = "0x1111000000000000000000000000000000000000";
     const newAvatarInput = "0x2222000000000000000000000000000000000000";
     const sharedSafe = "0xSAFE000000000000000000000000000000000001";
-    registerHumanPages = [[newAvatarInput]];
 
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [newAvatarInput];
     circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [oldAvatarInput];
 
     const avatarSafeService = new FakeAvatarSafeService({
@@ -354,9 +328,9 @@ describe("gp-crc runOnce (query-based)", () => {
     const oldAvatarInput = "0x1111000000000000000000000000000000000000";
     const candidateAvatarInput = "0x2222000000000000000000000000000000000000";
     const sharedSafe = "0xSAFE000000000000000000000000000000000001";
-    registerHumanPages = [[candidateAvatarInput]];
 
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [candidateAvatarInput];
     circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [oldAvatarInput];
 
     const avatarSafeService = new FakeAvatarSafeService({
@@ -390,9 +364,9 @@ describe("gp-crc runOnce (query-based)", () => {
     const oldAvatarInput = "0x1111000000000000000000000000000000000000";
     const candidateAvatarInput = "0x2222000000000000000000000000000000000000";
     const sharedSafe = "0xSAFE000000000000000000000000000000000001";
-    registerHumanPages = [[candidateAvatarInput]];
 
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [candidateAvatarInput];
     circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [oldAvatarInput];
 
     const avatarSafeService = new FakeAvatarSafeService({

@@ -1,5 +1,3 @@
-jest.mock("@circles-sdk/data", () => ({}));
-
 import {getAddress} from "ethers";
 import {computeTrustPlan} from "../../../src/apps/gnosis-group/logic";
 

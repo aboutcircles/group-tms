@@ -19,7 +19,8 @@
     "test:coverage": "jest --config jest.config.ts --coverage"
   },
   "dependencies": {
-    "@circles-sdk/data": "^0.29.1",
+    "@aboutcircles/sdk-rpc": "^0.1.24",
+    "@aboutcircles/sdk-types": "^0.1.24",
     "@safe-global/protocol-kit": "^6.1.2",
     "ethers": "^6.15.0",
     "multihashes": "^4.0.3",
@@ -28,8 +29,8 @@
   },
   "devDependencies": {
     "@types/jest": "^29.4.1",
-    "@types/pg": "^8.11.0",
     "@types/node": "^20.11.2",
+    "@types/pg": "^8.11.0",
     "ts-jest": "^29.4.1",
     "ts-node": "^10.9.1",
     "typescript": "^5.7.3"

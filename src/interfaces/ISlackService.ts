@@ -1,4 +1,4 @@
-import {CrcV2_CirclesBackingInitiated} from "@circles-sdk/data/dist/events/events";
+import {BackingInitiatedEvent} from "./ICirclesRpc";
 
 export enum SlackSeverity {
     CRITICAL = "critical",
@@ -8,7 +8,7 @@ export enum SlackSeverity {
 
 export interface ISlackService {
 
-    notifyBackingNotCompleted(backingInitiatedEvent: CrcV2_CirclesBackingInitiated, reason: string): Promise<void>;
+    notifyBackingNotCompleted(backingInitiatedEvent: BackingInitiatedEvent, reason: string): Promise<void>;
 
     notifySlackStartOrCrash(message: string, severity?: SlackSeverity): Promise<void>;
 }

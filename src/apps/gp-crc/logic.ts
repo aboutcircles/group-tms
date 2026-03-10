@@ -1,4 +1,3 @@
-import {CirclesQuery, CirclesRpc} from "@circles-sdk/data";
 import {getAddress} from "ethers";
 import {IBlacklistingService, IBlacklistServiceVerdict} from "../../interfaces/IBlacklistingService";
 import {ILoggerService} from "../../interfaces/ILoggerService";
@@ -37,13 +36,6 @@ export type RunOutcome = {
   safeReassignmentUntrustedAvatars: string[];
 };
 
-type RegisterHumanRow = {
-  avatar?: string;
-  blockNumber: number;
-  transactionIndex: number;
-  logIndex: number;
-};
-
 export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
 export const DEFAULT_GROUP_BATCH_SIZE = 10;
 
@@ -75,7 +67,7 @@ export async function runOnce(
   }
 
   const humansLogger = logger.child("humans");
-  const humanAvatars = await fetchAllHumanAvatars(cfg.rpcUrl, fetchPageSize, humansLogger);
+  const humanAvatars = await circlesRpc.fetchAllHumanAvatars(fetchPageSize, humansLogger);
   const uniqueAvatars = uniqueNormalizedAddresses(humanAvatars);
 
   humansLogger.info(`Fetched ${humanAvatars.length} RegisterHuman rows (${uniqueAvatars.length} unique avatars).`);
@@ -389,43 +381,6 @@ function normalizeAddress(value: string): string | null {
   } catch {
     return null;
   }
-}
-
-async function fetchAllHumanAvatars(
-  rpcUrl: string,
-  pageSize: number,
-  logger: ILoggerService
-): Promise<string[]> {
-  const rpc = new CirclesRpc(rpcUrl);
-  const query = new CirclesQuery<RegisterHumanRow>(rpc, {
-    namespace: "CrcV2",
-    table: "RegisterHuman",
-    columns: ["avatar", "blockNumber", "transactionIndex", "logIndex"],
-    sortOrder: "ASC",
-    limit: pageSize
-  });
-
-  const avatars: string[] = [];
-  let pages = 0;
-
-  while (await query.queryNextPage()) {
-    pages += 1;
-    const rows = query.currentPage?.results ?? [];
-    for (const row of rows) {
-      if (!row || typeof row.avatar !== "string") {
-        continue;
-      }
-
-      const normalized = normalizeAddress(row.avatar);
-      if (normalized) {
-        avatars.push(normalized);
-      }
-    }
-  }
-
-  logger.info(`Fetched ${avatars.length} avatars from RegisterHuman table across ${pages} page(s).`);
-
-  return avatars;
 }
 
 function uniqueNormalizedAddresses(addresses: string[]): string[] {
