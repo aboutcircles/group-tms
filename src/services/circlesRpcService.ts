@@ -47,19 +47,20 @@ export class CirclesRpcService implements ICirclesRpc {
   }
 
   /**
-   * Workaround: sdk-rpc v0.1.24 sends circles_events params as
-   * [fromBlock, toBlock, eventTypes, address, ...] but the plugin expects
-   * [address, fromBlock, toBlock, eventTypes, ...]. Use raw client.call
-   * until the SDK bug is fixed.
+   * Workaround: sdk-rpc v0.1.24 sends circles_events params in wrong order.
+   * Uses raw client.call with correct param order: [address, fromBlock, toBlock, eventTypes, filterPredicates].
+   * Backing events aren't emitted by the factory — they're emitted by individual
+   * backing instances, so we query all events and filter by emitter column.
    */
   private async fetchEvents<T>(
-    address: string,
+    emitterAddress: string,
     fromBlock: number,
     toBlock: number | null,
     eventTypes: string[],
   ): Promise<T[]> {
     const result = await this.rpc.client.call("circles_events", [
-      address, fromBlock, toBlock, eventTypes,
+      undefined, fromBlock, toBlock, eventTypes,
+      [{ Type: "FilterPredicate", FilterType: "Equals", Column: "emitter", Value: emitterAddress }],
     ]);
     return (result as any)?.events?.map((e: any) => ({
       $event: e.event,
