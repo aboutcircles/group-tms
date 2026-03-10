@@ -2,6 +2,7 @@ import {Contract, Interface, JsonRpcProvider, getAddress} from "ethers";
 import {GroupOwnerAndServiceAddress, IGroupService} from "../interfaces/IGroupService";
 import {GROUP_MINI_ABI} from "./groupService";
 import {SafeTransactionExecutor} from "./safeTransactionExecutor";
+import {createProvider} from "./rpcProvider";
 
 const GROUP_INTERFACE = new Interface(GROUP_MINI_ABI);
 const MAX_UINT96 = (1n << 96n) - 1n;
@@ -11,7 +12,7 @@ export class SafeGroupService implements IGroupService {
   private readonly executor: SafeTransactionExecutor;
 
   constructor(rpcUrl: string, signerPrivateKey: string, safeAddress: string) {
-    this.provider = new JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
     this.executor = new SafeTransactionExecutor(rpcUrl, signerPrivateKey, safeAddress);
   }
 

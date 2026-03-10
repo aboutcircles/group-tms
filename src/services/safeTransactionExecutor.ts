@@ -1,5 +1,7 @@
 import Safe from "@safe-global/protocol-kit";
 import {getAddress, JsonRpcProvider} from "ethers";
+import {retryWithBackoff} from "./retryWithBackoff";
+import {createProvider} from "./rpcProvider";
 
 /** Default timeout for waiting on tx confirmation (5 minutes). */
 const DEFAULT_TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000;
@@ -35,7 +37,7 @@ export class SafeTransactionExecutor {
       throw new Error("Safe address is required");
     }
 
-    this.provider = new JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
     this.safeAddress = getAddress(safeAddress);
     this.safePromise = Safe.init({
       provider: rpcUrl,
@@ -65,7 +67,7 @@ export class SafeTransactionExecutor {
       ]
     });
 
-    const execution = await safe.executeTransaction(safeTx);
+    const execution = await retryWithBackoff(() => safe.executeTransaction(safeTx));
 
     const txHash =
       (execution as any).hash ?? (execution as any).transactionResponse?.hash;
