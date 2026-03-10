@@ -1,6 +1,8 @@
 import {GroupOwnerAndServiceAddress, IGroupService} from "../interfaces/IGroupService";
 import {Contract, getAddress, JsonRpcProvider, Wallet} from "ethers";
 import {TransactionConfirmationTimeoutError} from "./safeTransactionExecutor";
+import {retryWithBackoff} from "./retryWithBackoff";
+import {createProvider} from "./rpcProvider";
 
 const TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -27,7 +29,7 @@ export class GroupService implements IGroupService {
   private readonly wallet: Wallet;
 
   constructor(private readonly rpcUrl: string, private readonly servicePrivateKey: string) {
-    this.provider = new JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
     this.wallet = new Wallet(servicePrivateKey, this.provider);
   }
 
@@ -36,7 +38,7 @@ export class GroupService implements IGroupService {
 
     const expiry: bigint = (1n << 96n) - 1n;
 
-    const tx = await group.trustBatchWithConditions(trusteeAddresses, expiry);
+    const tx = await retryWithBackoff(() => group.trustBatchWithConditions(trusteeAddresses, expiry));
     const receipt = await waitWithTimeout(tx, TX_CONFIRMATION_TIMEOUT_MS);
 
     if (!receipt || receipt.status !== 1) {
@@ -50,7 +52,7 @@ export class GroupService implements IGroupService {
 
     const group = this.getWritableGroupContract(groupAddress);
 
-    const tx = await group.trustBatchWithConditions(trusteeAddresses, 0n);
+    const tx = await retryWithBackoff(() => group.trustBatchWithConditions(trusteeAddresses, 0n));
     const receipt = await waitWithTimeout(tx, TX_CONFIRMATION_TIMEOUT_MS);
 
     if (!receipt || receipt.status !== 1) {

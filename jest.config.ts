@@ -39,5 +39,5 @@ module.exports = {
     ]
   },
   // Transpile ESM-only @circles-sdk packages so CommonJS Jest can execute them.
-  transformIgnorePatterns: ["/node_modules/(?!@circles-sdk/)"]
+  transformIgnorePatterns: ["/node_modules/(?!@aboutcircles/)"]
 };

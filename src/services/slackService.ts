@@ -1,5 +1,5 @@
 import {ISlackService, SlackSeverity} from "../interfaces/ISlackService";
-import {CrcV2_CirclesBackingInitiated} from "@circles-sdk/data/dist/events/events";
+import {BackingInitiatedEvent} from "../interfaces/ICirclesRpc";
 
 export class SlackService implements ISlackService {
   private readonly tag: string;
@@ -24,7 +24,7 @@ export class SlackService implements ISlackService {
     return this.alertWebhookUrl;
   }
 
-  async notifyBackingNotCompleted(e: CrcV2_CirclesBackingInitiated, reason: string): Promise<void> {
+  async notifyBackingNotCompleted(e: BackingInitiatedEvent, reason: string): Promise<void> {
     const text =
       `${this.tag} ⚠️ Backing stuck. Reason: ${reason}.
 - backer: ${e.backer}

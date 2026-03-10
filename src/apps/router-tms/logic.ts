@@ -1,17 +1,9 @@
-import {CirclesQuery, CirclesRpc} from "@circles-sdk/data";
 import {getAddress} from "ethers";
 import {IBlacklistingService, IBlacklistServiceVerdict} from "../../interfaces/IBlacklistingService";
 import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {IRouterService} from "../../interfaces/IRouterService";
 import {IRouterEnablementStore} from "../../interfaces/IRouterEnablementStore";
-
-type RegisterHumanRow = {
-  avatar?: string;
-  blockNumber: number;
-  transactionIndex: number;
-  logIndex: number;
-};
 
 export type RunConfig = {
   rpcUrl: string;
@@ -74,7 +66,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   await assertBaseGroupIsGroupAvatar(baseGroupAddress, isHuman, logger);
 
   logger.info("Fetching human avatars from RegisterHuman table...");
-  const allHumanAvatars = await fetchAllHumanAvatars(cfg.rpcUrl, fetchPageSize, logger);
+  const allHumanAvatars = await circlesRpc.fetchAllHumanAvatars(fetchPageSize, logger);
   const totalAvatarEntries = allHumanAvatars.length;
   const uniqueHumanAvatars = Array.from(new Set(allHumanAvatars));
   logger.info(`Fetched ${totalAvatarEntries} avatar row(s) (${uniqueHumanAvatars.length} unique).`);
@@ -224,42 +216,6 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     dryRun,
     txHashes
   };
-}
-
-async function fetchAllHumanAvatars(
-  rpcUrl: string,
-  pageSize: number,
-  logger: ILoggerService
-): Promise<string[]> {
-  const rpc = new CirclesRpc(rpcUrl);
-  const query = new CirclesQuery<RegisterHumanRow>(rpc, {
-    namespace: "CrcV2",
-    table: "RegisterHuman",
-    columns: ["avatar", "blockNumber", "transactionIndex", "logIndex"],
-    sortOrder: "ASC",
-    limit: pageSize
-  });
-
-  const avatars: string[] = [];
-  let pages = 0;
-
-  while (await query.queryNextPage()) {
-    pages += 1;
-    const rows = query.currentPage?.results ?? [];
-    for (const row of rows) {
-      if (!row || typeof row.avatar !== "string") {
-        continue;
-      }
-
-      const normalized = normalizeAddress(row.avatar);
-      if (normalized) {
-        avatars.push(normalized);
-      }
-    }
-  }
-
-  logger.info(`Fetched ${avatars.length} avatars from RegisterHuman table across ${pages} page(s).`);
-  return avatars;
 }
 
 async function partitionBlacklistedAddresses(

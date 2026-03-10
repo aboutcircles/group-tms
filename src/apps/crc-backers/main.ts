@@ -12,6 +12,7 @@ import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} f
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
+import {StateStore} from "../../services/stateStore";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
@@ -121,6 +122,20 @@ function delay(ms: number): Promise<void> {
 }
 
 async function loop(leaderElection: LeaderElection | null) {
+  const pollIntervalMs = 60 * 1000;
+  const maxDelay = pollIntervalMs * 4;
+  let currentDelay = pollIntervalMs;
+
+  // Attempt to restore scan cursor from PG
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+  if (stateStore) {
+    const persisted = await stateStore.load("crc-backers");
+    if (persisted) {
+      nextFromBlock = persisted.lastScannedBlock;
+      rootLogger.info(`[state-store] Restored scan cursor: nextFromBlock=${nextFromBlock}`);
+    }
+  }
+
   while (true) {
     const runStartedAt = Date.now();
     const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
@@ -130,7 +145,7 @@ async function loop(leaderElection: LeaderElection | null) {
         rpcUrl,
         logger: rootLogger
       });
-      if (!isHealthy) { await delay(60 * 1000); continue; }
+      if (!isHealthy) { await delay(currentDelay); continue; }
 
       rootLogger.info("Checking for new backers...");
       await refreshBlacklist();
@@ -156,8 +171,10 @@ async function loop(leaderElection: LeaderElection | null) {
         }
       );
       nextFromBlock = outcome.nextFromBlock;
+      await stateStore?.save("crc-backers", nextFromBlock);
       recordRunSuccess("crc-backers", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      currentDelay = pollIntervalMs; // reset on success
     } catch (caught: unknown) {
       const isError = caught instanceof Error;
       const baseError = isError ? caught : new Error(String(caught));
@@ -178,10 +195,10 @@ async function loop(leaderElection: LeaderElection | null) {
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }
+      currentDelay = Math.min(currentDelay * 2, maxDelay); // backoff on error
     }
 
-    // Wait one minute
-    await delay(60 * 1000);
+    await delay(currentDelay);
   }
 }
 

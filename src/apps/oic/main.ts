@@ -12,6 +12,7 @@ import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {formatErrorWithCauses} from "../../formatError";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
+import {StateStore} from "../../services/stateStore";
 import {Wallet} from "ethers";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
@@ -147,8 +148,23 @@ async function loop() {
     slackService,
     (isLeader) => setLeaderStatus("oic", isLeader)
   );
+  const pollIntervalMs = refreshIntervalSec * 1000;
+  const maxDelay = pollIntervalMs * 4;
+  let currentDelay = pollIntervalMs;
+
   const state: IncrementalState = createInitialIncrementalState();
   state.lastSafeHeadScanned = Math.max(0, deployedAtBlock - 1);
+
+  // Attempt to restore scan cursor from PG
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+  if (stateStore) {
+    const persisted = await stateStore.load("oic");
+    if (persisted) {
+      state.lastSafeHeadScanned = persisted.lastScannedBlock;
+      rootLogger.info(`[state-store] Restored scan cursor: lastSafeHeadScanned=${persisted.lastScannedBlock}`);
+    }
+  }
+
   // Only print startup/info logs once per process lifetime
   let printedStartupLogs = false;
   while (true) {
@@ -161,11 +177,10 @@ async function loop() {
         rpcUrl,
         logger: rootLogger
       });
-      if (!isHealthy) { await delay(refreshIntervalSec * 1000); continue; }
+      if (!isHealthy) { await delay(currentDelay); continue; }
 
       if (!printedStartupLogs) {
         LOG.info("OIC app starting (monitor + reconcile trust)...");
-        // Reduce noise: print config details only in verbose mode
         LOG.debug(`RPC: ${rpcUrl}`);
         LOG.debug(`Group: ${oicGroupAddress}`);
         LOG.debug(`MetaOrg: ${metaOrgAddress}`);
@@ -188,8 +203,10 @@ async function loop() {
         },
         state,
       );
+      await stateStore?.save("oic", state.lastSafeHeadScanned);
       recordRunSuccess("oic", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      currentDelay = pollIntervalMs;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       const consecutiveErrors = errorTracker.recordError();
@@ -202,9 +219,10 @@ async function loop() {
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }
+      currentDelay = Math.min(currentDelay * 2, maxDelay);
     }
 
-    await delay(refreshIntervalSec * 1000);
+    await delay(currentDelay);
   }
 }
 

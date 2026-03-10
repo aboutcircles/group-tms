@@ -15,40 +15,6 @@ import {
 
 const ROUTER_ADDRESS = "0xDC287474114cC0551a81DdC2EB51783fBF34802F";
 
-let registerHumanPages: string[][] = [];
-
-jest.mock("@circles-sdk/data", () => {
-  class CirclesRpc {
-    constructor(public readonly url: string) {}
-  }
-
-  class CirclesQuery<T> {
-    currentPage: {results: T[]} | null = null;
-    private pageIndex = 0;
-
-    constructor(public readonly rpc: CirclesRpc, public readonly options: any) {}
-
-    async queryNextPage(): Promise<boolean> {
-      if (this.pageIndex >= registerHumanPages.length) {
-        return false;
-      }
-
-      const avatars = registerHumanPages[this.pageIndex++];
-      this.currentPage = {
-        results: avatars.map((avatar, index) => ({
-          avatar,
-          blockNumber: 100 + index,
-          transactionIndex: index,
-          logIndex: index
-        })) as unknown as T[]
-      };
-      return true;
-    }
-  }
-
-  return {CirclesRpc, CirclesQuery};
-});
-
 function makeDeps(overrides?: Partial<Deps>): Deps {
   const circlesRpc = overrides?.circlesRpc ?? new FakeCirclesRpc();
   if (circlesRpc instanceof FakeCirclesRpc) {
@@ -80,10 +46,6 @@ function makeConfig(overrides?: Partial<RunConfig>): RunConfig {
 }
 
 describe("router-tms runOnce", () => {
-  beforeEach(() => {
-    registerHumanPages = [];
-  });
-
   it("throws when configured router address is invalid", async () => {
     const deps = makeDeps();
     const cfg = makeConfig({routerAddress: "not-an-address"});
@@ -104,9 +66,8 @@ describe("router-tms runOnce", () => {
     const humanBob = getAddress("0x2000000000000000000000000000000000000002");
     const humanCarol = getAddress("0x2000000000000000000000000000000000000003");
 
-    registerHumanPages = [[humanAlice, humanBob], [humanAlice, humanCarol]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanAlice, humanCarol];
     circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [humanAlice];
 
     const blacklistingService = new FakeBlacklist(new Set([humanCarol.toLowerCase()]));
@@ -145,9 +106,8 @@ describe("router-tms runOnce", () => {
     const humanAlice = getAddress("0x2000000000000000000000000000000000000010");
     const humanBob = getAddress("0x2000000000000000000000000000000000000011");
 
-    registerHumanPages = [[humanAlice, humanBob]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
     circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
 
     const deps = makeDeps({circlesRpc});
@@ -164,9 +124,8 @@ describe("router-tms runOnce", () => {
     const humanAlice = getAddress("0x2000000000000000000000000000000000000500");
     const nonHuman = getAddress("0x2000000000000000000000000000000000000501");
 
-    registerHumanPages = [[humanAlice, nonHuman]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, nonHuman];
     circlesRpc.humanityOverrides.set(nonHuman.toLowerCase(), false);
 
     const routerService = new FakeRouterService(["0xtx_human"]);
@@ -200,9 +159,8 @@ describe("router-tms runOnce", () => {
     const humanBob = getAddress("0x2000000000000000000000000000000000000101");
     const humanCarol = getAddress("0x2000000000000000000000000000000000000102");
 
-    registerHumanPages = [[humanAlice, humanBob, humanCarol]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol];
     circlesRpc.baseGroups = [baseGroupA, baseGroupB];
     circlesRpc.trusteesByTruster[baseGroupA.toLowerCase()] = [humanAlice];
     circlesRpc.trusteesByTruster[baseGroupB.toLowerCase()] = [humanBob];
@@ -239,9 +197,8 @@ describe("router-tms runOnce", () => {
     const baseGroupMember = getAddress("0x2000000000000000000000000000000000000300");
     const humanBob = getAddress("0x2000000000000000000000000000000000000301");
 
-    registerHumanPages = [[humanBob]];
-
     const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanBob];
     circlesRpc.baseGroups = [baseGroup];
     circlesRpc.trusteesByTruster[baseGroup.toLowerCase()] = [baseGroupMember];
     circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
@@ -276,12 +233,14 @@ describe("router-tms runOnce", () => {
     const humanAlice = getAddress("0x2000000000000000000000000000000000000200");
     const humanBob = getAddress("0x2000000000000000000000000000000000000201");
 
-    registerHumanPages = [[humanAlice, humanBob]];
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
 
     const enablementStore = new FakeRouterEnablementStore();
     const routerService = new FakeRouterService(["0xtx_first"]);
 
     const deps = makeDeps({
+      circlesRpc,
       routerService,
       enablementStore
     });
