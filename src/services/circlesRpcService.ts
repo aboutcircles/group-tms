@@ -46,22 +46,49 @@ export class CirclesRpcService implements ICirclesRpc {
     return allTrustees;
   }
 
+  /**
+   * Workaround: sdk-rpc v0.1.24 sends circles_events params as
+   * [fromBlock, toBlock, eventTypes, address, ...] but the plugin expects
+   * [address, fromBlock, toBlock, eventTypes, ...]. Use raw client.call
+   * until the SDK bug is fixed.
+   */
+  private async fetchEvents<T>(
+    address: string,
+    fromBlock: number,
+    toBlock: number | null,
+    eventTypes: string[],
+  ): Promise<T[]> {
+    const result = await this.rpc.client.call("circles_events", [
+      address, fromBlock, toBlock, eventTypes,
+    ]);
+    return (result as any)?.events?.map((e: any) => ({
+      $event: e.event,
+      blockNumber: typeof e.values?.blockNumber === "string"
+        ? parseInt(e.values.blockNumber, 16) : e.values?.blockNumber,
+      timestamp: typeof e.values?.timestamp === "string"
+        ? parseInt(e.values.timestamp, 16) : e.values?.timestamp,
+      transactionIndex: typeof e.values?.transactionIndex === "string"
+        ? parseInt(e.values.transactionIndex, 16) : e.values?.transactionIndex,
+      logIndex: typeof e.values?.logIndex === "string"
+        ? parseInt(e.values.logIndex, 16) : e.values?.logIndex,
+      transactionHash: e.values?.transactionHash,
+      ...Object.fromEntries(
+        Object.entries(e.values ?? {}).filter(
+          ([k]) => !["blockNumber", "timestamp", "transactionIndex", "logIndex", "transactionHash"].includes(k)
+        )
+      ),
+    })) ?? [];
+  }
+
   async fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingCompletedEvent[]> {
-    // circles-nethermind-plugin expects block numbers as strings in circles_events
-    return await this.rpc.query.events<BackingCompletedEvent>(
-      String(fromBlock) as any,
-      toBlock != null ? String(toBlock) as any : null,
-      ["CrcV2_CirclesBackingCompleted"] as any,
-      backingFactoryAddress,
+    return this.fetchEvents<BackingCompletedEvent>(
+      backingFactoryAddress, fromBlock, toBlock ?? null, ["CrcV2_CirclesBackingCompleted"],
     );
   }
 
   async fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingInitiatedEvent[]> {
-    return await this.rpc.query.events<BackingInitiatedEvent>(
-      String(fromBlock) as any,
-      toBlock != null ? String(toBlock) as any : null,
-      ["CrcV2_CirclesBackingInitiated"] as any,
-      backingFactoryAddress,
+    return this.fetchEvents<BackingInitiatedEvent>(
+      backingFactoryAddress, fromBlock, toBlock ?? null, ["CrcV2_CirclesBackingInitiated"],
     );
   }
 
