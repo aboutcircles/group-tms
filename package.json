@@ -16,7 +16,8 @@
     "start:router-tms": "node --env-file=.env dist/src/apps/router-tms/main.js",
     "start:all": "node --env-file=.env dist/src/apps/manager.js",
     "test": "jest --config jest.config.ts",
-    "test:coverage": "jest --config jest.config.ts --coverage"
+    "test:coverage": "jest --config jest.config.ts --coverage",
+    "test:integration": "jest --config jest.integration.config.ts --verbose"
   },
   "dependencies": {
     "@aboutcircles/sdk-rpc": "^0.1.24",
