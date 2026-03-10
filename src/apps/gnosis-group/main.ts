@@ -23,6 +23,7 @@ import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} f
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
+import {StateStore} from "../../services/stateStore";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gnosis-group");
@@ -140,6 +141,10 @@ async function mainLoop(): Promise<void> {
     slackService,
     (isLeader) => setLeaderStatus("gnosis-group", isLeader)
   );
+  const maxDelay = runIntervalMs * 4;
+  let currentDelay = runIntervalMs;
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+
   while (true) {
     const runStartedAt = Date.now();
     const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
@@ -149,7 +154,7 @@ async function mainLoop(): Promise<void> {
         rpcUrl,
         logger: rootLogger
       });
-      if (!isHealthy) { await delay(runIntervalMs); continue; }
+      if (!isHealthy) { await delay(currentDelay); continue; }
       await refreshBlacklist();
       const outcome = await runOnce(
         {
@@ -162,8 +167,10 @@ async function mainLoop(): Promise<void> {
         { ...config, dryRun: effectiveDryRun }
       );
 
+      await stateStore?.save("gnosis-group", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gnosis-group", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      currentDelay = runIntervalMs;
       rootLogger.info(
         `Run completed. Addresses with relative score > ${outcome.threshold}: ${outcome.aboveThresholdCount}`
       );
@@ -180,10 +187,11 @@ async function mainLoop(): Promise<void> {
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }
+      currentDelay = Math.min(currentDelay * 2, maxDelay);
     }
 
     const elapsedMs = Date.now() - runStartedAt;
-    const waitMs = Math.max(0, runIntervalMs - elapsedMs);
+    const waitMs = Math.max(0, currentDelay - elapsedMs);
     if (waitMs > 0) {
       rootLogger.info(`Waiting ${(waitMs / 60_000).toFixed(1)} minute(s) before the next run.`);
       await delay(waitMs);

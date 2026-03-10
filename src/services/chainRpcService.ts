@@ -1,11 +1,12 @@
 import {IChainRpc} from "../interfaces/IChainRpc";
 import {JsonRpcProvider, TransactionReceipt} from "ethers";
+import {createProvider} from "./rpcProvider";
 
 export class ChainRpcService implements IChainRpc {
   private provider: JsonRpcProvider;
 
   constructor(rpcUrl: string) {
-    this.provider = new JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
   }
 
   async getHeadBlock(): Promise<{ blockNumber: number; timestamp: number }> {

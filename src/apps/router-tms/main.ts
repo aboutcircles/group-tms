@@ -17,6 +17,7 @@ import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {InMemoryRouterEnablementStore} from "./enablementStore";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
+import {StateStore} from "../../services/stateStore";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const routerAddress = process.env.ROUTER_ADDRESS || "0xdc287474114cc0551a81ddc2eb51783fbf34802f";
@@ -122,6 +123,10 @@ async function mainLoop(): Promise<void> {
     slackService,
     (isLeader) => setLeaderStatus("router-tms", isLeader)
   );
+  const maxDelay = pollIntervalMs * 4;
+  let currentDelay = pollIntervalMs;
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+
   while (true) {
     const runStartedAt = Date.now();
     const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
@@ -131,7 +136,7 @@ async function mainLoop(): Promise<void> {
         rpcUrl,
         logger: rootLogger
       });
-      if (!isHealthy) { await delay(pollIntervalMs); continue; }
+      if (!isHealthy) { await delay(currentDelay); continue; }
       await refreshBlacklist();
       const outcome = await runOnce(
         {
@@ -143,8 +148,10 @@ async function mainLoop(): Promise<void> {
         },
         { ...config, dryRun: effectiveDryRun }
       );
+      await stateStore?.save("router-tms", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("router-tms", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      currentDelay = pollIntervalMs;
       runLogger.info(
         "router-tms run completed: " +
           `uniqueHumans=${outcome.uniqueHumanCount} ` +
@@ -168,9 +175,10 @@ async function mainLoop(): Promise<void> {
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }
+      currentDelay = Math.min(currentDelay * 2, maxDelay);
     }
 
-    await delay(pollIntervalMs);
+    await delay(currentDelay);
   }
 }
 
