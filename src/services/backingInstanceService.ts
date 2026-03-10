@@ -17,6 +17,10 @@ export class BackingInstanceService implements IBackingInstanceService {
     }
   }
 
+  destroy(): void {
+    this.provider.destroy();
+  }
+
   async resetCowSwapOrder(circlesBackingInstance: string): Promise<string> {
     if (!this.executor) {
       throw new Error("resetCowSwapOrder requires a configured Safe signer");

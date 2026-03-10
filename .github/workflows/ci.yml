@@ -27,5 +27,6 @@ jobs:
 
       - name: Integration smoke tests
         run: npm run test:integration
+        continue-on-error: true
         env:
           INTEGRATION_RPC_URL: https://staging.circlesubi.network

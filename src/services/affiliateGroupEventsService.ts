@@ -24,6 +24,10 @@ export class AffiliateGroupEventsService implements IAffiliateGroupEventsService
     this.logger = logger;
   }
 
+  destroy(): void {
+    this.provider.destroy();
+  }
+
   async fetchAffiliateGroupChanged(
     registryAddress: string,
     targetGroup: string,
