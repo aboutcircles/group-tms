@@ -1,8 +1,3 @@
-jest.mock("@circles-sdk/data", () => ({
-  CirclesRpc: class {},
-  CirclesQuery: class {}
-}));
-
 import {__testables} from "../../../src/apps/gnosis-group/logic";
 
 const {timedFetch, isRetryableFetchError} = __testables;

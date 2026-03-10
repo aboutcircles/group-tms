@@ -1,5 +1,4 @@
-import {CrcV2_CirclesBackingCompleted, CrcV2_CirclesBackingInitiated} from "@circles-sdk/data/dist/events/events";
-import {CrcV2_Trust} from "@circles-sdk/data";
+import {BackingCompletedEvent, BackingInitiatedEvent} from "../src/interfaces/ICirclesRpc";
 import {getAddress} from "ethers";
 import {ICirclesRpc} from "../src/interfaces/ICirclesRpc";
 import {IChainRpc} from "../src/interfaces/IChainRpc";
@@ -10,7 +9,7 @@ import {
   IBackingInstanceService,
   ResetCowSwapOrderResult
 } from "../src/interfaces/IBackingInstanceService";
-import {ISlackService} from "../src/interfaces/ISlackService";
+import {ISlackService, SlackSeverity} from "../src/interfaces/ISlackService";
 import {ILoggerService} from "../src/interfaces/ILoggerService";
 import {AffiliateGroupChanged, IAffiliateGroupEventsService} from "../src/interfaces/IAffiliateGroupEventsService";
 import {
@@ -63,19 +62,19 @@ export class FakeLogger implements ILoggerService {
 }
 
 export class FakeCirclesRpc implements ICirclesRpc {
-  initiated: CrcV2_CirclesBackingInitiated[] = [];
-  completed: CrcV2_CirclesBackingCompleted[] = [];
-  trusts: CrcV2_Trust[] = [];
+  initiated: BackingInitiatedEvent[] = [];
+  completed: BackingCompletedEvent[] = [];
   trusteesByTruster: Record<string, string[]> = {};
   baseGroups: string[] = [];
   humanityOverrides = new Map<string, boolean>();
+  humanAvatars: string[] = [];
 
-  async fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<CrcV2_CirclesBackingInitiated[]> {
+  async fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingInitiatedEvent[]> {
     const upper = toBlock ?? Number.MAX_SAFE_INTEGER;
     return this.initiated.filter(e => e.blockNumber >= fromBlock && e.blockNumber <= upper);
   }
 
-  async fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<CrcV2_CirclesBackingCompleted[]> {
+  async fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingCompletedEvent[]> {
     const upper = toBlock ?? Number.MAX_SAFE_INTEGER;
     return this.completed.filter(e => e.blockNumber >= fromBlock && e.blockNumber <= upper);
   }
@@ -100,6 +99,18 @@ export class FakeCirclesRpc implements ICirclesRpc {
     }
 
     return true;
+  }
+
+  async isHumanBatch(addresses: string[]): Promise<Map<string, boolean>> {
+    const result = new Map<string, boolean>();
+    for (const address of addresses) {
+      result.set(address, await this.isHuman(address));
+    }
+    return result;
+  }
+
+  async fetchAllHumanAvatars(_pageSize?: number): Promise<string[]> {
+    return [...this.humanAvatars];
   }
 }
 
@@ -265,15 +276,15 @@ export class FakeBackingInstanceService implements IBackingInstanceService {
 }
 
 export class FakeSlack implements ISlackService {
-  notifications: { event: CrcV2_CirclesBackingInitiated; reason: string }[] = [];
-  generalNotifications: string[] = [];
+  notifications: { event: BackingInitiatedEvent; reason: string }[] = [];
+  generalNotifications: { message: string; severity: SlackSeverity }[] = [];
 
-  async notifyBackingNotCompleted(backingInitiatedEvent: CrcV2_CirclesBackingInitiated, reason: string): Promise<void> {
+  async notifyBackingNotCompleted(backingInitiatedEvent: BackingInitiatedEvent, reason: string): Promise<void> {
     this.notifications.push({event: backingInitiatedEvent, reason});
   }
 
-  async notifySlackStartOrCrash(message: string): Promise<void> {
-    this.generalNotifications.push(message);
+  async notifySlackStartOrCrash(message: string, severity: SlackSeverity = SlackSeverity.CRITICAL): Promise<void> {
+    this.generalNotifications.push({message, severity});
   }
 }
 

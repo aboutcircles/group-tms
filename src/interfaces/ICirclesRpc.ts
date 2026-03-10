@@ -1,42 +1,37 @@
-import {CrcV2_CirclesBackingCompleted, CrcV2_CirclesBackingInitiated} from "@circles-sdk/data/dist/events/events";
+import {ILoggerService} from "./ILoggerService";
+
+/** Base shape for Circles events returned by the circles_events RPC method. */
+export interface CirclesBaseEvent {
+  $event?: string;
+  blockNumber: number;
+  timestamp?: number;
+  transactionIndex: number;
+  logIndex: number;
+  transactionHash?: string;
+}
+
+export interface BackingCompletedEvent extends CirclesBaseEvent {
+  backer: string;
+  circlesBackingInstance: string;
+  lbp: string;
+  emitter: string;
+}
+
+export interface BackingInitiatedEvent extends CirclesBaseEvent {
+  backer: string;
+  circlesBackingInstance: string;
+  emitter: string;
+}
 
 /**
- * Provides access to Circles events.
+ * Provides access to Circles events and data.
  */
 export interface ICirclesRpc {
-  /**
-   * Fetches all BackingInitiated events from the Circles contract between the specified blocks.
-   * @param backingFactoryAddress The address of the backing factory contract to filter events by.
-   * @param fromBlock The block number to start fetching events from.
-   * @param toBlock Optional block number to end fetching events at. If not provided, fetches until the latest block.
-   */
-  fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<CrcV2_CirclesBackingInitiated[]>;
-
-  /**
-   * Fetches all BackingCompleted events from the Circles contract between the specified blocks.
-   * @param backingFactoryAddress The address of the backing factory contract to filter events by.
-   * @param fromBlock The block number to start fetching events from.
-   * @param toBlock Optional block number to end fetching events at. If not provided, fetches until the latest block.
-   */
-  fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<CrcV2_CirclesBackingCompleted[]>;
-
-  /**
-   * Fetches all trustees for a given truster.
-   * @param truster The address of the truster to fetch trustees for.
-   * @returns A promise that resolves to an array of trustee addresses.
-   */
+  fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingInitiatedEvent[]>;
+  fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingCompletedEvent[]>;
   fetchAllTrustees(truster: string): Promise<string[]>;
-
-  /**
-   * Fetches all base groups using direct RPC call.
-   * @param pageSize Optional page size used for pagination when querying the RPC.
-   * @returns A promise that resolves to an array of base group addresses.
-   */
   fetchAllBaseGroups(pageSize?: number): Promise<string[]>;
-
-  /**
-   * Returns true when the provided address is a human avatar according to the Circles hub.
-   * @param address The address to check.
-   */
   isHuman(address: string): Promise<boolean>;
+  isHumanBatch(addresses: string[]): Promise<Map<string, boolean>>;
+  fetchAllHumanAvatars(pageSize?: number, logger?: ILoggerService): Promise<string[]>;
 }

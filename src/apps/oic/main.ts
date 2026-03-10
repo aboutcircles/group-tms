@@ -4,12 +4,15 @@ import {ChainRpcService} from "../../services/chainRpcService";
 import {GroupService} from "../../services/groupService";
 import {AffiliateGroupEventsService} from "../../services/affiliateGroupEventsService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {LoggerService} from "../../services/loggerService";
 import {IGroupService} from "../../interfaces/IGroupService";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {formatErrorWithCauses} from "../../formatError";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
+import {StateStore} from "../../services/stateStore";
 import {Wallet} from "ethers";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
@@ -32,9 +35,12 @@ let groupService: IGroupService;
 const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl, rootLogger.child("oic:affiliate-registry"));
 
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
-const slackService = new SlackService(slackWebhookUrl);
+const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = !!slackWebhookUrl;
-const errorTracker = new ConsecutiveErrorTracker(3);
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 validateConfig();
 
@@ -69,27 +75,26 @@ function createDryRunGroupService(): IGroupService {
   };
 }
 
-process.on('SIGTERM', async () => {
+async function gracefulShutdown(signal: string) {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *OIC Service Shutting Down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`);
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
+  try {
+    await slackService.notifySlackStartOrCrash(`🔄 *OIC Service Shutting Down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
   process.exit(0);
-});
+}
 
-process.on('SIGINT', async () => {
-  try {
-    await slackService.notifySlackStartOrCrash(`🔄 *OIC Service Shutting Down*\n\nService received SIGINT signal. Graceful shutdown initiated.`);
-  } catch (error) {
-    rootLogger.error('Failed to send shutdown notification:', error);
-  }
-  process.exit(0);
-});
+process.on('SIGTERM', () => { void gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
 
 process.on('uncaughtException', async (err) => {
   try {
-    await slackService.notifySlackStartOrCrash(`💥 Uncaught exception: ${err?.message || err}`);
+    await slackService.notifySlackStartOrCrash(`💥 Uncaught exception: ${err?.message || err}`, SlackSeverity.CRITICAL);
   } catch {}
   rootLogger.error(err);
   process.exit(1);
@@ -97,7 +102,7 @@ process.on('uncaughtException', async (err) => {
 
 process.on('unhandledRejection', async (reason: any) => {
   try {
-    await slackService.notifySlackStartOrCrash(`💥 Unhandled rejection: ${reason?.message || String(reason)}`);
+    await slackService.notifySlackStartOrCrash(`💥 Unhandled rejection: ${reason?.message || String(reason)}`, SlackSeverity.CRITICAL);
   } catch {}
   rootLogger.error(reason);
   process.exit(1);
@@ -120,7 +125,7 @@ process.on('unhandledRejection', async (reason: any) => {
       `- Refresh (s): ${refreshIntervalSec}\n` +
       `- DryRun: ${dryRun}`;
 
-    await slackService.notifySlackStartOrCrash(startupMessage);
+    await slackService.notifySlackStartOrCrash(startupMessage, SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack startup notification sent successfully.");
     } else {
@@ -137,12 +142,34 @@ function delay(ms: number): Promise<void> {
 
 async function loop() {
   startMetricsServer("oic");
+  leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService,
+    (isLeader) => setLeaderStatus("oic", isLeader)
+  );
+  const pollIntervalMs = refreshIntervalSec * 1000;
+  const maxDelay = pollIntervalMs * 4;
+  let currentDelay = pollIntervalMs;
+
   const state: IncrementalState = createInitialIncrementalState();
   state.lastSafeHeadScanned = Math.max(0, deployedAtBlock - 1);
+
+  // Attempt to restore scan cursor from PG
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+  if (stateStore) {
+    const persisted = await stateStore.load("oic");
+    if (persisted) {
+      state.lastSafeHeadScanned = persisted.lastScannedBlock;
+      rootLogger.info(`[state-store] Restored scan cursor: lastSafeHeadScanned=${persisted.lastScannedBlock}`);
+    }
+  }
+
   // Only print startup/info logs once per process lifetime
   let printedStartupLogs = false;
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const LOG = rootLogger.child("oic");
       const isHealthy = await ensureRpcHealthyOrNotify({
@@ -150,11 +177,10 @@ async function loop() {
         rpcUrl,
         logger: rootLogger
       });
-      if (!isHealthy) { await delay(refreshIntervalSec * 1000); continue; }
+      if (!isHealthy) { await delay(currentDelay); continue; }
 
       if (!printedStartupLogs) {
         LOG.info("OIC app starting (monitor + reconcile trust)...");
-        // Reduce noise: print config details only in verbose mode
         LOG.debug(`RPC: ${rpcUrl}`);
         LOG.debug(`Group: ${oicGroupAddress}`);
         LOG.debug(`MetaOrg: ${metaOrgAddress}`);
@@ -173,31 +199,37 @@ async function loop() {
           affiliateRegistryAddress,
           outputBatchSize,
           deployedAtBlock,
-          dryRun,
+          dryRun: effectiveDryRun,
         },
         state,
       );
+      await stateStore?.save("oic", state.lastSafeHeadScanned);
       recordRunSuccess("oic", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      currentDelay = pollIntervalMs;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       const consecutiveErrors = errorTracker.recordError();
       recordRunError("oic");
-      rootLogger.error("OIC runOnce failed:");
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
-        void notifySlackRunError(error, consecutiveErrors);
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
+      currentDelay = Math.min(currentDelay * 2, maxDelay);
     }
 
-    await delay(refreshIntervalSec * 1000);
+    await delay(currentDelay);
   }
 }
 
 async function notifySlackRunError(error: Error, consecutiveErrors: number): Promise<void> {
   const message = `⚠️ *OIC Service runOnce error* (${consecutiveErrors} consecutive failures)\n\n${formatErrorWithCauses(error)}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
   } catch (slackError) {
     rootLogger.warn("Failed to send run error notification to Slack:", slackError);
   }

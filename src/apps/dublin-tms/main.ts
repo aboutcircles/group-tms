@@ -2,6 +2,7 @@ import {LoggerService} from "../../services/loggerService";
 import {CirclesRpcService} from "../../services/circlesRpcService";
 import {GroupService} from "../../services/groupService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {IGroupService} from "../../interfaces/IGroupService";
 import {
   runOnce,
@@ -54,6 +55,7 @@ const configuredServiceEoa = normalizeAddressOrThrow(
 const dryRun = process.env.DRY_RUN === "1";
 const servicePrivateKey = process.env.DUBLIN_TMS_SERVICE_PRIVATE_KEY || "";
 const slackWebhookUrl = process.env.DUBLIN_TMS_SLACK_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL || "";
+const slackWebhookUrlInfo = process.env.DUBLIN_TMS_SLACK_WEBHOOK_URL_INFO || process.env.SLACK_WEBHOOK_URL_INFO || "";
 
 if (configuredToBlock !== undefined && configuredToBlock < configuredStartBlock) {
   throw new Error(
@@ -66,7 +68,7 @@ if (!dryRun && servicePrivateKey.trim().length === 0) {
 }
 
 const circlesRpc = new CirclesRpcService(rpcUrl);
-const slackService = new SlackService(slackWebhookUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 
 let groupService: IGroupService | undefined;
@@ -181,7 +183,7 @@ start().catch((cause) => {
   rootLogger.error("dublin-tms service crashed:");
   rootLogger.error(formatErrorWithCauses(error));
   void slackService.notifySlackStartOrCrash(
-    `🚨 **Dublin TMS service crashed**\n\nLast error: ${error.message}`
+    `🚨 *Dublin TMS service crashed*\n\nLast error: ${error.message}`, SlackSeverity.CRITICAL
   ).catch((slackError: unknown) => {
     rootLogger.warn("Failed to send crash notification to Slack:", slackError);
   });
@@ -190,8 +192,8 @@ start().catch((cause) => {
 
 async function notifySlackStartup(): Promise<void> {
   const header = dryRun
-    ? "🧪 **Dublin TMS Service started (dry-run)**"
-    : "✅ **Dublin TMS Service started**";
+    ? "🧪 *Dublin TMS Service started (dry-run)*"
+    : "✅ *Dublin TMS Service started*";
   const message =
     `${header}\n\n` +
     `Watching RegisterHuman and trusting matching avatars.\n` +
@@ -203,7 +205,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Dry Run: ${dryRun}`;
 
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack startup notification sent.");
     } else {
@@ -217,7 +219,7 @@ async function notifySlackStartup(): Promise<void> {
 async function notifySlackShutdown(signal: NodeJS.Signals): Promise<void> {
   try {
     await slackService.notifySlackStartOrCrash(
-      `🔄 **Dublin TMS Service shutting down**\n\nReceived ${signal}.`
+      `🔄 *Dublin TMS Service shutting down*\n\nReceived ${signal}.`, SlackSeverity.INFO
     );
   } catch (error) {
     rootLogger.warn("Failed to send Slack shutdown notification:", error);
@@ -233,8 +235,8 @@ async function notifySlackRunSummary(outcome: RunOutcome): Promise<void> {
   }
 
   const header = dryRun
-    ? "🧪 **Dublin TMS Dry-Run Summary**"
-    : "✅ **Dublin TMS Run Summary**";
+    ? "🧪 *Dublin TMS Dry-Run Summary*"
+    : "✅ *Dublin TMS Run Summary*";
 
   const lines: string[] = [
     header,
@@ -264,7 +266,7 @@ async function notifySlackRunSummary(outcome: RunOutcome): Promise<void> {
   }
 
   try {
-    await slackService.notifySlackStartOrCrash(lines.join("\n"));
+    await slackService.notifySlackStartOrCrash(lines.join("\n"), SlackSeverity.INFO);
   } catch (error) {
     rootLogger.warn("Failed to send Slack run summary notification:", error);
   }
@@ -272,7 +274,7 @@ async function notifySlackRunSummary(outcome: RunOutcome): Promise<void> {
 
 async function notifySlackRunError(error: Error): Promise<void> {
   try {
-    await slackService.notifySlackStartOrCrash(`⚠️ **Dublin TMS run failed**\n\n${error.message}`);
+    await slackService.notifySlackStartOrCrash(`⚠️ *Dublin TMS run failed*\n\n${error.message}`, SlackSeverity.WARNING);
   } catch (slackError) {
     rootLogger.warn("Failed to send Slack run-error notification:", slackError);
   }

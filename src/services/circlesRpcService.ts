@@ -1,139 +1,105 @@
-import {CirclesData, CirclesRpc} from "@circles-sdk/data";
-import {Address} from "@circles-sdk/utils";
-import {CrcV2_CirclesBackingCompleted, CrcV2_CirclesBackingInitiated} from "@circles-sdk/data/dist/events/events";
-import {getAddress, Interface, JsonRpcProvider} from "ethers";
-import {ICirclesRpc} from "../interfaces/ICirclesRpc";
-
-const CIRCLES_HUB_ADDRESS = getAddress("0xc12C1E50ABB450d6205Ea2C3Fa861b3B834d13e8");
-const CIRCLES_HUB_INTERFACE = new Interface([
-  "function isHuman(address account) view returns (bool)"
-]);
-
-// TODO: Replace unwrapEventsResult + flattenRawEvent with @aboutcircles/sdk-rpc
-// QueryMethods.events() once sdk-v2 feature/new_rpc_methods is merged & published.
-// That branch has the correct signature (address, fromBlock, toBlock, eventTypes,
-// filterPredicates, ...) and returns typed PagedEventsResponse<T> directly.
-// See: https://github.com/aboutcircles/sdk-v2/tree/feature/new_rpc_methods
-
-/**
- * Extract events from a circles_events RPC paginated response
- * and normalise raw events into the flat SDK shape.
- */
-function unwrapEventsResult(result: unknown): unknown[] {
-  if (Array.isArray(result)) {
-    return result.map(flattenRawEvent);
-  }
-
-  if (!result || typeof result !== "object" || !("events" in result)) {
-    return [];
-  }
-
-  const events = (result as { events?: unknown }).events;
-  if (!Array.isArray(events)) {
-    return [];
-  }
-
-  return events.map(flattenRawEvent);
-}
-
-const NUMERIC_FIELDS = new Set(["blockNumber", "timestamp", "transactionIndex", "logIndex"]);
-
-/**
- * Flatten a raw RPC event from {event, values: {field1, field2, ...}}
- * to the SDK shape {$event, field1, field2, ...}.
- * Hex-encoded numeric fields (blockNumber, timestamp, etc.) are parsed to numbers.
- */
-function flattenRawEvent(raw: unknown): unknown {
-  if (!raw || typeof raw !== "object") return raw;
-  const obj = raw as Record<string, unknown>;
-
-  // Already in SDK shape (has $event) — pass through
-  if ("$event" in obj) return obj;
-
-  // Raw RPC shape: {event: "CrcV2_...", values: {...}}
-  if ("event" in obj && "values" in obj && typeof obj.values === "object" && obj.values) {
-    const values = obj.values as Record<string, unknown>;
-    const flat: Record<string, unknown> = { $event: obj.event };
-    for (const [key, val] of Object.entries(values)) {
-      if (NUMERIC_FIELDS.has(key) && typeof val === "string" && val.startsWith("0x")) {
-        flat[key] = parseInt(val, 16);
-      } else {
-        flat[key] = val;
-      }
-    }
-    return flat;
-  }
-
-  return raw;
-}
+import {CirclesRpc, PagedQuery} from "@aboutcircles/sdk-rpc";
+import {getAddress} from "ethers";
+import {ICirclesRpc, BackingCompletedEvent, BackingInitiatedEvent} from "../interfaces/ICirclesRpc";
+import {ILoggerService} from "../interfaces/ILoggerService";
+import {primaryRpcUrl} from "./rpcProvider";
 
 export class CirclesRpcService implements ICirclesRpc {
-  private readonly provider: JsonRpcProvider;
+  private readonly rpc: CirclesRpc;
 
-  constructor(private rpcUrl: string) {
-    this.provider = new JsonRpcProvider(rpcUrl);
+  constructor(rpcUrl: string) {
+    this.rpc = new CirclesRpc(primaryRpcUrl(rpcUrl));
   }
 
   async isHuman(address: string): Promise<boolean> {
-    const normalized = getAddress(address);
-    const data = CIRCLES_HUB_INTERFACE.encodeFunctionData("isHuman", [normalized]);
-    const result = await this.provider.call({
-      to: CIRCLES_HUB_ADDRESS,
-      data
-    });
+    const normalized = getAddress(address).toLowerCase();
+    const info = await this.rpc.avatar.getAvatarInfo(normalized);
+    return info?.isHuman === true;
+  }
 
-    const [isHuman] = CIRCLES_HUB_INTERFACE.decodeFunctionResult("isHuman", result);
-    return Boolean(isHuman);
+  async isHumanBatch(addresses: string[]): Promise<Map<string, boolean>> {
+    const normalized = addresses.map((a) => getAddress(a).toLowerCase());
+    const infos = await this.rpc.avatar.getAvatarInfoBatch(normalized);
+    const result = new Map<string, boolean>();
+    for (const info of infos) {
+      result.set(info.avatar.toLowerCase(), info.isHuman === true);
+    }
+    for (const addr of normalized) {
+      if (!result.has(addr)) result.set(addr, false);
+    }
+    return result;
   }
 
   async fetchAllTrustees(truster: string): Promise<string[]> {
     const trusterLc = truster.toLowerCase();
-    const rpc = new CirclesRpc(this.rpcUrl);
-    const data = new CirclesData(rpc);
-    const trustRelationsQuery = data.getTrustRelations(truster as Address, 1000);
+    const query = this.rpc.trust.getTrustRelations(trusterLc, 1000);
     const allTrustees: string[] = [];
 
-    while (await trustRelationsQuery.queryNextPage()) {
-      trustRelationsQuery
-        .currentPage?.results
-        .filter(o => o.truster.toLowerCase() === trusterLc)
-        .map(o => o.trustee.toLowerCase())
-        .forEach(o => allTrustees.push(o))
+    while (await query.queryNextPage()) {
+      const rows = query.currentPage?.results ?? [];
+      for (const row of rows) {
+        if (row.truster.toLowerCase() === trusterLc) {
+          allTrustees.push(row.trustee.toLowerCase());
+        }
+      }
     }
 
     return allTrustees;
   }
 
-  async fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<CrcV2_CirclesBackingCompleted[]> {
-    const rpc = new CirclesRpc(this.rpcUrl);
-    const response = await rpc.call<unknown>("circles_events", [
-      undefined, fromBlock, toBlock,
-      ["CrcV2_CirclesBackingCompleted"],
-      [{ Type: "FilterPredicate", FilterType: "Equals", Column: "emitter", Value: backingFactoryAddress }]
+  /**
+   * Workaround: sdk-rpc v0.1.24 sends circles_events params in wrong order.
+   * Uses raw client.call with correct param order: [address, fromBlock, toBlock, eventTypes, filterPredicates].
+   * Backing events aren't emitted by the factory — they're emitted by individual
+   * backing instances, so we query all events and filter by emitter column.
+   */
+  private async fetchEvents<T>(
+    emitterAddress: string,
+    fromBlock: number,
+    toBlock: number | null,
+    eventTypes: string[],
+  ): Promise<T[]> {
+    const result = await this.rpc.client.call("circles_events", [
+      undefined, fromBlock, toBlock, eventTypes,
+      [{ Type: "FilterPredicate", FilterType: "Equals", Column: "emitter", Value: emitterAddress }],
     ]);
-    return unwrapEventsResult(response.result) as CrcV2_CirclesBackingCompleted[];
+    return (result as any)?.events?.map((e: any) => ({
+      $event: e.event,
+      blockNumber: typeof e.values?.blockNumber === "string"
+        ? parseInt(e.values.blockNumber, 16) : e.values?.blockNumber,
+      timestamp: typeof e.values?.timestamp === "string"
+        ? parseInt(e.values.timestamp, 16) : e.values?.timestamp,
+      transactionIndex: typeof e.values?.transactionIndex === "string"
+        ? parseInt(e.values.transactionIndex, 16) : e.values?.transactionIndex,
+      logIndex: typeof e.values?.logIndex === "string"
+        ? parseInt(e.values.logIndex, 16) : e.values?.logIndex,
+      transactionHash: e.values?.transactionHash,
+      ...Object.fromEntries(
+        Object.entries(e.values ?? {}).filter(
+          ([k]) => !["blockNumber", "timestamp", "transactionIndex", "logIndex", "transactionHash"].includes(k)
+        )
+      ),
+    })) ?? [];
   }
 
-  async fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<CrcV2_CirclesBackingInitiated[]> {
-    const rpc = new CirclesRpc(this.rpcUrl);
-    const response = await rpc.call<unknown>("circles_events", [
-      undefined, fromBlock, toBlock,
-      ["CrcV2_CirclesBackingInitiated"],
-      [{ Type: "FilterPredicate", FilterType: "Equals", Column: "emitter", Value: backingFactoryAddress }]
-    ]);
-    return unwrapEventsResult(response.result) as CrcV2_CirclesBackingInitiated[];
+  async fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingCompletedEvent[]> {
+    return this.fetchEvents<BackingCompletedEvent>(
+      backingFactoryAddress, fromBlock, toBlock ?? null, ["CrcV2_CirclesBackingCompleted"],
+    );
+  }
+
+  async fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingInitiatedEvent[]> {
+    return this.fetchEvents<BackingInitiatedEvent>(
+      backingFactoryAddress, fromBlock, toBlock ?? null, ["CrcV2_CirclesBackingInitiated"],
+    );
   }
 
   async fetchAllBaseGroups(pageSize: number = 1000): Promise<string[]> {
-    const limit = Math.max(1, pageSize);
-    const rpc = new CirclesRpc(this.rpcUrl);
-    const data = new CirclesData(rpc);
-    const query = data.findGroups(limit, {
-      groupTypeIn: ["CrcV2_BaseGroupCreated"]
+    const query = this.rpc.group.getGroups(pageSize, {
+      groupTypeIn: ["CrcV2_BaseGroupCreated"],
     });
 
     const groups = new Set<string>();
-
     while (await query.queryNextPage()) {
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
@@ -145,9 +111,34 @@ export class CirclesRpcService implements ICirclesRpc {
 
     return Array.from(groups);
   }
-}
 
-export const __testables = {
-  unwrapEventsResult,
-  flattenRawEvent
-};
+  async fetchAllHumanAvatars(pageSize: number = 1000, logger?: ILoggerService): Promise<string[]> {
+    const query = new PagedQuery<{ avatar: string }>(this.rpc.client, {
+      namespace: "CrcV2",
+      table: "RegisterHuman",
+      columns: ["avatar", "blockNumber", "transactionIndex", "logIndex"],
+      sortOrder: "ASC",
+      limit: pageSize,
+    });
+
+    const avatars: string[] = [];
+    let pages = 0;
+
+    while (await query.queryNextPage()) {
+      pages++;
+      const rows = query.currentPage?.results ?? [];
+      for (const row of rows) {
+        if (row && typeof row.avatar === "string") {
+          try {
+            avatars.push(getAddress(row.avatar).toLowerCase());
+          } catch {
+            // skip invalid addresses
+          }
+        }
+      }
+    }
+
+    logger?.info(`Fetched ${avatars.length} avatars from RegisterHuman table across ${pages} page(s).`);
+    return avatars;
+  }
+}

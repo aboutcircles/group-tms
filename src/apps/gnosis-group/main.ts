@@ -4,6 +4,7 @@ import {CirclesRpcService} from "../../services/circlesRpcService";
 import {IGroupService} from "../../interfaces/IGroupService";
 import {SafeGroupService} from "../../services/safeGroupService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {
   runOnce,
   RunConfig,
@@ -18,9 +19,11 @@ import {
   RunOutcome
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
+import {StateStore} from "../../services/stateStore";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gnosis-group");
@@ -34,6 +37,7 @@ const safeAddress = process.env.GNOSIS_GROUP_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY || "";
 const dryRun = process.env.DRY_RUN === "1";
 const slackWebhookUrl = process.env.GNOSIS_GROUP_SLACK_WEBHOOK_URL || "";
+const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const runIntervalMinutes = Math.max(1, parseEnvInt("GNOSIS_GROUP_RUN_INTERVAL_MINUTES", 30));
 const runIntervalMs = runIntervalMinutes * 60 * 1_000;
 
@@ -49,10 +53,12 @@ const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFA
 
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const circlesRpc = new CirclesRpcService(rpcUrl);
-const slackService = new SlackService(slackWebhookUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const scoreCache = new ScoreCache();
-const errorTracker = new ConsecutiveErrorTracker(3);
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 const runLogger = rootLogger.child("run");
 let groupService: IGroupService | undefined;
@@ -101,15 +107,18 @@ rootLogger.info(`  - slackConfigured=${slackConfigured}`);
 
 void notifySlackStartup();
 
-process.on("SIGINT", async () => {
-  await notifySlackShutdown("SIGINT");
+async function gracefulShutdown(signal: NodeJS.Signals) {
+  try {
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
+  await notifySlackShutdown(signal);
   process.exit(0);
-});
+}
 
-process.on("SIGTERM", async () => {
-  await notifySlackShutdown("SIGTERM");
-  process.exit(0);
-});
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
 
 process.on("uncaughtException", async (error) => {
   rootLogger.error("Uncaught exception:", formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
@@ -126,15 +135,26 @@ process.on("unhandledRejection", async (reason) => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gnosis-group");
+  leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService,
+    (isLeader) => setLeaderStatus("gnosis-group", isLeader)
+  );
+  const maxDelay = runIntervalMs * 4;
+  let currentDelay = runIntervalMs;
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gnosis-group",
         rpcUrl,
         logger: rootLogger
       });
-      if (!isHealthy) { await delay(runIntervalMs); continue; }
+      if (!isHealthy) { await delay(currentDelay); continue; }
       await refreshBlacklist();
       const outcome = await runOnce(
         {
@@ -144,11 +164,13 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           scoreCache
         },
-        config
+        { ...config, dryRun: effectiveDryRun }
       );
 
+      await stateStore?.save("gnosis-group", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gnosis-group", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      currentDelay = runIntervalMs;
       rootLogger.info(
         `Run completed. Addresses with relative score > ${outcome.threshold}: ${outcome.aboveThresholdCount}`
       );
@@ -157,15 +179,19 @@ async function mainLoop(): Promise<void> {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
       recordRunError("gnosis-group");
-      rootLogger.error("gnosis-group run failed:");
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
-        await notifySlackRunError(error, consecutiveErrors);
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
+      currentDelay = Math.min(currentDelay * 2, maxDelay);
     }
 
     const elapsedMs = Date.now() - runStartedAt;
-    const waitMs = Math.max(0, runIntervalMs - elapsedMs);
+    const waitMs = Math.max(0, currentDelay - elapsedMs);
     if (waitMs > 0) {
       rootLogger.info(`Waiting ${(waitMs / 60_000).toFixed(1)} minute(s) before the next run.`);
       await delay(waitMs);
@@ -231,8 +257,8 @@ start().catch((cause) => {
   const error = cause instanceof Error ? cause : new Error(String(cause));
   rootLogger.error("gnosis-group run encountered an unrecoverable error:");
   rootLogger.error(formatErrorWithCauses(error));
-  void notifySlackFatal(error);
-  process.exitCode = 1;
+  void notifySlackFatal(error).catch(() => {});
+  setTimeout(() => process.exit(1), 3000).unref();
 });
 
 async function notifySlackStartup(): Promise<void> {
@@ -249,7 +275,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Slack Configured: ${slackConfigured}`;
 
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack startup notification sent.");
     } else {
@@ -262,7 +288,7 @@ async function notifySlackStartup(): Promise<void> {
 
 async function notifySlackShutdown(signal: NodeJS.Signals): Promise<void> {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *Gnosis Group Service shutting down*\n\nReceived ${signal}.`);
+    await slackService.notifySlackStartOrCrash(`🔄 *Gnosis Group Service shutting down*\n\nReceived ${signal}.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.warn("Failed to send Slack shutdown notification:", error);
   }
@@ -313,7 +339,7 @@ async function notifySlackRunSummary(outcome: RunOutcome): Promise<void> {
   }
 
   try {
-    await slackService.notifySlackStartOrCrash(lines.join("\n"));
+    await slackService.notifySlackStartOrCrash(lines.join("\n"), SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack run summary notification sent.");
     }
@@ -325,7 +351,7 @@ async function notifySlackRunSummary(outcome: RunOutcome): Promise<void> {
 async function notifySlackRunError(error: Error, consecutiveErrors: number): Promise<void> {
   const message = `⚠️ *Gnosis Group run failed* (${consecutiveErrors} consecutive failures)\n\n${formatErrorWithCauses(error)}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
     if (slackConfigured) {
       rootLogger.info("Slack run error notification sent.");
     }
@@ -337,7 +363,7 @@ async function notifySlackRunError(error: Error, consecutiveErrors: number): Pro
 async function notifySlackFatal(error: Error): Promise<void> {
   const message = `🚨 *Gnosis Group Service crashed*\n\n${error.message}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.CRITICAL);
   } catch (slackError) {
     rootLogger.warn("Failed to send Slack fatal notification:", slackError);
   }

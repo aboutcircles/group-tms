@@ -1,4 +1,5 @@
-import {Interface, JsonRpcProvider, getAddress, toBeHex, zeroPadValue} from "ethers";
+import {Interface, getAddress, toBeHex, zeroPadValue} from "ethers";
+import {createProvider} from "../../services/rpcProvider";
 import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {IGroupService} from "../../interfaces/IGroupService";
@@ -75,7 +76,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     ? cfg.confirmationBlocks
     : DEFAULT_CONFIRMATION_BLOCKS;
 
-  const provider = new JsonRpcProvider(cfg.rpcUrl);
+  const provider = createProvider(cfg.rpcUrl);
   const latestBlock = BigInt(await provider.getBlockNumber());
   const safeHeadBlock = latestBlock >= confirmationBlocks
     ? latestBlock - confirmationBlocks

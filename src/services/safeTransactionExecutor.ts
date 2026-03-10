@@ -1,5 +1,17 @@
 import Safe from "@safe-global/protocol-kit";
 import {getAddress, JsonRpcProvider} from "ethers";
+import {retryWithBackoff} from "./retryWithBackoff";
+import {createProvider, primaryRpcUrl} from "./rpcProvider";
+
+/** Default timeout for waiting on tx confirmation (5 minutes). */
+const DEFAULT_TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000;
+
+export class TransactionConfirmationTimeoutError extends Error {
+  constructor(public readonly txHash: string, public readonly timeoutMs: number) {
+    super(`Tx ${txHash} confirmation timed out after ${timeoutMs}ms`);
+    this.name = "TransactionConfirmationTimeoutError";
+  }
+}
 
 function ensureSuccessfulReceipt(receipt: any, context: string) {
   if (!receipt) throw new Error(`${context} did not return a receipt`);
@@ -25,10 +37,10 @@ export class SafeTransactionExecutor {
       throw new Error("Safe address is required");
     }
 
-    this.provider = new JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
     this.safeAddress = getAddress(safeAddress);
     this.safePromise = Safe.init({
-      provider: rpcUrl,
+      provider: primaryRpcUrl(rpcUrl),
       signer: signerPrivateKey,
       safeAddress: this.safeAddress
     });
@@ -38,7 +50,8 @@ export class SafeTransactionExecutor {
     to: string,
     data: string,
     confirmationsToWait = 1,
-    value: string | bigint = 0n
+    value: string | bigint = 0n,
+    confirmationTimeoutMs: number = DEFAULT_TX_CONFIRMATION_TIMEOUT_MS
   ): Promise<string> {
     const safe = await this.safePromise;
     const normalizedTo = getAddress(to);
@@ -54,14 +67,23 @@ export class SafeTransactionExecutor {
       ]
     });
 
-    const execution = await safe.executeTransaction(safeTx);
+    const execution = await retryWithBackoff(() => safe.executeTransaction(safeTx));
 
     const txHash =
       (execution as any).hash ?? (execution as any).transactionResponse?.hash;
 
     if (!txHash) throw new Error("No transaction hash returned from Safe execution");
 
-    const receipt = await this.provider.waitForTransaction(txHash, confirmationsToWait);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const receipt = await Promise.race([
+      this.provider.waitForTransaction(txHash, confirmationsToWait),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new TransactionConfirmationTimeoutError(txHash, confirmationTimeoutMs)),
+          confirmationTimeoutMs
+        );
+      })
+    ]).finally(() => clearTimeout(timeoutId));
     ensureSuccessfulReceipt(receipt, `Safe tx to ${normalizedTo}`);
 
     return txHash;

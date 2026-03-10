@@ -1,5 +1,6 @@
 import {ILoggerService} from "../interfaces/ILoggerService";
 import {setRpcHealthy} from "./metricsService";
+import {parseRpcUrls} from "./rpcProvider";
 
 type RpcHealthResponse = {
   result?: unknown;
@@ -76,15 +77,23 @@ export async function ensureRpcHealthyOrNotify(params: {
   logger: ILoggerService;
   timeoutMs?: number;
 }): Promise<boolean> {
-  const health = await checkRpcHealth(params.rpcUrl, params.timeoutMs);
-  setRpcHealthy(params.appName, health.healthy);
+  const urls = parseRpcUrls(params.rpcUrl);
 
-  if (!health.healthy) {
-    const detail = health.error ?? "unknown error";
+  // Try each URL — first healthy one wins
+  for (const url of urls) {
+    const health = await checkRpcHealth(url, params.timeoutMs);
+    if (health.healthy) {
+      setRpcHealthy(params.appName, true);
+      return true;
+    }
     params.logger.warn(
-      `[rpc-health] ${params.appName}: unhealthy RPC endpoint '${params.rpcUrl}' (${detail}). Skipping run.`
+      `[rpc-health] ${params.appName}: unhealthy RPC endpoint '${url}' (${health.error ?? "unknown error"})`
     );
   }
 
-  return health.healthy;
+  setRpcHealthy(params.appName, false);
+  params.logger.warn(
+    `[rpc-health] ${params.appName}: all RPC endpoints unhealthy. Skipping run.`
+  );
+  return false;
 }

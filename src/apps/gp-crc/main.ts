@@ -1,6 +1,7 @@
 import {BlacklistingService} from "../../services/blacklistingService";
 import {LoggerService} from "../../services/loggerService";
 import {SlackService} from "../../services/slackService";
+import {SlackSeverity} from "../../interfaces/ISlackService";
 import {MetriSafeService} from "../../services/metriSafeService";
 import {InMemoryAvatarSafeMappingStore} from "../../services/inMemoryAvatarSafeMappingStore";
 import {CirclesRpcService} from "../../services/circlesRpcService";
@@ -13,9 +14,11 @@ import {
   DEFAULT_GROUP_BATCH_SIZE
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
+import {StateStore} from "../../services/stateStore";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gp-crc");
@@ -23,6 +26,7 @@ const rootLogger = new LoggerService(verboseLogging, "gp-crc");
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
+const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const groupAddress = process.env.GP_CRC_GROUP_ADDRESS || "0xb629a1e86f3efada0f87c83494da8cc34c3f84ef";
 const safeAddress = process.env.GP_CRC_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.GP_CRC_SAFE_SIGNER_PRIVATE_KEY || "";
@@ -33,11 +37,13 @@ const metriSafeApiKey = process.env.METRI_SAFE_API_KEY || "";
 const fetchPageSize = parseEnvInt("GP_CRC_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
 const pollIntervalMs = 10 * 60 * 1_000;
 const groupBatchSize = DEFAULT_GROUP_BATCH_SIZE;
-const errorTracker = new ConsecutiveErrorTracker(3);
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+let leaderElection: LeaderElection | null = null;
 
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
-const slackService = new SlackService(slackWebhookUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 let groupService: IGroupService | undefined;
 let avatarSafeService: MetriSafeService;
@@ -89,35 +95,62 @@ rootLogger.info(`  - dryRun=${dryRun}`);
 
 void notifySlackStartup();
 
-process.on("SIGINT", async () => {
+async function gracefulShutdown(signal: string) {
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGINT signal. Graceful shutdown initiated.`);
+    await leaderElection?.stop();
+  } catch (err) {
+    rootLogger.warn("Failed to stop leader election:", err);
+  }
+  try {
+    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
   }
   process.exit(0);
+}
+
+process.on("SIGINT", () => { void gracefulShutdown("SIGINT"); });
+process.on("SIGTERM", () => { void gracefulShutdown("SIGTERM"); });
+
+process.on("uncaughtException", async (error) => {
+  rootLogger.error("Uncaught exception:", formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
+  try {
+    await slackService.notifySlackStartOrCrash(`💥 *gp-crc* Uncaught exception: ${error?.message || error}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
-process.on("SIGTERM", async () => {
+process.on("unhandledRejection", async (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  rootLogger.error("Unhandled rejection:", formatErrorWithCauses(error));
   try {
-    await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received SIGTERM signal. Graceful shutdown initiated.`);
-  } catch (error) {
-    rootLogger.error('Failed to send shutdown notification:', error);
-  }
-  process.exit(0);
+    await slackService.notifySlackStartOrCrash(`💥 *gp-crc* Unhandled rejection: ${error.message}`, SlackSeverity.CRITICAL);
+  } catch {}
+  process.exit(1);
 });
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gp-crc");
+  leaderElection = await LeaderElection.create(
+    process.env.LEADER_DB_URL,
+    process.env.INSTANCE_ID,
+    slackService,
+    (isLeader) => setLeaderStatus("gp-crc", isLeader)
+  );
+  const maxDelay = pollIntervalMs * 4;
+  let currentDelay = pollIntervalMs;
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+
   while (true) {
     const runStartedAt = Date.now();
+    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gp-crc",
         rpcUrl,
         logger: rootLogger
       });
-      if (!isHealthy) { await delay(pollIntervalMs); continue; }
+      if (!isHealthy) { await delay(currentDelay); continue; }
       await refreshBlacklist();
       const outcome = await runOnce(
         {
@@ -128,22 +161,28 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           avatarSafeMappingStore
         },
-        config
+        { ...config, dryRun: effectiveDryRun }
       );
+      await stateStore?.save("gp-crc", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gp-crc", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      currentDelay = pollIntervalMs;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
       recordRunError("gp-crc");
-      rootLogger.error("runOnce failed:");
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
-        void notifySlackRunError(error, consecutiveErrors);
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
       }
+      currentDelay = Math.min(currentDelay * 2, maxDelay);
     }
 
-    await delay(pollIntervalMs);
+    await delay(currentDelay);
   }
 }
 
@@ -187,7 +226,7 @@ start().catch((cause) => {
   rootLogger.error("GP-CRC TMS Service encountered an unrecoverable error:");
   rootLogger.error(formatErrorWithCauses(error));
   void slackService.notifySlackStartOrCrash(
-    `🚨 *GP-CRC TMS Service crashed*\n\nLast error: ${error.message}`
+    `🚨 *GP-CRC TMS Service crashed*\n\nLast error: ${error.message}`, SlackSeverity.CRITICAL
   ).catch((slackError: unknown) => {
     rootLogger.warn("Failed to send crash notification to Slack:", slackError);
   });
@@ -209,7 +248,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Dry Run: ${dryRun}`;
 
   try {
-    await slackService.notifySlackStartOrCrash(startupMessage);
+    await slackService.notifySlackStartOrCrash(startupMessage, SlackSeverity.INFO);
     if (slackConfigured) {
       rootLogger.info("Slack startup notification sent successfully.");
     } else {
@@ -224,7 +263,7 @@ async function notifySlackStartup(): Promise<void> {
 async function notifySlackRunError(error: Error, consecutiveErrors: number): Promise<void> {
   const message = `⚠️ *GP-CRC TMS Service runOnce error* (${consecutiveErrors} consecutive failures)\n\n${formatErrorWithCauses(error)}`;
   try {
-    await slackService.notifySlackStartOrCrash(message);
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
   } catch (slackError) {
     rootLogger.warn("Failed to send run error notification to Slack:", slackError);
   }

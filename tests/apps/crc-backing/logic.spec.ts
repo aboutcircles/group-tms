@@ -17,7 +17,6 @@ import {
   FakeLogger,
   FakeSlack
 } from "../../../fakes/fakes";
-import {Address} from "@circles-sdk/utils";
 import {mkCompleted, mkInitiated} from "../../../fakes/factories";
 
 const GROUP = "0xgroup000000000000000000000000000000000000";
@@ -72,8 +71,8 @@ describe("trustAllNewBackers", () => {
     const deps = makeDeps();
     const rpc = deps.circlesRpc as FakeCirclesRpc;
 
-    const a = mkCompleted({backer: "0xA".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 1});
-    const b = mkCompleted({backer: "0xB".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 2});
+    const a = mkCompleted({backer: "0xA".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 1});
+    const b = mkCompleted({backer: "0xB".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 2});
     rpc.completed = [a, b];
     (rpc as FakeCirclesRpc).trusteesByTruster[GROUP.toLowerCase()] = [];
 
@@ -101,8 +100,8 @@ describe("trustAllNewBackers", () => {
     const deps = makeDeps({blacklistingService: new FakeBlacklist(blocked)});
     const rpc = deps.circlesRpc as FakeCirclesRpc;
 
-    const a = mkCompleted({backer: "0xA".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 1});
-    const b = mkCompleted({backer: "0xB".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 2});
+    const a = mkCompleted({backer: "0xA".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 1});
+    const b = mkCompleted({backer: "0xB".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 2});
     rpc.completed = [a, b];
     (rpc as FakeCirclesRpc).trusteesByTruster[GROUP.toLowerCase()] = [b.backer];
 
@@ -162,9 +161,9 @@ describe("trustAllNewBackers", () => {
     const rpc = deps.circlesRpc as FakeCirclesRpc;
 
     // Completed events: BAD (blocked), WARN (flagged), and OK (clean)
-    const badEvt = mkCompleted({backer: "0xBAD".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 1});
-    const warnEvt = mkCompleted({backer: "0xWARN".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 2});
-    const okEvt = mkCompleted({backer: "0xOK".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 3});
+    const badEvt = mkCompleted({backer: "0xBAD".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 1});
+    const warnEvt = mkCompleted({backer: "0xWARN".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 2});
+    const okEvt = mkCompleted({backer: "0xOK".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 3});
     rpc.completed = [badEvt, warnEvt, okEvt];
 
     // No one is already trusted from state
@@ -197,7 +196,7 @@ describe("trustAllNewBackers", () => {
   });
 
   it("untrusts already trusted backers that are now blacklisted", async () => {
-    const blocked = "0xBLOCKED".padEnd(42, "0") as Address;
+    const blocked = "0xBLOCKED".padEnd(42, "0");
     const deps = makeDeps({blacklistingService: new FakeBlacklist(new Set([blocked.toLowerCase()]))});
     const rpc = deps.circlesRpc as FakeCirclesRpc;
     (rpc as FakeCirclesRpc).trusteesByTruster[GROUP.toLowerCase()] = [blocked];
@@ -225,12 +224,12 @@ describe("trustAllNewBackers", () => {
   });
 
   it("untrusts before trusting when both apply", async () => {
-    const blocked = "0xBLOCKED".padEnd(42, "0") as Address;
+    const blocked = "0xBLOCKED".padEnd(42, "0");
     const deps = makeDeps({blacklistingService: new FakeBlacklist(new Set([blocked.toLowerCase()]))});
     const rpc = deps.circlesRpc as FakeCirclesRpc;
     (rpc as FakeCirclesRpc).trusteesByTruster[GROUP.toLowerCase()] = [blocked];
 
-    const okBacker = mkCompleted({backer: "0xOK".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 1});
+    const okBacker = mkCompleted({backer: "0xOK".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 1});
     rpc.completed = [okBacker];
 
     await trustAllNewBackers(
@@ -258,7 +257,7 @@ describe("trustAllNewBackers", () => {
     const rpc = deps.circlesRpc as FakeCirclesRpc;
     const grp = deps.groupService as FakeGroupService;
 
-    const actualBacker = mkCompleted({backer: "0xBACKER".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 1});
+    const actualBacker = mkCompleted({backer: "0xBACKER".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 1});
     rpc.completed = [actualBacker];
 
     const extra = "0xEXTRA".padEnd(42, "0");
@@ -283,7 +282,7 @@ describe("trustAllNewBackers", () => {
   });
 
   it("logs trust and untrust targets during dry-run mode", async () => {
-    const blocked = "0xBLOCKED".padEnd(42, "0") as Address;
+    const blocked = "0xBLOCKED".padEnd(42, "0");
     const deps = makeDeps({blacklistingService: new FakeBlacklist(new Set([blocked.toLowerCase()]))});
     const rpc = deps.circlesRpc as FakeCirclesRpc;
     const logger = deps.logger as FakeLogger;
@@ -291,7 +290,7 @@ describe("trustAllNewBackers", () => {
 
     (rpc as FakeCirclesRpc).trusteesByTruster[GROUP.toLowerCase()] = [blocked];
 
-    const okBacker = mkCompleted({backer: "0xOK".padEnd(42, "0") as Address, blockNumber: DEPLOYED_AT + 3});
+    const okBacker = mkCompleted({backer: "0xOK".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 3});
     rpc.completed = [okBacker];
 
     await trustAllNewBackers(
@@ -327,8 +326,8 @@ describe("findPendingBackingProcesses", () => {
     const rpc = deps.circlesRpc as FakeCirclesRpc;
 
     const completed = mkCompleted({
-      backer: "0xdone".padEnd(42, "0") as Address,
-      circlesBackingInstance: "0xinst1".padEnd(42, "1") as Address,
+      backer: "0xdone".padEnd(42, "0"),
+      circlesBackingInstance: "0xinst1".padEnd(42, "1"),
       blockNumber: DEPLOYED_AT + 5
     });
 
@@ -339,14 +338,14 @@ describe("findPendingBackingProcesses", () => {
       timestamp: 9_500
     });
     const init2 = mkInitiated({
-      backer: "0xok".padEnd(42, "0") as Address,
-      circlesBackingInstance: "0xinst2".padEnd(42, "1") as Address,
+      backer: "0xok".padEnd(42, "0"),
+      circlesBackingInstance: "0xinst2".padEnd(42, "1"),
       blockNumber: DEPLOYED_AT + 3,
       timestamp: 9_600
     });
     const init3 = mkInitiated({
-      backer: "0xdead".padEnd(42, "0") as Address,
-      circlesBackingInstance: "0xinst3".padEnd(42, "1") as Address,
+      backer: "0xdead".padEnd(42, "0"),
+      circlesBackingInstance: "0xinst3".padEnd(42, "1"),
       blockNumber: DEPLOYED_AT + 4,
       timestamp: 9_700
     });
@@ -391,8 +390,8 @@ describe("runOnce – reconciliation flow", () => {
 
     // overdue by >60s but still < 24h to hit the before-deadline branch
     const initiated = mkInitiated({
-      backer: "0xok".padEnd(42, "0") as Address,
-      circlesBackingInstance: "0xinst100".padEnd(42, "1") as Address,
+      backer: "0xok".padEnd(42, "0"),
+      circlesBackingInstance: "0xinst100".padEnd(42, "1"),
       blockNumber: DEPLOYED_AT + 10,
       timestamp: HEAD.timestamp - 120
     });
@@ -417,15 +416,15 @@ describe("runOnce – reconciliation flow", () => {
     const slack = deps.slackService as FakeSlack;
 
     const trustedBacker = mkCompleted({
-      backer: "0xAAA".padEnd(42, "0") as Address,
+      backer: "0xAAA".padEnd(42, "0"),
       blockNumber: DEPLOYED_AT + 21
     });
     rpc.completed = [trustedBacker];
 
     const inst = "0xinstDryRun".padEnd(42, "1");
     const pending = mkInitiated({
-      backer: "0xBBB".padEnd(42, "0") as Address,
-      circlesBackingInstance: inst as Address,
+      backer: "0xBBB".padEnd(42, "0"),
+      circlesBackingInstance: inst,
       blockNumber: DEPLOYED_AT + 22,
       timestamp: HEAD.timestamp - 120
     });
@@ -451,8 +450,8 @@ describe("runOnce – reconciliation flow", () => {
     // older than 24h to hit the past-deadline branch
     rpc.initiated = [
       mkInitiated({
-        backer: "0xok".padEnd(42, "0") as Address,
-        circlesBackingInstance: inst as Address,
+        backer: "0xok".padEnd(42, "0"),
+        circlesBackingInstance: inst,
         blockNumber: DEPLOYED_AT + 11,
         timestamp: HEAD.timestamp - 100_000
       })
@@ -474,8 +473,8 @@ describe("runOnce – reconciliation flow", () => {
     const inst = "0xinst201".padEnd(42, "1");
     rpc.initiated = [
       mkInitiated({
-        backer: "0xok".padEnd(42, "0") as Address,
-        circlesBackingInstance: inst as Address,
+        backer: "0xok".padEnd(42, "0"),
+        circlesBackingInstance: inst,
         timestamp: HEAD.timestamp - 100_000
       })
     ];
@@ -493,7 +492,7 @@ describe("runOnce – reconciliation flow", () => {
 
     const inst = "0xinst301".padEnd(42, "1");
     rpc.initiated = [
-      mkInitiated({circlesBackingInstance: inst as Address, timestamp: HEAD.timestamp - 120})
+      mkInitiated({circlesBackingInstance: inst, timestamp: HEAD.timestamp - 120})
     ];
     svc.simulateReset[inst.toLowerCase()] = "OrderAlreadySettled";
     svc.simulateCreate[inst.toLowerCase()] = "LBPAlreadyCreated";
@@ -509,7 +508,7 @@ describe("runOnce – reconciliation flow", () => {
 
     const inst = "0xinst304".padEnd(42, "1");
     rpc.initiated = [
-      mkInitiated({circlesBackingInstance: inst as Address, timestamp: HEAD.timestamp - 120})
+      mkInitiated({circlesBackingInstance: inst, timestamp: HEAD.timestamp - 120})
     ];
     svc.simulateReset[inst.toLowerCase()] = "OrderUidIsTheSame";
     svc.simulateCreate[inst.toLowerCase()] = "Success";
@@ -538,8 +537,8 @@ describe("runOnce – reconciliation flow", () => {
     const inst = "0xinst202".padEnd(42, "1");
 
     const evt = mkInitiated({
-      backer: "0xok".padEnd(42, "0") as Address,
-      circlesBackingInstance: inst as Address,
+      backer: "0xok".padEnd(42, "0"),
+      circlesBackingInstance: inst,
       timestamp: HEAD.timestamp - 100_000,
       blockNumber: DEPLOYED_AT + 12
     });
@@ -568,8 +567,8 @@ describe("runOnce – reconciliation flow", () => {
     const inst = "0xinst203".padEnd(42, "1");
     rpc.initiated = [
       mkInitiated({
-        backer: "0xok".padEnd(42, "0") as Address,
-        circlesBackingInstance: inst as Address,
+        backer: "0xok".padEnd(42, "0"),
+        circlesBackingInstance: inst,
         timestamp: HEAD.timestamp - 100_000,
         blockNumber: DEPLOYED_AT + 13
       })
@@ -589,7 +588,7 @@ describe("runOnce – reconciliation flow", () => {
     const inst = "0xinst300".padEnd(42, "1");
     rpc.initiated = [
       mkInitiated({
-        circlesBackingInstance: inst as Address,
+        circlesBackingInstance: inst,
         timestamp: HEAD.timestamp - 120,
         blockNumber: DEPLOYED_AT + 14
       })
@@ -609,7 +608,7 @@ describe("runOnce – reconciliation flow", () => {
     const inst = "0xinst301".padEnd(42, "1");
     rpc.initiated = [
       mkInitiated({
-        circlesBackingInstance: inst as Address,
+        circlesBackingInstance: inst,
         timestamp: HEAD.timestamp - 120,
         blockNumber: DEPLOYED_AT + 15
       })
@@ -630,7 +629,7 @@ describe("runOnce – reconciliation flow", () => {
     const inst = "0xinst302".padEnd(42, "1");
     rpc.initiated = [
       mkInitiated({
-        circlesBackingInstance: inst as Address,
+        circlesBackingInstance: inst,
         timestamp: HEAD.timestamp - 120,
         blockNumber: DEPLOYED_AT + 16
       })
@@ -652,7 +651,7 @@ describe("runOnce – reconciliation flow", () => {
     const inst = "0xinst303".padEnd(42, "1");
     rpc.initiated = [
       mkInitiated({
-        circlesBackingInstance: inst as Address,
+        circlesBackingInstance: inst,
         timestamp: HEAD.timestamp - 120,
         blockNumber: DEPLOYED_AT + 17
       })

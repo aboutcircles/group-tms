@@ -1,19 +1,24 @@
 import {ResetCowSwapOrderResult, IBackingInstanceService, CreateLBPResult} from "../interfaces/IBackingInstanceService";
-import {Contract, Interface, JsonRpcProvider} from "ethers";
+import {Contract, Interface, JsonRpcProvider, FallbackProvider} from "ethers";
 import CirclesBackingABI from "../abi/CirclesBackingABI.json";
 import {SafeTransactionExecutor} from "./safeTransactionExecutor";
+import {createProvider} from "./rpcProvider";
 
 const BACKING_INTERFACE = new Interface(CirclesBackingABI);
 
 export class BackingInstanceService implements IBackingInstanceService {
-  private readonly provider: JsonRpcProvider;
+  private readonly provider: JsonRpcProvider | FallbackProvider;
   private readonly executor?: SafeTransactionExecutor;
 
   constructor(rpcUrl: string, signerPrivateKey?: string, safeAddress?: string) {
-    this.provider = new JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl);
     if (signerPrivateKey && signerPrivateKey.trim().length > 0 && safeAddress && safeAddress.trim().length > 0) {
       this.executor = new SafeTransactionExecutor(rpcUrl, signerPrivateKey, safeAddress);
     }
+  }
+
+  destroy(): void {
+    this.provider.destroy();
   }
 
   async resetCowSwapOrder(circlesBackingInstance: string): Promise<string> {

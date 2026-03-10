@@ -4,6 +4,8 @@ import {
   IAffiliateGroupEventsService,
 } from "../interfaces/IAffiliateGroupEventsService";
 import {ILoggerService} from "../interfaces/ILoggerService";
+import {retryWithBackoff} from "./retryWithBackoff";
+import {createProvider} from "./rpcProvider";
 
 const ABI = [
   "event AffiliateGroupChanged(address indexed human, address oldGroup, address newGroup)",
@@ -16,12 +18,14 @@ export class AffiliateGroupEventsService implements IAffiliateGroupEventsService
   private readonly logger?: ILoggerService;
 
   private readonly chunkSize: number = 100000;
-  private readonly maxRetries: number = 3;
-  private readonly retryDelayMs: number = 1000;
 
   constructor(rpcUrl: string, logger?: ILoggerService) {
-    this.provider = new JsonRpcProvider(rpcUrl);
+    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
     this.logger = logger;
+  }
+
+  destroy(): void {
+    this.provider.destroy();
   }
 
   async fetchAffiliateGroupChanged(
@@ -46,45 +50,21 @@ export class AffiliateGroupEventsService implements IAffiliateGroupEventsService
     while (start <= latest) {
       const end = Math.min(latest, start + this.chunkSize - 1);
       chunkIndex++;
-      let attempt = 0;
-      // retry loop for transient RPC timeouts
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        try {
-          const chunkStartedAt = Date.now();
-          const chunkLogs = await this.provider.getLogs({
-            address: registryAddress,
-            fromBlock: start,
-            toBlock: end,
-            topics: [this.topic],
-          });
-          allLogs.push(...chunkLogs);
-          const elapsedMs = Date.now() - startedAt;
-          const chunkMs = Date.now() - chunkStartedAt;
-          this.logger?.info(
-            `[affiliate-fetch] chunk ${chunkIndex}/${totalChunks} range=${start}-${end} logs=${chunkLogs.length} totalLogs=${allLogs.length} chunkMs=${chunkMs} elapsedMs=${elapsedMs}`
-          );
-          break;
-        } catch (err: any) {
-          const msg = String(err?.message || err);
-          const code = (err && (err.code ?? err.error?.code)) as any;
-          const isTimeout =
-            code === -32016 ||
-            msg.includes("timeout") ||
-            msg.includes("canceled") ||
-            msg.includes("cancelled");
-          this.logger?.warn(
-            `[affiliate-fetch] chunk ${chunkIndex}/${totalChunks} range=${start}-${end} failed attempt=${attempt + 1}/${this.maxRetries + 1} code=${String(code ?? "unknown")} error=${msg}`
-          );
-          if (!isTimeout || attempt >= this.maxRetries) {
-            throw err;
-          }
-          attempt++;
-          if (this.retryDelayMs > 0) {
-            await new Promise((res) => setTimeout(res, this.retryDelayMs));
-          }
-        }
-      }
+      const chunkStartedAt = Date.now();
+      const chunkLogs = await retryWithBackoff(() =>
+        this.provider.getLogs({
+          address: registryAddress,
+          fromBlock: start,
+          toBlock: end,
+          topics: [this.topic],
+        })
+      );
+      allLogs.push(...chunkLogs);
+      const elapsedMs = Date.now() - startedAt;
+      const chunkMs = Date.now() - chunkStartedAt;
+      this.logger?.info(
+        `[affiliate-fetch] chunk ${chunkIndex}/${totalChunks} range=${start}-${end} logs=${chunkLogs.length} totalLogs=${allLogs.length} chunkMs=${chunkMs} elapsedMs=${elapsedMs}`
+      );
       start = end + 1;
     }
 

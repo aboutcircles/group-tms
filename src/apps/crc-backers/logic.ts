@@ -5,7 +5,7 @@ import {IBackingInstanceService, ResetCowSwapOrderResult, CreateLBPResult} from 
 import {ISlackService} from "../../interfaces/ISlackService";
 import {IChainRpc} from "../../interfaces/IChainRpc";
 import {ILoggerService} from "../../interfaces/ILoggerService";
-import {CrcV2_CirclesBackingCompleted, CrcV2_CirclesBackingInitiated} from "@circles-sdk/data/dist/events/events";
+import {BackingCompletedEvent, BackingInitiatedEvent} from "../../interfaces/ICirclesRpc";
 
 export type RunConfig = {
   confirmationBlocks: number;
@@ -35,9 +35,9 @@ export type Deps = {
 
 export type TrustBackersResult = {
   totalBackingEvents: number;
-  validBackingEvents: CrcV2_CirclesBackingCompleted[];
+  validBackingEvents: BackingCompletedEvent[];
   blacklistedAddresses: Set<string>;
-  newBackingEvents: CrcV2_CirclesBackingCompleted[];
+  newBackingEvents: BackingCompletedEvent[];
   trustedAddresses: string[];
   untrustedAddresses: string[];
   trustTxHashes: string[];
@@ -56,7 +56,7 @@ async function findValidBackingEvents(
   extraAddressesToCheck: Iterable<string> = []
 ): Promise<{
   totalBackingEvents: number,
-  validBackingEvents: CrcV2_CirclesBackingCompleted[],
+  validBackingEvents: BackingCompletedEvent[],
   blacklistedAddresses: Set<string>
 }> {
   const newBackingCompletedEvents = await circlesRpc.fetchBackingCompletedEvents(backingFactoryAddress, fromBlock, toBlock);
@@ -81,8 +81,8 @@ async function findValidBackingEvents(
   };
 }
 
-export function batchEvents(backingEvents: CrcV2_CirclesBackingCompleted[]) {
-  const batches: CrcV2_CirclesBackingCompleted[][] = [];
+export function batchEvents(backingEvents: BackingCompletedEvent[]) {
+  const batches: BackingCompletedEvent[][] = [];
   for (let i = 0; i < backingEvents.length; i += TRUST_BATCH_SIZE) {
     batches.push(backingEvents.slice(i, i + TRUST_BATCH_SIZE));
   }
@@ -130,7 +130,7 @@ export async function trustAllNewBackers(
     LOG.table(Array.from(backingEvents.blacklistedAddresses).map((address) => ({address})));
   }
 
-  const validBackerEventsByAddress = new Map<string, CrcV2_CirclesBackingCompleted>();
+  const validBackerEventsByAddress = new Map<string, BackingCompletedEvent>();
   for (const event of backingEvents.validBackingEvents) {
     const backer = event.backer.toLowerCase();
     if (!validBackerEventsByAddress.has(backer)) {
@@ -264,7 +264,7 @@ export async function findPendingBackingProcesses(
   completedBackingProcesses: Pick<TrustBackersResult, "totalBackingEvents" | "validBackingEvents" | "blacklistedAddresses" | "newBackingEvents">,
   LOG: ILoggerService
 ) {
-  const key = (event: CrcV2_CirclesBackingInitiated | CrcV2_CirclesBackingCompleted) =>
+  const key = (event: BackingInitiatedEvent | BackingCompletedEvent) =>
     `${event.backer.toLowerCase()}-${event.circlesBackingInstance.toLowerCase()}`;
 
   const initiatedBackingProcesses = await circlesRpc.fetchBackingInitiatedEvents(backingFactoryAddress, fromBlock, toBlock);
@@ -283,7 +283,7 @@ export async function findPendingBackingProcesses(
 /**
  * Computes the exact deadline of a CirclesBacking instance.
  */
-export function computeOrderDeadlineSeconds(initiated: CrcV2_CirclesBackingInitiated): number {
+export function computeOrderDeadlineSeconds(initiated: BackingInitiatedEvent): number {
   const hasTimestamp = typeof initiated.timestamp === "number" && initiated.timestamp > 0;
   if (!hasTimestamp) {
     throw new Error(`Initiated event at block ${initiated.blockNumber} has no timestamp.`);
