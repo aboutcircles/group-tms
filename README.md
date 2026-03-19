@@ -77,7 +77,7 @@ CRC_BACKERS_SAFE_ADDRESS=                # Safe set as the group's service
 CRC_BACKERS_SAFE_SIGNER_PRIVATE_KEY=     # Private key for one Safe signer
 
 # Blacklist service
-BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/classify
+BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist
 
 # Scan window / timing
 START_AT_BLOCK=39743285
@@ -86,6 +86,7 @@ EXPECTED_SECONDS_TILL_COMPLETION=60
 
 # Notifications
 SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=               # Secondary webhook for informational messages
 
 # Logging
 VERBOSE_LOGGING=1     # any truthy value enables debug/table
@@ -110,7 +111,7 @@ METRI_SAFE_GRAPHQL_URL=https://gnosis-e702590.dedicated.hyperindex.xyz/v1/graphq
 METRI_SAFE_API_KEY=                      
 
 # Blacklist service
-BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/classify
+BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist
 
 # Scan window / timing
 START_AT_BLOCK=31734312
@@ -119,6 +120,7 @@ DRY_RUN=0                                 # Set to "1" to skip transactions
 
 # Notifications
 SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=                    # Secondary webhook for informational messages
 
 # Logging
 VERBOSE_LOGGING=1
@@ -147,6 +149,7 @@ DRY_RUN=0                               # Set to "1" for dry run mode (no actual
 
 # Notifications
 SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=               # Secondary webhook for informational messages
 
 # Logging
 VERBOSE_LOGGING=1     # any truthy value enables debug/table
@@ -179,6 +182,7 @@ DRY_RUN=0
 # Notifications
 DUBLIN_TMS_SLACK_WEBHOOK_URL=    # optional override; falls back to SLACK_WEBHOOK_URL
 SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=          # Secondary webhook for informational messages
 
 # Logging
 VERBOSE_LOGGING=1
@@ -200,13 +204,13 @@ ROUTER_SAFE_SIGNER_PRIVATE_KEY=            # Private key for one Safe signer
 ROUTER_POLL_INTERVAL_MS=1800000
 ROUTER_ENABLE_BATCH_SIZE=50
 ROUTER_FETCH_PAGE_SIZE=2000
-ROUTER_BLACKLIST_CHUNK_SIZE=1000
 
 # Operation mode
 DRY_RUN=0                                  # Set to "1" to log actions without enabling routing
 
 # Notifications
 SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=                    # Secondary webhook for informational messages
 
 # Logging
 VERBOSE_LOGGING=1
@@ -217,21 +221,32 @@ VERBOSE_LOGGING=1
 ```dotenv
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
+GNOSIS_GROUP_ADDRESS=0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c
+GNOSIS_GROUP_BACKERS_GROUP_ADDRESS=0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026
 
 # Safe execution
 GNOSIS_GROUP_SAFE_ADDRESS=                # Safe that owns the group service role
-GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY=     # Private key of a 1/n Safe signer 
+GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY=     # Private key of a 1/n Safe signer
 
 # External services
-BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/classify
+BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist
 GNOSIS_GROUP_SCORING_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore/batch
 
+# Scan window / timing
+GNOSIS_GROUP_RUN_INTERVAL_MINUTES=30      # Run interval in minutes
+GNOSIS_GROUP_FETCH_PAGE_SIZE=             # Fetch page size
+GNOSIS_GROUP_SCORE_BATCH_SIZE=            # Score batch size
+GNOSIS_GROUP_SCORE_THRESHOLD=             # Score threshold for membership
+GNOSIS_GROUP_BATCH_SIZE=                  # Transaction batch size
+GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES=240  # Score cache TTL in minutes
+
 # Operation mode
-GNOSIS_GROUP_DRY_RUN=0                 # Set to "1" to skip blacklist & scoring requests
+DRY_RUN=0                              # Set to "1" to skip blacklist & scoring requests
 
 # Notifications
 GNOSIS_GROUP_SLACK_WEBHOOK_URL=        # Optional override; falls back to SLACK_WEBHOOK_URL
 SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=                # Secondary webhook for informational messages
 
 # Logging
 VERBOSE_LOGGING=1
@@ -316,7 +331,7 @@ VERBOSE_LOGGING=1
 * Fetches registered human avatars and filters out blacklisted addresses
 * Calls a relative trust scoring service to rank avatars by configured targets
 * Uses a Safe for execution; set `GNOSIS_GROUP_SAFE_ADDRESS` plus `GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY` for a 1/n Safe owner
-* `GNOSIS_GROUP_DRY_RUN=1` (or `DRY_RUN=1`) skips blacklist and scoring service calls while logging the batches that would be requested
+* `DRY_RUN=1` skips blacklist and scoring service calls while logging the batches that would be requested
 
 ### Router TMS
 * `ROUTER_SAFE_ADDRESS` must control the router's executor role; signer key must belong to that Safe
