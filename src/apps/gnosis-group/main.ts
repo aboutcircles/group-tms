@@ -141,7 +141,7 @@ async function mainLoop(): Promise<void> {
     slackService,
     (isLeader) => setLeaderStatus("gnosis-group", isLeader)
   );
-  const maxDelay = runIntervalMs * 4;
+  const maxDelay = Math.min(runIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = runIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
 

@@ -123,7 +123,7 @@ function delay(ms: number): Promise<void> {
 
 async function loop(leaderElection: LeaderElection | null) {
   const pollIntervalMs = 60 * 1000;
-  const maxDelay = pollIntervalMs * 4;
+  const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
 
   // Attempt to restore scan cursor from PG
