@@ -29,12 +29,13 @@ const enableBatchSize = parseEnvInt("ROUTER_ENABLE_BATCH_SIZE", DEFAULT_ENABLE_B
 const fetchPageSize = parseEnvInt("ROUTER_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
+const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
 const safeAddress = process.env.ROUTER_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.ROUTER_SAFE_SIGNER_PRIVATE_KEY || "";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 
 const rootLogger = new LoggerService(verboseLogging, "router-tms");
-const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);

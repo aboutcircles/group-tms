@@ -5,10 +5,12 @@ export class SlackService implements ISlackService {
   private readonly tag: string;
   private readonly alertWebhookUrl: string;
   private readonly infoWebhookUrl: string | undefined;
+  private readonly infoChannel: string | undefined;
 
-  constructor(alertWebhookUrl: string, infoWebhookUrl?: string) {
+  constructor(alertWebhookUrl: string, infoWebhookUrl?: string, infoChannel?: string) {
     this.alertWebhookUrl = alertWebhookUrl;
     this.infoWebhookUrl = infoWebhookUrl?.trim() || undefined;
+    this.infoChannel = infoChannel?.trim() || undefined;
     const env = process.env.ENVIRONMENT || "unknown";
     const instance = process.env.INSTANCE_ID || "";
     const app = process.env.APP_NAME || "group-tms";
@@ -54,12 +56,15 @@ export class SlackService implements ISlackService {
       return;
     }
 
+    const payload: Record<string, string> = { text: tagged };
+    if (severity === SlackSeverity.INFO && this.infoChannel) {
+      payload.channel = this.infoChannel;
+    }
+
     const res = await fetch(webhookUrl, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        text: tagged
-      })
+      body: JSON.stringify(payload)
     });
     if (!res.ok) {
       throw new Error(`Slack notify failed: ${res.status} ${await res.text()}`);

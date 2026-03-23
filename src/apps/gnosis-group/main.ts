@@ -38,6 +38,7 @@ const safeSignerPrivateKey = process.env.GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY ||
 const dryRun = process.env.DRY_RUN === "1";
 const slackWebhookUrl = process.env.GNOSIS_GROUP_SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
+const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
 const runIntervalMinutes = Math.max(1, parseEnvInt("GNOSIS_GROUP_RUN_INTERVAL_MINUTES", 30));
 const runIntervalMs = runIntervalMinutes * 60 * 1_000;
 
@@ -53,7 +54,7 @@ const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFA
 
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const circlesRpc = new CirclesRpcService(rpcUrl);
-const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const scoreCache = new ScoreCache();
 const errorsBeforeCrash = 3;

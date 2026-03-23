@@ -22,6 +22,7 @@ const deployedAtBlock = Number.parseInt(process.env.START_AT_BLOCK || "39743285"
 const expectedTimeTillCompletion = Number.parseInt(process.env.EXPECTED_SECONDS_TILL_COMPLETION || "60");
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
+const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const confirmationBlocks = Number.parseInt(process.env.CONFIRMATION_BLOCKS || "2");
 const safeAddress = process.env.CRC_BACKERS_SAFE_ADDRESS || "";
@@ -48,7 +49,7 @@ if (!dryRun) {
 const circlesRpc = new CirclesRpcService(rpcUrl);
 const chainRpc = new ChainRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
-const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const groupService = dryRun ? undefined : new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress);
 // In dry-run mode, skip passing signer keys so BackingInstanceService doesn't
 // eagerly initialise Safe Protocol Kit (which calls eth_chainId via viem).
