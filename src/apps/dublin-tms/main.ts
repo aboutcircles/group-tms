@@ -56,6 +56,7 @@ const dryRun = process.env.DRY_RUN === "1";
 const servicePrivateKey = process.env.DUBLIN_TMS_SERVICE_PRIVATE_KEY || "";
 const slackWebhookUrl = process.env.DUBLIN_TMS_SLACK_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.DUBLIN_TMS_SLACK_WEBHOOK_URL_INFO || process.env.SLACK_WEBHOOK_URL_INFO || "";
+const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
 
 if (configuredToBlock !== undefined && configuredToBlock < configuredStartBlock) {
   throw new Error(
@@ -68,7 +69,7 @@ if (!dryRun && servicePrivateKey.trim().length === 0) {
 }
 
 const circlesRpc = new CirclesRpcService(rpcUrl);
-const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 
 let groupService: IGroupService | undefined;

@@ -36,7 +36,8 @@ const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl, rootLogger.chi
 
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
-const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo);
+const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = !!slackWebhookUrl;
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
