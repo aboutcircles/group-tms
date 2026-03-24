@@ -1,10 +1,11 @@
 import { Pool } from "pg";
+import { SlackSeverity } from "../interfaces/ISlackService";
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const STALENESS_THRESHOLD_SEC = 45;
 
 interface LeaderElectionNotifier {
-  notifySlackStartOrCrash(message: string): Promise<void>;
+  notifySlackStartOrCrash(message: string, severity?: SlackSeverity): Promise<void>;
 }
 
 export class LeaderElection {
@@ -96,7 +97,7 @@ export class LeaderElection {
 
   private notifySlack(message: string): void {
     if (!this.notifier) return;
-    this.notifier.notifySlackStartOrCrash(message).catch((err) => {
+    this.notifier.notifySlackStartOrCrash(message, SlackSeverity.INFO).catch((err) => {
       console.warn(`[leader-election] Slack notification failed:`, err instanceof Error ? err.message : err);
     });
   }
