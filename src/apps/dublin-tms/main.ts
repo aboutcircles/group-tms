@@ -13,6 +13,7 @@ import {
   DEFAULT_CONFIRMATION_BLOCKS
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
+import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {getAddress, Wallet} from "ethers";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 
@@ -113,6 +114,11 @@ rootLogger.info(`  - serviceEoa=${configuredServiceEoa}`);
 rootLogger.info(`  - servicePrivateKeyConfigured=${servicePrivateKey.trim().length > 0}`);
 rootLogger.info(`  - slackConfigured=${slackConfigured}`);
 
+const errorsBeforeCrash = 3;
+const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
+let currentDelay = pollIntervalMs;
+
 void notifySlackStartup();
 
 process.on("SIGINT", async () => {
@@ -164,14 +170,24 @@ async function mainLoop(): Promise<void> {
       );
 
       await notifySlackRunSummary(outcome);
+      errorTracker.recordSuccess();
+      currentDelay = pollIntervalMs;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      rootLogger.error("dublin-tms run failed:");
+      const consecutiveErrors = errorTracker.recordError();
+      rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
       rootLogger.error(formatErrorWithCauses(error));
+      if (errorTracker.shouldAlert()) {
+        rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+        void notifySlackRunError(error).catch(() => {});
+        setTimeout(() => process.exit(1), 3000).unref();
+        return;
+      }
       await notifySlackRunError(error);
+      currentDelay = Math.min(currentDelay * 2, maxDelay);
     }
 
-    await delay(pollIntervalMs);
+    await delay(currentDelay);
   }
 }
 

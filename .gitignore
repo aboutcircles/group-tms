@@ -14,6 +14,7 @@ lib/
 
 # Environment variables
 .env
+.envrc
 .env.local
 .env.development.local
 .env.test.local
@@ -124,5 +125,3 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
-
-

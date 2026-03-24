@@ -124,7 +124,7 @@ async function mainLoop(): Promise<void> {
     slackService,
     (isLeader) => setLeaderStatus("router-tms", isLeader)
   );
-  const maxDelay = pollIntervalMs * 4;
+  const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
 
