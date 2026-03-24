@@ -149,7 +149,7 @@ async function loop() {
     (isLeader) => setLeaderStatus("oic", isLeader)
   );
   const pollIntervalMs = refreshIntervalSec * 1000;
-  const maxDelay = pollIntervalMs * 4;
+  const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
 
   const state: IncrementalState = createInitialIncrementalState();
