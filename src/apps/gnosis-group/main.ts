@@ -13,8 +13,7 @@ import {
   DEFAULT_SCORE_BATCH_SIZE,
   DEFAULT_SCORE_THRESHOLD,
   DEFAULT_GROUP_BATCH_SIZE,
-  DEFAULT_BACKERS_GROUP_ADDRESS,
-  DEFAULT_AUTO_TRUST_GROUP_ADDRESSES,
+  FIXED_AUTO_TRUST_GROUP_ADDRESSES,
   DEFAULT_SCORE_CACHE_TTL_MS,
   RunOutcome
 } from "./logic";
@@ -32,7 +31,6 @@ const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 const scoringServiceUrl = process.env.GNOSIS_GROUP_SCORING_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore/batch";
 const targetGroupAddress = process.env.GNOSIS_GROUP_ADDRESS || "0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c";
-const backersGroupAddress = process.env.GNOSIS_GROUP_BACKERS_GROUP_ADDRESS || DEFAULT_BACKERS_GROUP_ADDRESS;
 const safeAddress = process.env.GNOSIS_GROUP_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY || "";
 const dryRun = process.env.DRY_RUN === "1";
@@ -80,7 +78,6 @@ const config: RunConfig = {
   rpcUrl,
   scoringServiceUrl,
   targetGroupAddress,
-  backersGroupAddress,
   fetchPageSize,
   scoreBatchSize,
   scoreThreshold,
@@ -93,12 +90,11 @@ rootLogger.info("Starting gnosis-group run with config:");
 rootLogger.info(`  - rpcUrl=${rpcUrl}`);
 rootLogger.info(`  - scoringServiceUrl=${scoringServiceUrl}`);
 rootLogger.info(`  - targetGroupAddress=${targetGroupAddress}`);
-rootLogger.info(`  - backersGroupAddress=${backersGroupAddress}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
 rootLogger.info(`  - scoreBatchSize=${scoreBatchSize}`);
 rootLogger.info(`  - scoreThreshold=${scoreThreshold}`);
 rootLogger.info(`  - groupBatchSize=${groupBatchSize}`);
-rootLogger.info(`  - defaultAutoTrustGroupAddresses=${DEFAULT_AUTO_TRUST_GROUP_ADDRESSES.join(",")}`);
+rootLogger.info(`  - fixedAutoTrustGroupAddresses=${FIXED_AUTO_TRUST_GROUP_ADDRESSES.join(",")}`);
 rootLogger.info(`  - safeAddress=${safeAddress || "(not set)"}`);
 rootLogger.info(`  - safeSignerPrivateKeyConfigured=${safeSignerPrivateKey.trim().length > 0}`);
 rootLogger.info(`  - dryRun=${dryRun}`);

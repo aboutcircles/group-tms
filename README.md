@@ -222,7 +222,6 @@ VERBOSE_LOGGING=1
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
 GNOSIS_GROUP_ADDRESS=0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c
-GNOSIS_GROUP_BACKERS_GROUP_ADDRESS=0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026
 
 # Safe execution
 GNOSIS_GROUP_SAFE_ADDRESS=                # Safe that owns the group service role

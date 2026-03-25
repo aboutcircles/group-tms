@@ -21,8 +21,6 @@ export type RunConfig = {
   rpcUrl: string;
   scoringServiceUrl: string;
   targetGroupAddress: string;
-  autoTrustGroupAddresses?: string[];
-  backersGroupAddress?: string;
   fetchPageSize?: number;
   scoreBatchSize?: number;
   scoreThreshold?: number;
@@ -92,10 +90,10 @@ export const DEFAULT_SCORE_BATCH_SIZE = 20;
 export const DEFAULT_SCORE_THRESHOLD = 100;
 export const DEFAULT_GROUP_BATCH_SIZE = 10;
 export const DEFAULT_BACKERS_GROUP_ADDRESS = "0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026";
-export const DEFAULT_AUTO_TRUST_GROUP_ADDRESSES = [
+export const DEFAULT_GP_CRC_GROUP_ADDRESS = "0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef";
+export const FIXED_AUTO_TRUST_GROUP_ADDRESSES = [
   DEFAULT_BACKERS_GROUP_ADDRESS,
-  "0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef",
-  "0x86533d1ada8ffbe7b6f7244f9a1b707f7f3e239b"
+  DEFAULT_GP_CRC_GROUP_ADDRESS
 ] as const;
 
 const SCORE_THRESHOLD_ENV_VAR = "GNOSIS_GROUP_SCORE_THRESHOLD";
@@ -121,14 +119,11 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     throw new Error(`Invalid target group address configured: '${cfg.targetGroupAddress}'`);
   }
 
-  const backersGroupAddress = normalizeAddress(cfg.backersGroupAddress ?? DEFAULT_BACKERS_GROUP_ADDRESS);
-  if (!backersGroupAddress) {
-    throw new Error(`Invalid backers group address configured: '${cfg.backersGroupAddress ?? DEFAULT_BACKERS_GROUP_ADDRESS}'`);
-  }
-
   if (!dryRun && !groupService) {
     throw new Error("Group service dependency is required when gnosis-group is not running in dry-run mode");
   }
+
+  const backersGroupAddress = DEFAULT_BACKERS_GROUP_ADDRESS;
 
   const loggerHuman = logger.child("humans");
   const loggerBlacklist = logger.child("blacklist");
@@ -144,21 +139,10 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     logger.info("No human avatars found; continuing with trustee validation only.");
   }
 
-  const configuredAutoTrustGroups = cfg.autoTrustGroupAddresses ?? [];
-  const autoTrustGroupAddresses = uniqueNormalizedAddresses([
-    backersGroupAddress,
-    ...DEFAULT_AUTO_TRUST_GROUP_ADDRESSES,
-    ...configuredAutoTrustGroups
-  ]);
-
-  if (autoTrustGroupAddresses.length === 0) {
-    throw new Error("No auto-trust group addresses configured.");
-  }
-
   const autoTrustGroupTrustees = new Map<string, string[]>();
   const autoTrustedNormalized = new Map<string, string>();
 
-  for (const groupAddress of autoTrustGroupAddresses) {
+  for (const groupAddress of FIXED_AUTO_TRUST_GROUP_ADDRESSES) {
     const trusteesRaw = await circlesRpc.fetchAllTrustees(groupAddress);
     const trustees = uniqueNormalizedAddresses(trusteesRaw);
     autoTrustGroupTrustees.set(groupAddress, trustees);
