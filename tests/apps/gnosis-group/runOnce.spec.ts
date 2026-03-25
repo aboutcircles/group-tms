@@ -1,5 +1,11 @@
 import {getAddress} from "ethers";
-import {runOnce, type Deps, type RunConfig} from "../../../src/apps/gnosis-group/logic";
+import {
+  runOnce,
+  type Deps,
+  type RunConfig,
+  DEFAULT_BACKERS_GROUP_ADDRESS,
+  DEFAULT_GP_CRC_GROUP_ADDRESS
+} from "../../../src/apps/gnosis-group/logic";
 import {FakeBlacklist, FakeCirclesRpc, FakeGroupService, FakeLogger} from "../../../fakes/fakes";
 import {IGroupService} from "../../../src/interfaces/IGroupService";
 
@@ -59,10 +65,10 @@ class FlakyGroupService implements IGroupService {
 }
 
 describe("gnosis-group runOnce", () => {
-  const circlesBackerGroup = getAddress("0x1000000000000000000000000000000000000001");
+  const circlesBackerGroup = getAddress(DEFAULT_BACKERS_GROUP_ADDRESS);
   const targetGroup = getAddress("0x2000000000000000000000000000000000000002");
   const trustedTarget = getAddress("0x3000000000000000000000000000000000000003");
-  const customAutoTrustGroup = getAddress("0x4000000000000000000000000000000000000004");
+  const gpCrcGroup = getAddress(DEFAULT_GP_CRC_GROUP_ADDRESS);
 
   it("fetches relative trust scores when running in dry-run mode", async () => {
     const highScoreRaw = "0x4000000000000000000000000000000000000004";
@@ -84,9 +90,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: true,
       scoreThreshold: 50,
       scoreBatchSize: 10,
@@ -147,9 +151,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: true,
       scoreBatchSize: 5,
       groupBatchSize: 5
@@ -210,9 +212,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: true,
       scoreThreshold: 10,
       scoreBatchSize: 10,
@@ -268,9 +268,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: false,
       scoreThreshold: 10,
       scoreBatchSize: 10,
@@ -330,9 +328,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: false,
       scoreThreshold: 10,
       scoreBatchSize: 10,
@@ -395,9 +391,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: false,
       scoreThreshold: 10,
       scoreBatchSize: 10,
@@ -461,9 +455,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: false,
       scoreThreshold: 50,
       scoreBatchSize: 10,
@@ -512,9 +504,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: true,
       scoreThreshold: 50,
       scoreBatchSize: 10,
@@ -563,9 +553,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: false,
       scoreThreshold: 50,
       scoreBatchSize: 10,
@@ -609,9 +597,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: "not-an-address",
-      backersGroupAddress: circlesBackerGroup,
       dryRun: true
     };
 
@@ -629,9 +615,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: false
     };
 
@@ -656,9 +640,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: true
     };
 
@@ -673,7 +655,7 @@ describe("gnosis-group runOnce", () => {
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  it("trusts below-threshold avatars guaranteed by configured auto-trust groups", async () => {
+  it("trusts below-threshold avatars guaranteed by the gp crc auto-trust group", async () => {
     const autoTrustedRaw = "0xc00000000000000000000000000000000000000c";
     const autoTrusted = getAddress(autoTrustedRaw);
 
@@ -681,7 +663,7 @@ describe("gnosis-group runOnce", () => {
     circlesRpc.humanAvatars = [autoTrusted];
     circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
     circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
-    circlesRpc.trusteesByTruster[customAutoTrustGroup.toLowerCase()] = [autoTrusted];
+    circlesRpc.trusteesByTruster[gpCrcGroup.toLowerCase()] = [autoTrusted];
 
     const groupService = new FakeGroupService();
 
@@ -695,9 +677,7 @@ describe("gnosis-group runOnce", () => {
     const cfg: RunConfig = {
       rpcUrl: "https://rpc.local",
       scoringServiceUrl: "https://scores.local",
-      autoTrustGroupAddresses: [circlesBackerGroup, customAutoTrustGroup],
       targetGroupAddress: targetGroup,
-      backersGroupAddress: circlesBackerGroup,
       dryRun: false,
       scoreThreshold: 50,
       scoreBatchSize: 10,
