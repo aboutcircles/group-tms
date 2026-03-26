@@ -4,6 +4,23 @@ import {ICirclesRpc, BackingCompletedEvent, BackingInitiatedEvent} from "../inte
 import {ILoggerService} from "../interfaces/ILoggerService";
 import {primaryRpcUrl} from "./rpcProvider";
 
+const PAGE_DELAY_MS = Math.max(50, Number(process.env.CIRCLES_RPC_PAGE_DELAY_MS) || 100);
+const MAX_PAGES = 500;
+const PAGE_TIMEOUT_MS = 30_000;
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`RPC page request timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
 export class CirclesRpcService implements ICirclesRpc {
   private readonly rpc: CirclesRpc;
 
@@ -34,14 +51,17 @@ export class CirclesRpcService implements ICirclesRpc {
     const trusterLc = truster.toLowerCase();
     const query = this.rpc.trust.getTrustRelations(trusterLc, 1000);
     const allTrustees: string[] = [];
+    let pages = 0;
 
-    while (await query.queryNextPage()) {
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
+      pages++;
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
         if (row.truster.toLowerCase() === trusterLc) {
           allTrustees.push(row.trustee.toLowerCase());
         }
       }
+      await delay(PAGE_DELAY_MS);
     }
 
     return allTrustees;
@@ -63,23 +83,26 @@ export class CirclesRpcService implements ICirclesRpc {
       undefined, fromBlock, toBlock, eventTypes,
       [{ Type: "FilterPredicate", FilterType: "Equals", Column: "emitter", Value: emitterAddress }],
     ]);
-    return (result as any)?.events?.map((e: any) => ({
-      $event: e.event,
-      blockNumber: typeof e.values?.blockNumber === "string"
-        ? parseInt(e.values.blockNumber, 16) : e.values?.blockNumber,
-      timestamp: typeof e.values?.timestamp === "string"
-        ? parseInt(e.values.timestamp, 16) : e.values?.timestamp,
-      transactionIndex: typeof e.values?.transactionIndex === "string"
-        ? parseInt(e.values.transactionIndex, 16) : e.values?.transactionIndex,
-      logIndex: typeof e.values?.logIndex === "string"
-        ? parseInt(e.values.logIndex, 16) : e.values?.logIndex,
-      transactionHash: e.values?.transactionHash,
-      ...Object.fromEntries(
+    return (result as any)?.events?.map((e: any) => {
+      const extra = Object.fromEntries(
         Object.entries(e.values ?? {}).filter(
           ([k]) => !["blockNumber", "timestamp", "transactionIndex", "logIndex", "transactionHash"].includes(k)
         )
-      ),
-    })) ?? [];
+      );
+      return {
+        ...extra,
+        $event: e.event,
+        blockNumber: typeof e.values?.blockNumber === "string"
+          ? parseInt(e.values.blockNumber, 16) : e.values?.blockNumber,
+        timestamp: typeof e.values?.timestamp === "string"
+          ? parseInt(e.values.timestamp, 16) : e.values?.timestamp,
+        transactionIndex: typeof e.values?.transactionIndex === "string"
+          ? parseInt(e.values.transactionIndex, 16) : e.values?.transactionIndex,
+        logIndex: typeof e.values?.logIndex === "string"
+          ? parseInt(e.values.logIndex, 16) : e.values?.logIndex,
+        transactionHash: e.values?.transactionHash,
+      };
+    }) ?? [];
   }
 
   async fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingCompletedEvent[]> {
@@ -100,13 +123,16 @@ export class CirclesRpcService implements ICirclesRpc {
     });
 
     const groups = new Set<string>();
-    while (await query.queryNextPage()) {
+    let pages = 0;
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
+      pages++;
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
         if (typeof row.group === "string" && row.group.length > 0) {
-          groups.add(row.group);
+          groups.add(row.group.toLowerCase());
         }
       }
+      await delay(PAGE_DELAY_MS);
     }
 
     return Array.from(groups);
@@ -123,8 +149,9 @@ export class CirclesRpcService implements ICirclesRpc {
 
     const avatars: string[] = [];
     let pages = 0;
+    let skipped = 0;
 
-    while (await query.queryNextPage()) {
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
       pages++;
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
@@ -132,12 +159,16 @@ export class CirclesRpcService implements ICirclesRpc {
           try {
             avatars.push(getAddress(row.avatar).toLowerCase());
           } catch {
-            // skip invalid addresses
+            skipped++;
           }
         }
       }
+      await delay(PAGE_DELAY_MS);
     }
 
+    if (skipped > 0) {
+      logger?.warn(`Skipped ${skipped} invalid avatar address(es) from RPC.`);
+    }
     logger?.info(`Fetched ${avatars.length} avatars from RegisterHuman table across ${pages} page(s).`);
     return avatars;
   }
