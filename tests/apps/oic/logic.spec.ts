@@ -165,6 +165,48 @@ describe("oic.runOnce", () => {
     expect(grp.calls.length).toBe(1);
     expect(grp.calls[0].trusteeAddresses.map(x => x.toLowerCase()).sort()).toEqual([extra]);
   });
+
+  it("logs dry-run untrust details without calling the group service", async () => {
+    const deps = makeDeps();
+    const cfg = makeCfg({dryRun: true});
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+    const grp = deps.groupService as FakeGroupService;
+    const logger = deps.logger as FakeLogger;
+
+    const stale = "0xC0FFEE".padEnd(42, "0");
+    rpc.trusteesByTruster[META_ORG.toLowerCase()] = [];
+    rpc.trusteesByTruster[GROUP.toLowerCase()] = [
+      stale,
+      ...Array.from(ALWAYS_TRUSTED_ADDRESSES),
+    ];
+
+    await runOnce(deps, cfg);
+
+    expect(grp.calls).toHaveLength(0);
+    const infoMessages = logger.logs
+      .filter((entry) => entry.level === "info")
+      .flatMap((entry) => entry.args.map((arg) => String(arg)));
+    expect(infoMessages.some((message) =>
+      message.includes("DRY RUN untrust:") && message.toLowerCase().includes(stale.toLowerCase())
+    )).toBe(true);
+  });
+
+  it("skips affiliate fetches when the deployment block is still ahead of the safe head", async () => {
+    const deps = makeDeps();
+    const cfg = makeCfg({deployedAtBlock: HEAD.blockNumber + 100});
+    const registry = deps.affiliateRegistry as FakeAffiliateGroupEvents;
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+
+    rpc.trusteesByTruster[META_ORG.toLowerCase()] = [];
+    rpc.trusteesByTruster[GROUP.toLowerCase()] = [];
+    registry.events = [
+      mkAffJoin("0xA".padEnd(42, "0"), GROUP, {blockNumber: HEAD.blockNumber + 101, txHash: "0xskip"}),
+    ];
+
+    await runOnce(deps, cfg);
+
+    expect((deps.groupService as FakeGroupService).calls).toHaveLength(1);
+  });
 });
 
 describe("oic.runIncremental", () => {
@@ -263,5 +305,27 @@ describe("oic.runIncremental", () => {
     // First untrust C, then trust A
     expect(grp.calls[0].trusteeAddresses.map(x => x.toLowerCase())).toEqual([C.toLowerCase()]);
     expect(grp.calls[1].trusteeAddresses.map(x => x.toLowerCase())).toEqual([A.toLowerCase()]);
+  });
+
+  it("logs an empty incremental scan when the range advances but no affiliate events are found", async () => {
+    const state: IncrementalState = {
+      initialized: true,
+      lastSafeHeadScanned: SAFE_HEAD - 1,
+      affiliates: new Set<string>(),
+    };
+    const deps = makeDeps();
+    const logger = deps.logger as FakeLogger;
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+
+    rpc.trusteesByTruster[META_ORG.toLowerCase()] = [];
+    rpc.trusteesByTruster[GROUP.toLowerCase()] = [];
+
+    await runIncremental(deps, makeCfg(), state);
+
+    const infoMessages = logger.logs
+      .filter((entry) => entry.level === "info")
+      .flatMap((entry) => entry.args.map((arg) => String(arg)));
+    expect(infoMessages).toContain("AffiliateGroupChanged affecting group: total=0 added=0 removed=0");
+    expect(state.lastSafeHeadScanned).toBe(SAFE_HEAD);
   });
 });

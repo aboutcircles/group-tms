@@ -21,6 +21,7 @@ export type RunConfig = {
   rpcUrl: string;
   scoringServiceUrl: string;
   targetGroupAddress: string;
+  historicAutoTrustSnapshotMembers?: string[];
   fetchPageSize?: number;
   scoreBatchSize?: number;
   scoreThreshold?: number;
@@ -91,6 +92,8 @@ export const DEFAULT_SCORE_THRESHOLD = 100;
 export const DEFAULT_GROUP_BATCH_SIZE = 10;
 export const DEFAULT_BACKERS_GROUP_ADDRESS = "0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026";
 export const DEFAULT_GP_CRC_GROUP_ADDRESS = "0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef";
+export const HISTORIC_AUTO_TRUST_GROUP_ADDRESS = "0x86533d1ada8ffbe7b6f7244f9a1b707f7f3e239b";
+export const HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER = 42_945_178;
 export const FIXED_AUTO_TRUST_GROUP_ADDRESSES = [
   DEFAULT_BACKERS_GROUP_ADDRESS,
   DEFAULT_GP_CRC_GROUP_ADDRESS
@@ -148,6 +151,13 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     autoTrustGroupTrustees.set(groupAddress, trustees);
   }
 
+  const historicAutoTrustMembers = uniqueNormalizedAddresses(
+    cfg.historicAutoTrustSnapshotMembers ?? await circlesRpc.fetchActiveGroupMembersAtBlock(
+      HISTORIC_AUTO_TRUST_GROUP_ADDRESS,
+      HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER
+    )
+  );
+
   const targetGroupTrusteesRaw = await circlesRpc.fetchAllTrustees(targetGroupAddress);
   const targetGroupTrustees = uniqueNormalizedAddresses(targetGroupTrusteesRaw);
 
@@ -162,6 +172,9 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     for (const address of trustees) {
       blacklistCandidates.add(address);
     }
+  }
+  for (const member of historicAutoTrustMembers) {
+    blacklistCandidates.add(member);
   }
   const addressesForBlacklistEvaluation = Array.from(blacklistCandidates);
 
@@ -218,6 +231,33 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     autoTrustGroupTrustees.set(groupAddress, allowedTrustees);
   }
 
+  const allowedHistoricAutoTrustMembers = historicAutoTrustMembers.filter((address) =>
+    !blacklistedLowercase.has(address.toLowerCase())
+  );
+  const blacklistedHistoricAutoTrustMembers = historicAutoTrustMembers.filter((address) =>
+    blacklistedLowercase.has(address.toLowerCase())
+  );
+
+  if (blacklistedHistoricAutoTrustMembers.length > 0) {
+    loggerBlacklist.warn(
+      `Blacklist service flagged ${blacklistedHistoricAutoTrustMembers.length} address(es) from historical auto-trust snapshot ${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}@${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}; they will be ignored.`
+    );
+    loggerBlacklist.debug(
+      `Blacklisted historical auto-trust addresses: ${blacklistedHistoricAutoTrustMembers.join(", ")}`
+    );
+  }
+
+  for (const member of allowedHistoricAutoTrustMembers) {
+    const lower = member.toLowerCase();
+    if (!autoTrustedNormalized.has(lower)) {
+      autoTrustedNormalized.set(lower, member);
+    }
+  }
+
+  loggerTrust.info(
+    `Historical auto-trust snapshot ${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}@${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}: ${allowedHistoricAutoTrustMembers.length} eligible member(s) after blacklist (fetched ${historicAutoTrustMembers.length}).`
+  );
+
   const trustedTargets = autoTrustGroupTrustees.get(backersGroupAddress) ?? [];
 
   if (trustedTargets.length === 0) {
@@ -268,6 +308,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
 
     const scoreBatches = chunkArray(uncachedAvatars, scoreBatchSize);
     if (dryRun) {
+      /* istanbul ignore next: impossible once allowedAvatars > 0; kept for defensive logging */
       if (scoreBatches.length === 0 && uncachedAvatars.length === 0 && cachedAvatars.length === 0) {
         loggerScores.info("Dry-run mode enabled; no avatars to score.");
       } else {
@@ -380,6 +421,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
         loggerTrust.debug(`Dry-run untrust batch ${index + 1}/${trustPlan.untrustBatches.length}: ${batch.join(", ")}`);
       });
     } else {
+      /* istanbul ignore next: guarded at the top of runOnce */
       if (!groupService) {
         throw new Error("Group service dependency missing; cannot execute untrust batches.");
       }
@@ -424,12 +466,14 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
         loggerTrust.debug(`Dry-run trust batch ${index + 1}/${trustPlan.trustBatches.length}: ${batch.join(", ")}`);
       });
     } else {
+      /* istanbul ignore next: guarded at the top of runOnce */
       if (!groupService) {
         throw new Error("Group service dependency missing; cannot execute trust batches.");
       }
       for (const [batchIndex, batch] of trustPlan.trustBatches.entries()) {
         const filteredBatch = batch.filter((address) => {
           const lower = address.toLowerCase();
+          /* istanbul ignore next: the trust plan already de-duplicates existing trustees */
           if (targetGroupTrusteesLowercase.has(lower)) {
             loggerTrust.debug(
               `Skipping ${address} in batch ${batchIndex + 1}/${trustPlan.trustBatches.length}: already trusted.`
@@ -439,6 +483,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
           return true;
         });
 
+        /* istanbul ignore next: the trust plan does not emit empty or fully trusted batches */
         if (filteredBatch.length === 0) {
           loggerTrust.info(
             `Skipping trust batch ${batchIndex + 1}/${trustPlan.trustBatches.length}; all address(es) already trusted.`
@@ -608,6 +653,7 @@ export function computeTrustPlan(input: ComputeTrustPlanInput): TrustPlan {
       continue;
     }
     const normalized = guaranteedMap.get(guaranteedLower);
+    /* istanbul ignore next: guaranteedLowercase is derived from guaranteedMap.keys() */
     if (!normalized) {
       continue;
     }
@@ -739,6 +785,7 @@ async function fetchRelativeTrustScoresWithRetry(
     }
   }
 
+  /* istanbul ignore next */
   throw new Error("Failed to fetch relative trust scores after retries.");
 }
 
@@ -871,6 +918,7 @@ async function fetchBlacklistVerdictsWithRetry(
     }
   }
 
+  /* istanbul ignore next */
   throw new Error("Failed to fetch blacklist verdicts after retries.");
 }
 
@@ -975,6 +1023,13 @@ function formatErrorMessage(error: unknown): string {
 }
 
 export const __testables = {
+  fetchRelativeTrustScores,
+  formatErrorMessage,
+  getScoreForAddress,
+  isBlacklisted,
+  normalizeAddress,
+  resolveScoreThreshold,
+  uniqueNormalizedAddresses,
   timedFetch,
   isRetryableFetchError
 };

@@ -65,6 +65,7 @@ export class FakeCirclesRpc implements ICirclesRpc {
   initiated: BackingInitiatedEvent[] = [];
   completed: BackingCompletedEvent[] = [];
   trusteesByTruster: Record<string, string[]> = {};
+  activeGroupMembersAtBlock: Record<string, string[]> = {};
   baseGroups: string[] = [];
   humanityOverrides = new Map<string, boolean>();
   humanAvatars: string[] = [];
@@ -81,6 +82,10 @@ export class FakeCirclesRpc implements ICirclesRpc {
 
   async fetchAllTrustees(truster: string): Promise<string[]> {
     return this.trusteesByTruster[truster.toLowerCase()] ?? [];
+  }
+
+  async fetchActiveGroupMembersAtBlock(groupAddress: string, blockNumber: number): Promise<string[]> {
+    return this.activeGroupMembersAtBlock[this.makeGroupBlockKey(groupAddress, blockNumber)] ?? [];
   }
 
   async fetchAllBaseGroups(_pageSize?: number): Promise<string[]> {
@@ -111,6 +116,10 @@ export class FakeCirclesRpc implements ICirclesRpc {
 
   async fetchAllHumanAvatars(_pageSize?: number): Promise<string[]> {
     return [...this.humanAvatars];
+  }
+
+  private makeGroupBlockKey(groupAddress: string, blockNumber: number): string {
+    return `${groupAddress.toLowerCase()}@${blockNumber}`;
   }
 }
 

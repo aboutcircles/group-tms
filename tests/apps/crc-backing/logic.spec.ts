@@ -317,6 +317,22 @@ describe("trustAllNewBackers", () => {
     )).toBe(true);
     expect(grp.calls).toHaveLength(0);
   });
+
+  it("requires a group service when trust reconciliation is not in dry-run mode", async () => {
+    await expect(
+      trustAllNewBackers(
+        new FakeCirclesRpc(),
+        new FakeBlacklist(),
+        undefined,
+        GROUP,
+        BACKING_FACTORY_ADDRESS,
+        DEPLOYED_AT,
+        SAFE_HEAD,
+        false,
+        new FakeLogger(true)
+      )
+    ).rejects.toThrow("Group service dependency is required when crc-backers is not running in dry-run mode");
+  });
 });
 
 describe("findPendingBackingProcesses", () => {
@@ -380,9 +396,35 @@ describe("computeOrderDeadlineSeconds", () => {
     const bad = mkInitiated({timestamp: undefined});
     expect(() => computeOrderDeadlineSeconds(bad)).toThrow(/has no timestamp/);
   });
+
+  it("adds one day to the initiation timestamp", () => {
+    const initiated = mkInitiated({timestamp: 100});
+    expect(computeOrderDeadlineSeconds(initiated)).toBe(100 + 24 * 60 * 60);
+  });
 });
 
 describe("runOnce – reconciliation flow", () => {
+  it("requires a group service outside dry-run mode", async () => {
+    const deps = makeDeps({groupService: undefined});
+
+    await expect(runOnce(deps, CFG)).rejects.toThrow(
+      "Group service dependency is required when crc-backers is not running in dry-run mode"
+    );
+  });
+
+  it("returns early when no safe blocks remain to scan", async () => {
+    const deps = makeDeps({chainRpc: new FakeChainRpc({blockNumber: DEPLOYED_AT, timestamp: HEAD.timestamp})});
+
+    await expect(
+      runOnce(deps, {...CFG, fromBlock: DEPLOYED_AT + 10})
+    ).resolves.toEqual({
+      fromBlock: DEPLOYED_AT + 10,
+      toBlock: DEPLOYED_AT - CFG.confirmationBlocks,
+      safeHeadBlock: DEPLOYED_AT - CFG.confirmationBlocks,
+      nextFromBlock: DEPLOYED_AT + 10
+    });
+  });
+
   it("before deadline (overdue wrt policy): OrderValid → resetCowSwapOrder", async () => {
     const deps = makeDeps();
     const rpc = deps.circlesRpc as FakeCirclesRpc;
@@ -463,6 +505,27 @@ describe("runOnce – reconciliation flow", () => {
 
     expect(svc.createCalls).toEqual([inst.toLowerCase()]);
     expect(svc.resetCalls).toEqual([]);
+  });
+
+  it("past on-chain deadline in dry-run mode logs a create without executing it", async () => {
+    const deps = makeDeps();
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+    const svc = deps.cowSwapService as FakeBackingInstanceService;
+
+    const inst = "0xinst201a".padEnd(42, "1");
+    rpc.initiated = [
+      mkInitiated({
+        backer: "0xok".padEnd(42, "0"),
+        circlesBackingInstance: inst,
+        timestamp: HEAD.timestamp - 100_000,
+        blockNumber: DEPLOYED_AT + 11
+      })
+    ];
+    svc.simulateCreate[inst.toLowerCase()] = "Success";
+
+    await runOnce(deps, {...CFG, dryRun: true});
+
+    expect(svc.createCalls).toEqual([]);
   });
 
   it("past on-chain deadline: simulateCreate LBPAlreadyCreated → no-op", async () => {
@@ -580,6 +643,25 @@ describe("runOnce – reconciliation flow", () => {
     expect(slack.notifications[0].reason).toMatch(/BackingAssetBalanceInsufficient/);
   });
 
+  it("throws on an unknown LBP state returned after the deadline", async () => {
+    const deps = makeDeps();
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+    const svc = deps.cowSwapService as FakeBackingInstanceService;
+
+    const inst = "0xinst203a".padEnd(42, "1");
+    rpc.initiated = [
+      mkInitiated({
+        backer: "0xok".padEnd(42, "0"),
+        circlesBackingInstance: inst,
+        timestamp: HEAD.timestamp - 100_000,
+        blockNumber: DEPLOYED_AT + 13
+      })
+    ];
+    svc.simulateCreate[inst.toLowerCase()] = "weird" as any;
+
+    await expect(runOnce(deps, CFG)).rejects.toThrow(/Unknown LBP state/);
+  });
+
   it("before deadline: OrderAlreadySettled then LBP Success → createLbp", async () => {
     const deps = makeDeps();
     const rpc = deps.circlesRpc as FakeCirclesRpc;
@@ -598,6 +680,26 @@ describe("runOnce – reconciliation flow", () => {
 
     await runOnce(deps, CFG);
     expect(svc.createCalls).toEqual([inst.toLowerCase()]);
+  });
+
+  it("before deadline in dry-run mode does not create an LBP after a settled order", async () => {
+    const deps = makeDeps();
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+    const svc = deps.cowSwapService as FakeBackingInstanceService;
+
+    const inst = "0xinst300a".padEnd(42, "1");
+    rpc.initiated = [
+      mkInitiated({
+        circlesBackingInstance: inst,
+        timestamp: HEAD.timestamp - 120,
+        blockNumber: DEPLOYED_AT + 14
+      })
+    ];
+    svc.simulateReset[inst.toLowerCase()] = "OrderAlreadySettled";
+    svc.simulateCreate[inst.toLowerCase()] = "Success";
+
+    await runOnce(deps, {...CFG, dryRun: true});
+    expect(svc.createCalls).toEqual([]);
   });
 
   it("before deadline: OrderAlreadySettled then LBPAlreadyCreated → no-op", async () => {
@@ -662,5 +764,68 @@ describe("runOnce – reconciliation flow", () => {
     await runOnce(deps, CFG);
     expect(slack.notifications.length).toBe(1);
     expect(slack.notifications[0].reason).toMatch(/OrderNotYetFilled inconsistency/);
+  });
+
+  it("throws on an unknown LBP state after a settled order", async () => {
+    const deps = makeDeps();
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+    const svc = deps.cowSwapService as FakeBackingInstanceService;
+
+    const inst = "0xinst303a".padEnd(42, "1");
+    rpc.initiated = [
+      mkInitiated({
+        circlesBackingInstance: inst,
+        timestamp: HEAD.timestamp - 120,
+        blockNumber: DEPLOYED_AT + 17
+      })
+    ];
+    svc.simulateReset[inst.toLowerCase()] = "OrderAlreadySettled";
+    svc.simulateCreate[inst.toLowerCase()] = "weird" as any;
+
+    await expect(runOnce(deps, CFG)).rejects.toThrow(/Unknown LBP state/);
+  });
+
+  it("throws on an unknown order state before the deadline", async () => {
+    const deps = makeDeps();
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+    const svc = deps.cowSwapService as FakeBackingInstanceService;
+
+    const inst = "0xinst304a".padEnd(42, "1");
+    rpc.initiated = [
+      mkInitiated({
+        circlesBackingInstance: inst,
+        timestamp: HEAD.timestamp - 120,
+        blockNumber: DEPLOYED_AT + 18
+      })
+    ];
+    svc.simulateReset[inst.toLowerCase()] = "unknown" as any;
+
+    await expect(runOnce(deps, CFG)).rejects.toThrow(/Unknown order state/);
+  });
+
+  it("warns when the Slack summary fails after trust and untrust changes", async () => {
+    const deps = makeDeps();
+    const rpc = deps.circlesRpc as FakeCirclesRpc;
+    const logger = deps.logger as FakeLogger;
+
+    const blacklistedTrusted = "0xBLOCKED".padEnd(42, "0");
+    const newBacker = mkCompleted({backer: "0xNEW".padEnd(42, "0"), blockNumber: DEPLOYED_AT + 1});
+    rpc.completed = [newBacker];
+    rpc.trusteesByTruster[GROUP.toLowerCase()] = [blacklistedTrusted];
+
+    deps.blacklistingService = new FakeBlacklist(new Set([blacklistedTrusted.toLowerCase()]));
+    deps.slackService = {
+      notifyBackingNotCompleted: async () => undefined,
+      notifySlackStartOrCrash: async () => {
+        throw new Error("slack down");
+      }
+    } as any;
+
+    await runOnce(deps, CFG);
+
+    const warningMessages = logger.logs
+      .filter((entry) => entry.level === "warn")
+      .flatMap((entry) => entry.args.map((arg) => String(arg)));
+    expect(warningMessages.some((message) => message.includes("Failed to send Slack trust/untrust summary"))).toBe(true);
   });
 });

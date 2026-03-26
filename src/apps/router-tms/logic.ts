@@ -457,3 +457,15 @@ function buildBaseGroupEnableTargets(
 
   return {targets, scheduledAvatars};
 }
+
+export const __testables = {
+  buildAvatarBaseGroupAssignments,
+  buildBaseGroupEnableTargets,
+  chunkArray,
+  createIsHumanChecker,
+  filterHumanAvatars,
+  isBlacklisted,
+  normalizeAddress,
+  normalizeAddressArray,
+  validateEnableTargets
+};

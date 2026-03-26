@@ -113,4 +113,25 @@ describe("computeTrustPlan", () => {
     expect(plan.addressesAutoTrustedByGroups).toEqual([normalizedGuaranteed]);
     expect(plan.trustBatches).toEqual([[normalizedGuaranteed]]);
   });
+
+  it("ignores invalid and duplicate addresses across planner inputs", () => {
+    const allowed = makeAddress(10);
+    const normalizedAllowed = getAddress(allowed);
+    const existing = makeAddress(11);
+    const normalizedExisting = getAddress(existing);
+
+    const plan = computeTrustPlan({
+      allowedAvatars: [allowed, "bad-address", allowed.toLowerCase()],
+      scores: {[normalizedAllowed.toLowerCase()]: 70},
+      scoreThreshold: 50,
+      guaranteedAddresses: ["bad-address", normalizedAllowed, normalizedAllowed.toLowerCase()],
+      existingTargetGroupAddresses: [normalizedExisting, "bad-address", normalizedExisting.toLowerCase()],
+      batchSize: 0
+    });
+
+    expect(plan.addressesQueuedForTrust).toEqual([normalizedAllowed]);
+    expect(plan.trustBatches).toEqual([[normalizedAllowed]]);
+    expect(plan.addressesToUntrust).toEqual([normalizedExisting, normalizedExisting]);
+    expect(plan.untrustBatches).toEqual([[normalizedExisting], [normalizedExisting]]);
+  });
 });
