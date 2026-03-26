@@ -30,6 +30,7 @@ export interface ICirclesRpc {
   fetchBackingInitiatedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingInitiatedEvent[]>;
   fetchBackingCompletedEvents(backingFactoryAddress: string, fromBlock: number, toBlock?: number): Promise<BackingCompletedEvent[]>;
   fetchAllTrustees(truster: string): Promise<string[]>;
+  fetchAllTrusteesForTrusters(trusters: string[], pageSize?: number): Promise<Map<string, string[]>>;
   fetchActiveGroupMembersAtBlock(groupAddress: string, blockNumber: number): Promise<string[]>;
   fetchAllBaseGroups(pageSize?: number): Promise<string[]>;
   isHuman(address: string): Promise<boolean>;

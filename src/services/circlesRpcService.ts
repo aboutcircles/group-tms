@@ -5,9 +5,19 @@ import {ILoggerService} from "../interfaces/ILoggerService";
 import {primaryRpcUrl} from "./rpcProvider";
 
 const CIRCLES_EVENTS_RESULT_LIMIT = 100;
+const DEFAULT_TRUST_QUERY_PAGE_SIZE = 1000;
+
+export type BulkTrusteesForTrustersStats = {
+  pagesFetched: number;
+  rowsScanned: number;
+};
 
 export class CirclesRpcService implements ICirclesRpc {
   private readonly rpc: CirclesRpc;
+  private lastBulkTrusteesForTrustersStats: BulkTrusteesForTrustersStats = {
+    pagesFetched: 0,
+    rowsScanned: 0
+  };
 
   constructor(rpcUrl: string) {
     this.rpc = new CirclesRpc(primaryRpcUrl(rpcUrl));
@@ -34,7 +44,7 @@ export class CirclesRpcService implements ICirclesRpc {
 
   async fetchAllTrustees(truster: string): Promise<string[]> {
     const trusterLc = truster.toLowerCase();
-    const query = this.rpc.trust.getTrustRelations(trusterLc, 1000);
+    const query = this.rpc.trust.getTrustRelations(trusterLc, DEFAULT_TRUST_QUERY_PAGE_SIZE);
     const allTrustees: string[] = [];
 
     while (await query.queryNextPage()) {
@@ -47,6 +57,92 @@ export class CirclesRpcService implements ICirclesRpc {
     }
 
     return allTrustees;
+  }
+
+  async fetchAllTrusteesForTrusters(
+    trusters: string[],
+    pageSize: number = DEFAULT_TRUST_QUERY_PAGE_SIZE
+  ): Promise<Map<string, string[]>> {
+    const normalizedTrusters = Array.from(new Set(trusters.map((truster) => truster.toLowerCase())));
+    const trusteesByTruster = new Map<string, string[]>();
+    normalizedTrusters.forEach((truster) => trusteesByTruster.set(truster, []));
+
+    this.lastBulkTrusteesForTrustersStats = {
+      pagesFetched: 0,
+      rowsScanned: 0
+    };
+
+    if (normalizedTrusters.length === 0) {
+      return trusteesByTruster;
+    }
+
+    const query = new PagedQuery<{
+      truster: string;
+      trustee: string;
+    }>(this.rpc.client, {
+      namespace: "V_Crc",
+      table: "TrustRelations",
+      sortOrder: "DESC",
+      columns: [
+        "blockNumber",
+        "timestamp",
+        "transactionIndex",
+        "logIndex",
+        "transactionHash",
+        "version",
+        "trustee",
+        "truster",
+        "expiryTime"
+      ],
+      filter: [{
+        Type: "Conjunction",
+        ConjunctionType: "And",
+        Predicates: [
+          {
+            Type: "FilterPredicate",
+            FilterType: "Equals",
+            Column: "version",
+            Value: 2
+          },
+          {
+            Type: "Conjunction",
+            ConjunctionType: "Or",
+            Predicates: normalizedTrusters.map((truster) => ({
+              Type: "FilterPredicate" as const,
+              FilterType: "Equals" as const,
+              Column: "truster",
+              Value: truster
+            }))
+          }
+        ]
+      }],
+      limit: pageSize
+    });
+
+    while (await query.queryNextPage()) {
+      this.lastBulkTrusteesForTrustersStats.pagesFetched += 1;
+      const rows = query.currentPage?.results ?? [];
+      this.lastBulkTrusteesForTrustersStats.rowsScanned += rows.length;
+
+      for (const row of rows) {
+        if (typeof row.truster !== "string" || typeof row.trustee !== "string") {
+          continue;
+        }
+
+        const normalizedTruster = row.truster.toLowerCase();
+        if (!trusteesByTruster.has(normalizedTruster)) {
+          continue;
+        }
+
+        trusteesByTruster.get(normalizedTruster)?.push(row.trustee.toLowerCase());
+      }
+    }
+
+    return trusteesByTruster;
+  }
+
+  getLastBulkTrusteesForTrustersStats(): BulkTrusteesForTrustersStats {
+    return this.lastBulkTrusteesForTrustersStats;
   }
 
   async fetchActiveGroupMembersAtBlock(groupAddress: string, blockNumber: number): Promise<string[]> {

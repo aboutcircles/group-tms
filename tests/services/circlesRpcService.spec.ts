@@ -73,7 +73,10 @@ function makeRawBackingCompletedEvent(blockNumber: number, suffix: string) {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  nextPagedQueryMock = null;
+});
 
 describe("CirclesRpcService", () => {
   // ────────────────────────────────────────────────────────────────────────
@@ -323,6 +326,87 @@ describe("CirclesRpcService", () => {
       const svc = buildService();
       const trustees = await svc.fetchAllTrustees(truster);
       expect(trustees).toEqual(["0xbbb", "0xddd"]);
+    });
+  });
+
+  describe("fetchAllTrusteesForTrusters", () => {
+    it("returns grouped trustees for multiple trusters from one paged query", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const trusterB = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [
+          { truster: trusterA, trustee: "0x111" },
+          { truster: trusterB, trustee: "0x222" }
+        ]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA, trusterB]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111"]],
+        [trusterB, ["0x222"]]
+      ]));
+      expect(svc.getLastBulkTrusteesForTrustersStats()).toEqual({
+        pagesFetched: 1,
+        rowsScanned: 2
+      });
+    });
+
+    it("initializes empty arrays for requested trusters with no rows", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const trusterB = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [{ truster: trusterA, trustee: "0x111" }]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA, trusterB]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111"]],
+        [trusterB, []]
+      ]));
+    });
+
+    it("aggregates trustees across multiple pages", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [{ truster: trusterA, trustee: "0x111" }],
+        [{ truster: trusterA, trustee: "0x222" }]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111", "0x222"]]
+      ]));
+      expect(svc.getLastBulkTrusteesForTrustersStats()).toEqual({
+        pagesFetched: 2,
+        rowsScanned: 2
+      });
+    });
+
+    it("ignores rows whose truster is not in the requested batch", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [
+          { truster: trusterA, trustee: "0x111" },
+          { truster: "0xcccccccccccccccccccccccccccccccccccccccc", trustee: "0x999" }
+        ]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111"]]
+      ]));
+      expect(svc.getLastBulkTrusteesForTrustersStats()).toEqual({
+        pagesFetched: 1,
+        rowsScanned: 2
+      });
     });
   });
 

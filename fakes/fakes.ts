@@ -84,6 +84,15 @@ export class FakeCirclesRpc implements ICirclesRpc {
     return this.trusteesByTruster[truster.toLowerCase()] ?? [];
   }
 
+  async fetchAllTrusteesForTrusters(trusters: string[]): Promise<Map<string, string[]>> {
+    const result = new Map<string, string[]>();
+    for (const truster of trusters) {
+      const normalized = truster.toLowerCase();
+      result.set(normalized, [...(this.trusteesByTruster[normalized] ?? [])]);
+    }
+    return result;
+  }
+
   async fetchActiveGroupMembersAtBlock(groupAddress: string, blockNumber: number): Promise<string[]> {
     return this.activeGroupMembersAtBlock[this.makeGroupBlockKey(groupAddress, blockNumber)] ?? [];
   }

@@ -18,6 +18,8 @@ const {
   buildAvatarBaseGroupAssignments,
   buildBaseGroupEnableTargets,
   chunkArray,
+  createHumanityChecker,
+  createIsHumanBatchChecker,
   createIsHumanChecker,
   filterHumanAvatars,
   normalizeAddress,
@@ -412,13 +414,45 @@ describe("router-tms helpers", () => {
     expect(await checker(human)).toBe(true);
   });
 
+  it("shares the humanity cache between single and batched lookups", async () => {
+    const human = getAddress("0x2000000000000000000000000000000000000B10");
+    const otherHuman = getAddress("0x2000000000000000000000000000000000000B11");
+
+    class CountingCirclesRpc extends FakeCirclesRpc {
+      singleCalls = 0;
+      batchCalls: string[][] = [];
+
+      override async isHuman(address: string): Promise<boolean> {
+        this.singleCalls += 1;
+        return super.isHuman(address);
+      }
+
+      override async isHumanBatch(addresses: string[]): Promise<Map<string, boolean>> {
+        this.batchCalls.push([...addresses]);
+        return new Map(addresses.map((address) => [address, true]));
+      }
+    }
+
+    const circlesRpc = new CountingCirclesRpc();
+    const checker = createHumanityChecker(circlesRpc);
+
+    expect(await checker.isHumanBatch([human, otherHuman, human])).toEqual(new Map([
+      [human.toLowerCase(), true],
+      [otherHuman.toLowerCase(), true]
+    ]));
+    expect(await checker.isHuman(human)).toBe(true);
+
+    expect(circlesRpc.batchCalls).toEqual([[human.toLowerCase(), otherHuman.toLowerCase()]]);
+    expect(circlesRpc.singleCalls).toBe(0);
+  });
+
   it("filters human avatars and groups eligible base group assignments", async () => {
     const humanA = getAddress("0x2000000000000000000000000000000000000C00");
     const humanB = getAddress("0x2000000000000000000000000000000000000C01");
     const baseGroup = getAddress("0xA0000000000000000000000000000000000000CC");
     const result = await filterHumanAvatars(
       [humanA, humanB],
-      async (address) => address === humanA,
+      async (addresses) => new Map(addresses.map((address) => [address.toLowerCase(), address === humanA])),
       1
     );
 
@@ -484,6 +518,7 @@ describe("router-tms helpers", () => {
     await expect(validateEnableTargets(
       [{baseGroup: defaultBaseGroup, addresses: [human], source: "fallback"}],
       async (address) => address === defaultBaseGroup,
+      async (addresses) => new Map(addresses.map((address) => [address.toLowerCase(), address === human])),
       defaultBaseGroup,
       logger
     )).rejects.toThrow("Base group");
@@ -491,6 +526,12 @@ describe("router-tms helpers", () => {
     const filtered = await validateEnableTargets(
       [{baseGroup: otherBaseGroup, addresses: [human], source: "base-group"}],
       async (address) => address !== otherBaseGroup && false,
+      (() => {
+        const circlesRpc = new FakeCirclesRpc();
+        circlesRpc.baseGroups = [otherBaseGroup];
+        circlesRpc.humanityOverrides.set(human, false);
+        return createIsHumanBatchChecker(circlesRpc);
+      })(),
       defaultBaseGroup,
       logger
     );

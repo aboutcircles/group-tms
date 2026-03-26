@@ -1,10 +1,12 @@
 import Safe from "@safe-global/protocol-kit";
-import {getAddress, JsonRpcProvider} from "ethers";
-import {retryWithBackoff} from "./retryWithBackoff";
-import {createProvider, primaryRpcUrl} from "./rpcProvider";
+import { getAddress, JsonRpcProvider, Wallet } from "ethers";
+import { retryWithBackoff } from "./retryWithBackoff";
+import { createProvider, primaryRpcUrl } from "./rpcProvider";
 
 /** Default timeout for waiting on tx confirmation (5 minutes). */
 const DEFAULT_TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000;
+const GAS_LIMIT_BUFFER_NUMERATOR = 120n;
+const GAS_LIMIT_BUFFER_DENOMINATOR = 100n;
 
 export class TransactionConfirmationTimeoutError extends Error {
   constructor(public readonly txHash: string, public readonly timeoutMs: number) {
@@ -28,6 +30,7 @@ export class SafeTransactionExecutor {
   private readonly provider: JsonRpcProvider;
   private readonly safePromise: Promise<Safe>;
   private readonly safeAddress: string;
+  private readonly signerAddress: string;
 
   constructor(rpcUrl: string, signerPrivateKey: string, safeAddress: string) {
     if (!signerPrivateKey || signerPrivateKey.trim().length === 0) {
@@ -39,6 +42,7 @@ export class SafeTransactionExecutor {
 
     this.provider = createProvider(rpcUrl) as JsonRpcProvider;
     this.safeAddress = getAddress(safeAddress);
+    this.signerAddress = getAddress(SafeTransactionExecutor.privateKeyToAddress(signerPrivateKey));
     this.safePromise = Safe.init({
       provider: primaryRpcUrl(rpcUrl),
       signer: signerPrivateKey,
@@ -57,7 +61,7 @@ export class SafeTransactionExecutor {
     const normalizedTo = getAddress(to);
     const normalizedValue = typeof value === "bigint" ? value.toString() : value ?? "0";
 
-    const safeTx = await safe.createTransaction({
+    const unsignedSafeTx = await safe.createTransaction({
       transactions: [
         {
           to: normalizedTo,
@@ -66,8 +70,12 @@ export class SafeTransactionExecutor {
         }
       ]
     });
+    const signedSafeTx = await safe.signTransaction(unsignedSafeTx);
+    const gasLimit = await this.estimateExecutionGasLimit(safe, signedSafeTx);
 
-    const execution = await retryWithBackoff(() => safe.executeTransaction(safeTx));
+    const execution = await retryWithBackoff(() =>
+      safe.executeTransaction(signedSafeTx, { gasLimit: gasLimit.toString() })
+    );
 
     const txHash =
       (execution as any).hash ?? (execution as any).transactionResponse?.hash;
@@ -87,5 +95,23 @@ export class SafeTransactionExecutor {
     ensureSuccessfulReceipt(receipt, `Safe tx to ${normalizedTo}`);
 
     return txHash;
+  }
+
+  private async estimateExecutionGasLimit(safe: Safe, safeTx: Awaited<ReturnType<Safe["createTransaction"]>>): Promise<bigint> {
+    // Estimate the fully encoded execTransaction with ethers to avoid Protocol Kit's
+    // internal viem estimate path, which is flaky on the Circles RPC.
+    const encodedSafeTx = await safe.getEncodedTransaction(safeTx);
+    const gasEstimate = await this.provider.estimateGas({
+      from: this.signerAddress,
+      to: this.safeAddress,
+      data: encodedSafeTx
+    });
+
+    return ((gasEstimate * GAS_LIMIT_BUFFER_NUMERATOR) + (GAS_LIMIT_BUFFER_DENOMINATOR - 1n)) / GAS_LIMIT_BUFFER_DENOMINATOR;
+  }
+
+  private static privateKeyToAddress(privateKey: string): string {
+    const normalized = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+    return new Wallet(normalized).address;
   }
 }
