@@ -10,6 +10,8 @@ const TRANSIENT_MESSAGES = [
   "ECONNRESET",
   "ECONNREFUSED",
   "socket hang up",
+  "429",
+  "Too Many Requests",
 ];
 
 const TRANSIENT_CODES = new Set<number>([-32016]);
