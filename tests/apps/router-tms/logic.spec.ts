@@ -235,7 +235,7 @@ describe("router-tms runOnce", () => {
     ]);
   });
 
-  it("enables base group members that are missing from RegisterHuman before defaulting remaining humans", async () => {
+  it("only enables base group members when they are present in RegisterHuman", async () => {
     const baseGroup = getAddress("0xA0000000000000000000000000000000000000AA");
     const baseGroupMember = getAddress("0x2000000000000000000000000000000000000300");
     const humanBob = getAddress("0x2000000000000000000000000000000000000301");
@@ -246,7 +246,7 @@ describe("router-tms runOnce", () => {
     circlesRpc.trusteesByTruster[baseGroup.toLowerCase()] = [baseGroupMember];
     circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
 
-    const routerService = new FakeRouterService(["0xtx_group", "0xtx_fallback"]);
+    const routerService = new FakeRouterService(["0xtx_fallback"]);
 
     const deps = makeDeps({
       circlesRpc,
@@ -262,12 +262,11 @@ describe("router-tms runOnce", () => {
 
     expect(outcome.allowedHumanCount).toBe(1);
     expect(outcome.blacklistedHumanCount).toBe(0);
-    expect(outcome.pendingEnableCount).toBe(2);
-    expect(outcome.executedEnableCount).toBe(2);
-    expect(outcome.txHashes).toEqual(["0xtx_group", "0xtx_fallback"]);
+    expect(outcome.pendingEnableCount).toBe(1);
+    expect(outcome.executedEnableCount).toBe(1);
+    expect(outcome.txHashes).toEqual(["0xtx_fallback"]);
 
     expect(routerService.calls).toEqual([
-      {baseGroup: baseGroup.toLowerCase(), crcAddresses: [baseGroupMember.toLowerCase()]},
       {baseGroup: DEFAULT_BASE_GROUP_ADDRESS.toLowerCase(), crcAddresses: [humanBob.toLowerCase()]}
     ]);
   });

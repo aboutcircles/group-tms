@@ -206,7 +206,7 @@ start().catch((cause) => {
 async function notifySlackStartup(): Promise<void> {
   const pollIntervalMinutes = formatMinutes(pollIntervalMs);
   const message = `✅ *Router-TMS Service started*\n\n` +
-    `Enabling routing for every non-blacklisted human avatar.\n` +
+    `Enabling routing only for non-blacklisted v2 human avatars.\n` +
     `- RPC: ${rpcUrl}\n` +
     `- TX RPC: ${txRpcUrl}\n` +
     `- Router: ${routerAddress}\n` +

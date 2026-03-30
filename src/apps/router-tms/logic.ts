@@ -105,26 +105,6 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   const allowedHumanSet = new Set(allowedHumanAvatars);
   const blacklistedSet = new Set(blacklistedHumanAvatars);
   const avatarBaseGroupAssignments = await buildAvatarBaseGroupAssignments(circlesRpc, logger);
-  const baseGroupAvatars = Array.from(avatarBaseGroupAssignments.keys());
-  const unknownBaseGroupAvatars = baseGroupAvatars.filter(
-    (avatar) => !allowedHumanSet.has(avatar) && !blacklistedSet.has(avatar)
-  );
-
-  const allowedBaseGroupAvatars = new Set<string>(allowedHumanSet);
-  const blacklistedBaseGroupAvatars = new Set<string>(blacklistedSet);
-
-  if (unknownBaseGroupAvatars.length > 0) {
-    logger.info(
-      `Evaluating blacklist for ${unknownBaseGroupAvatars.length} base group member(s) not present in RegisterHuman table...`
-    );
-    const {allowed, blacklisted} = await partitionBlacklistedAddresses(
-      blacklistingService,
-      unknownBaseGroupAvatars,
-      logger
-    );
-    allowed.forEach((address) => allowedBaseGroupAvatars.add(address));
-    blacklisted.forEach((address) => blacklistedBaseGroupAvatars.add(address));
-  }
 
   const eligibilityFilter = (avatar: string): boolean =>
     !routerTrustSet.has(avatar) && !previouslyEnabled.has(avatar);
@@ -134,8 +114,8 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     scheduledAvatars: baseGroupScheduledAvatars
   } = buildBaseGroupEnableTargets(
     avatarBaseGroupAssignments,
-    allowedBaseGroupAvatars,
-    blacklistedBaseGroupAvatars,
+    allowedHumanSet,
+    blacklistedSet,
     eligibilityFilter
   );
 
