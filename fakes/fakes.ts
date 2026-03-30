@@ -267,7 +267,7 @@ export class FakeAvatarSafeService implements IAvatarSafeService {
     const selectedOwnersBySafe = new Map<string, SafeOwnerSelection>();
     for (const candidate of candidates) {
       const existing = selectedOwnersBySafe.get(candidate.safe);
-      if (!existing || compareTimestamp(candidate.timestamp, existing.timestamp) > 0) {
+      if (!existing || shouldReplaceSelection(existing, candidate.avatar, candidate.timestamp)) {
         selectedOwnersBySafe.set(candidate.safe, {
           avatar: candidate.avatar,
           timestamp: candidate.timestamp
@@ -475,6 +475,22 @@ function compareTimestamp(left: string, right: string): number {
   if (leftBigInt > rightBigInt) return 1;
   if (leftBigInt < rightBigInt) return -1;
   return 0;
+}
+
+function shouldReplaceSelection(
+  existing: SafeOwnerSelection,
+  candidateAvatar: string,
+  candidateTimestamp: string
+): boolean {
+  const timestampComparison = compareTimestamp(candidateTimestamp, existing.timestamp);
+  if (timestampComparison > 0) {
+    return true;
+  }
+  if (timestampComparison < 0) {
+    return false;
+  }
+
+  return candidateAvatar.toLowerCase().localeCompare(existing.avatar.toLowerCase()) < 0;
 }
 
 function toComparableBigInt(raw: string): bigint | null {
