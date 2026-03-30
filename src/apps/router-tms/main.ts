@@ -18,8 +18,10 @@ import {InMemoryRouterEnablementStore} from "./enablementStore";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
+import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
+const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const routerAddress = process.env.ROUTER_ADDRESS || "0xdc287474114cc0551a81ddc2eb51783fbf34802f";
 const baseGroupAddress = process.env.ROUTER_BASE_GROUP_ADDRESS || DEFAULT_BASE_GROUP_ADDRESS;
 const dryRun = process.env.DRY_RUN === "1";
@@ -32,6 +34,7 @@ const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
 const safeAddress = process.env.ROUTER_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.ROUTER_SAFE_SIGNER_PRIVATE_KEY || "";
+const canSimulateTransactions = safeSignerPrivateKey.trim().length > 0 && safeAddress.trim().length > 0;
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 
 const rootLogger = new LoggerService(verboseLogging, "router-tms");
@@ -57,14 +60,14 @@ async function refreshBlacklist(): Promise<void> {
 }
 
 let routerService: RouterService | undefined;
-if (!dryRun) {
+if (!dryRun || canSimulateTransactions) {
   if (!safeSignerPrivateKey || safeSignerPrivateKey.trim().length === 0) {
     throw new Error("ROUTER_SAFE_SIGNER_PRIVATE_KEY is required when router-tms is not in dry-run mode.");
   }
   if (!safeAddress || safeAddress.trim().length === 0) {
     throw new Error("ROUTER_SAFE_ADDRESS is required when router-tms is not in dry-run mode.");
   }
-  routerService = new RouterService(rpcUrl, routerAddress, safeSignerPrivateKey, safeAddress);
+  routerService = new RouterService(rpcUrl, routerAddress, safeSignerPrivateKey, safeAddress, txRpcUrl);
 }
 
 const config: RunConfig = {
@@ -205,6 +208,7 @@ async function notifySlackStartup(): Promise<void> {
   const message = `✅ *Router-TMS Service started*\n\n` +
     `Enabling routing for every non-blacklisted human avatar.\n` +
     `- RPC: ${rpcUrl}\n` +
+    `- TX RPC: ${txRpcUrl}\n` +
     `- Router: ${routerAddress}\n` +
     `- Base Group: ${baseGroupAddress}\n` +
     `- Blacklisting Service: ${blacklistingServiceUrl}\n` +

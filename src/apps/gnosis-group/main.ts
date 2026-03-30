@@ -25,11 +25,13 @@ import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
+import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gnosis-group");
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
+const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 const scoringServiceUrl = process.env.GNOSIS_GROUP_SCORING_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore/batch";
 const targetGroupAddress = process.env.GNOSIS_GROUP_ADDRESS || "0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c";
@@ -60,6 +62,7 @@ const scoreCache = new ScoreCache();
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
+const canSimulateTransactions = safeSignerPrivateKey.trim().length > 0 && safeAddress.trim().length > 0;
 
 const runLogger = rootLogger.child("run");
 let groupService: IGroupService | undefined;
@@ -72,8 +75,8 @@ if (!dryRun && safeAddress.trim().length === 0) {
   throw new Error("GNOSIS_GROUP_SAFE_ADDRESS is required when not running gnosis-group in dry-run mode");
 }
 
-if (!dryRun) {
-  groupService = new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress);
+if (!dryRun || canSimulateTransactions) {
+  groupService = new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress, txRpcUrl);
 }
 
 const config: RunConfig = {
@@ -90,6 +93,7 @@ const config: RunConfig = {
 
 rootLogger.info("Starting gnosis-group run with config:");
 rootLogger.info(`  - rpcUrl=${rpcUrl}`);
+rootLogger.info(`  - txRpcUrl=${txRpcUrl}`);
 rootLogger.info(`  - scoringServiceUrl=${scoringServiceUrl}`);
 rootLogger.info(`  - targetGroupAddress=${targetGroupAddress}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
@@ -101,6 +105,7 @@ rootLogger.info(`  - historicAutoTrustGroupAddress=${HISTORIC_AUTO_TRUST_GROUP_A
 rootLogger.info(`  - historicAutoTrustGroupBlockNumber=${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}`);
 rootLogger.info(`  - safeAddress=${safeAddress || "(not set)"}`);
 rootLogger.info(`  - safeSignerPrivateKeyConfigured=${safeSignerPrivateKey.trim().length > 0}`);
+rootLogger.info(`  - dryRunSimulationConfigured=${canSimulateTransactions}`);
 rootLogger.info(`  - dryRun=${dryRun}`);
 rootLogger.info(`  - runIntervalMinutes=${runIntervalMinutes}`);
 rootLogger.info(`  - scoreCacheTtlMinutes=${scoreCacheTtlMs / 60_000}`);
@@ -292,6 +297,7 @@ async function notifySlackStartup(): Promise<void> {
   const message =
     `${header}\n\n` +
     `- RPC: ${rpcUrl}\n` +
+    `- TX RPC: ${txRpcUrl}\n` +
     `- Scoring Service: ${scoringServiceUrl}\n` +
     `- Gnosis Group: ${targetGroupAddress}\n` +
     `- Score Threshold: ${scoreThreshold}\n` +

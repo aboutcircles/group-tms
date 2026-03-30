@@ -1,3 +1,5 @@
+import {TransactionSimulationResult} from "./ITransactionSimulation";
+
 export type ResetCowSwapOrderResult = "OrderAlreadySettled" | "OrderUidIsTheSame" | "OrderValid";
 export type CreateLBPResult = "LBPAlreadyCreated" | "OrderNotYetFilled" | "BackingAssetBalanceInsufficient" | "Success";
 
@@ -29,4 +31,14 @@ export interface IBackingInstanceService {
      * @param circlesBackingInstance The address of the CirclesBacking contract instance.
      */
     createLbp(circlesBackingInstance: string) : Promise<string>;
+
+    /**
+     * Simulates the actual Safe transaction that would call `resetCowSwapOrder` and estimates its gas.
+     */
+    simulateResetCowSwapOrderTx?(circlesBackingInstance: string): Promise<TransactionSimulationResult>;
+
+    /**
+     * Simulates the actual Safe transaction that would call `createLBP` and estimates its gas.
+     */
+    simulateCreateLbpTx?(circlesBackingInstance: string): Promise<TransactionSimulationResult>;
 }

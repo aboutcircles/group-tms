@@ -205,6 +205,16 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
           `[DRY-RUN] Would call enableCRCForRouting with ${batch.length} avatar(s) ` +
             `(batch ${batchIndex + 1}/${batches.length}) for base group ${target.baseGroup}.`
         );
+        if (routerService?.simulateEnableCRCForRouting) {
+          const simulation = await routerService.simulateEnableCRCForRouting(target.baseGroup, batch);
+          logger.info(
+            `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
+          );
+        } else {
+          logger.info(
+            `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length}: skipped (no signer-backed simulator configured).`
+          );
+        }
         continue;
       }
 

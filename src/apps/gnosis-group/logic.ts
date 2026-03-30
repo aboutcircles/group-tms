@@ -417,9 +417,19 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   if (trustPlan.untrustBatches.length > 0) {
     if (dryRun) {
       loggerTrust.info("Dry-run mode enabled; skipping untrust transactions for prepared batches.");
-      trustPlan.untrustBatches.forEach((batch, index) => {
+      for (const [index, batch] of trustPlan.untrustBatches.entries()) {
         loggerTrust.debug(`Dry-run untrust batch ${index + 1}/${trustPlan.untrustBatches.length}: ${batch.join(", ")}`);
-      });
+        if (groupService?.simulateUntrustBatch) {
+          const simulation = await groupService.simulateUntrustBatch(targetGroupAddress, batch);
+          loggerTrust.info(
+            `Dry-run untrust simulation ${index + 1}/${trustPlan.untrustBatches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
+          );
+        } else {
+          loggerTrust.info(
+            `Dry-run untrust simulation ${index + 1}/${trustPlan.untrustBatches.length}: skipped (no signer-backed simulator configured).`
+          );
+        }
+      }
     } else {
       /* istanbul ignore next: guarded at the top of runOnce */
       if (!groupService) {
@@ -462,9 +472,19 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   if (trustPlan.trustBatches.length > 0) {
     if (dryRun) {
       loggerTrust.info("Dry-run mode enabled; skipping trust transactions for prepared batches.");
-      trustPlan.trustBatches.forEach((batch, index) => {
+      for (const [index, batch] of trustPlan.trustBatches.entries()) {
         loggerTrust.debug(`Dry-run trust batch ${index + 1}/${trustPlan.trustBatches.length}: ${batch.join(", ")}`);
-      });
+        if (groupService?.simulateTrustBatchWithConditions) {
+          const simulation = await groupService.simulateTrustBatchWithConditions(targetGroupAddress, batch);
+          loggerTrust.info(
+            `Dry-run trust simulation ${index + 1}/${trustPlan.trustBatches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
+          );
+        } else {
+          loggerTrust.info(
+            `Dry-run trust simulation ${index + 1}/${trustPlan.trustBatches.length}: skipped (no signer-backed simulator configured).`
+          );
+        }
+      }
     } else {
       /* istanbul ignore next: guarded at the top of runOnce */
       if (!groupService) {

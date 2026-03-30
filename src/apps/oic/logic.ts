@@ -131,6 +131,46 @@ async function processTrustOperations(
   }
 }
 
+async function simulateTrustOperations(
+  groupService: IGroupService,
+  group: string,
+  shouldTrust: string[],
+  shouldUntrust: string[],
+  outputBatchSize: number,
+  logger: ILoggerService
+): Promise<void> {
+  const trustBatches = chunk(shouldTrust, outputBatchSize);
+  const untrustBatches = chunk(shouldUntrust, outputBatchSize);
+
+  for (let i = 0; i < untrustBatches.length; i++) {
+    const batch = untrustBatches[i];
+    if (groupService.simulateUntrustBatch) {
+      const simulation = await groupService.simulateUntrustBatch(group, batch);
+      logger.info(
+        `DRY RUN untrust simulation batch ${i + 1}/${untrustBatches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
+      );
+    } else {
+      logger.info(
+        `DRY RUN untrust simulation batch ${i + 1}/${untrustBatches.length}: skipped (no signer-backed simulator configured).`
+      );
+    }
+  }
+
+  for (let i = 0; i < trustBatches.length; i++) {
+    const batch = trustBatches[i];
+    if (groupService.simulateTrustBatchWithConditions) {
+      const simulation = await groupService.simulateTrustBatchWithConditions(group, batch);
+      logger.info(
+        `DRY RUN trust simulation batch ${i + 1}/${trustBatches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
+      );
+    } else {
+      logger.info(
+        `DRY RUN trust simulation batch ${i + 1}/${trustBatches.length}: skipped (no signer-backed simulator configured).`
+      );
+    }
+  }
+}
+
 // Core logic shared between runOnce and runIncremental
 async function executeCoreLogic(
   deps: Deps,
@@ -194,6 +234,14 @@ async function executeCoreLogic(
         LOG.info(`DRY RUN untrust: ${fmt(d)}`);
       }
     }
+    await simulateTrustOperations(
+      groupService,
+      group,
+      shouldTrust,
+      shouldUntrust,
+      cfg.outputBatchSize,
+      LOG
+    );
     return;
   }
 

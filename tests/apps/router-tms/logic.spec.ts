@@ -130,8 +130,9 @@ describe("router-tms runOnce", () => {
     const circlesRpc = new FakeCirclesRpc();
     circlesRpc.humanAvatars = [humanAlice, humanBob];
     circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+    const routerService = new FakeRouterService();
 
-    const deps = makeDeps({circlesRpc});
+    const deps = makeDeps({circlesRpc, routerService});
     const cfg = makeConfig({dryRun: true, enableBatchSize: 0, fetchPageSize: 0});
 
     const outcome = await runOnce(deps, cfg);
@@ -139,6 +140,8 @@ describe("router-tms runOnce", () => {
     expect(outcome.pendingEnableCount).toBe(2);
     expect(outcome.executedEnableCount).toBe(0);
     expect(outcome.txHashes).toEqual([]);
+    expect(routerService.calls).toHaveLength(0);
+    expect(routerService.simulationCalls).toBe(2);
   });
 
   it("uses default config values when optional settings are omitted", async () => {

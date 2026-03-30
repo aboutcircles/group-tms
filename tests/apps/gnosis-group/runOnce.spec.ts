@@ -534,6 +534,43 @@ describe("gnosis-group runOnce", () => {
     expect(outcome.untrustTxHashes).toEqual([]);
   });
 
+  it("simulates dry-run trust batches when a group service is provided", async () => {
+    const eligible = getAddress("0x5555000000000000000000000000000000000005");
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [eligible];
+    circlesRpc.trusteesByTruster[circlesBackerGroup.toLowerCase()] = [trustedTarget];
+    circlesRpc.trusteesByTruster[targetGroup.toLowerCase()] = [];
+    const groupService = new FakeGroupService();
+
+    const fetchMock = global.fetch as jest.Mock;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        status: "success",
+        batches: {"0": [{address: eligible, relative_score: 75}]}
+      })
+    });
+
+    const outcome = await runOnce({
+      blacklistingService: new FakeBlacklist(),
+      circlesRpc,
+      logger: new FakeLogger(true),
+      groupService
+    }, {
+      rpcUrl: "https://rpc.local",
+      scoringServiceUrl: "https://scores.local",
+      targetGroupAddress: targetGroup,
+      dryRun: true,
+      groupBatchSize: 1
+    });
+
+    expect(outcome.trustTxHashes).toEqual([]);
+    expect(groupService.calls).toHaveLength(0);
+    expect(groupService.trustSimulations).toBe(1);
+  });
+
   it("summarizes failed untrust batches after exhausting retries", async () => {
     const stale = getAddress("0xe00000000000000000000000000000000000000e");
     const active = getAddress("0xf00000000000000000000000000000000000000f");

@@ -130,6 +130,7 @@ describe("oic.runOnce", () => {
 
     await runOnce(deps, cfg);
     expect(grp.calls.length).toBe(0);
+    expect(grp.trustSimulations).toBe(1);
   });
 
   it("always trusts whitelisted addresses even without meta org coverage", async () => {

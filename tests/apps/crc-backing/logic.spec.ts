@@ -478,8 +478,10 @@ describe("runOnce – reconciliation flow", () => {
     await runOnce(deps, {...CFG, dryRun: true});
 
     expect(grp.calls).toHaveLength(0);
+    expect(grp.trustSimulations).toBe(1);
     expect(svc.resetCalls).toHaveLength(0);
     expect(svc.createCalls).toHaveLength(0);
+    expect(svc.simulateResetTxCalls).toEqual([inst.toLowerCase()]);
     expect(slack.notifications).toHaveLength(0);
   });
 

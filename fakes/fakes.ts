@@ -20,6 +20,7 @@ import {
 import {IRouterService} from "../src/interfaces/IRouterService";
 import {IRouterEnablementStore} from "../src/interfaces/IRouterEnablementStore";
 import {IAvatarSafeMappingStore, SafeTrustState} from "../src/interfaces/IAvatarSafeMappingStore";
+import {TransactionSimulationResult} from "../src/interfaces/ITransactionSimulation";
 
 export class FakeLogger implements ILoggerService {
   logs: { level: "info" | "warn" | "error" | "debug" | "table"; args: unknown[] }[] = [];
@@ -175,8 +176,11 @@ export class FakeBlacklist implements IBlacklistingService {
 
 export class FakeGroupService implements IGroupService {
   calls: { type: "trust" | "untrust"; groupAddress: string; trusteeAddresses: string[] }[] = [];
+  simulations: { type: "trust" | "untrust"; groupAddress: string; trusteeAddresses: string[] }[] = [];
   trustCalls = 0;
   untrustCalls = 0;
+  trustSimulations = 0;
+  untrustSimulations = 0;
 
   async trustBatchWithConditions(groupAddress: string, trusteeAddresses: string[]): Promise<string> {
     this.trustCalls += 1;
@@ -192,6 +196,18 @@ export class FakeGroupService implements IGroupService {
 
   async fetchGroupOwnerAndService(): Promise<any> {
     throw new Error("Not under test");
+  }
+
+  async simulateTrustBatchWithConditions(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult> {
+    this.trustSimulations += 1;
+    this.simulations.push({type: "trust", groupAddress, trusteeAddresses: [...trusteeAddresses]});
+    return {gasEstimate: BigInt(100_000 + this.trustSimulations)};
+  }
+
+  async simulateUntrustBatch(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult> {
+    this.untrustSimulations += 1;
+    this.simulations.push({type: "untrust", groupAddress, trusteeAddresses: [...trusteeAddresses]});
+    return {gasEstimate: BigInt(100_000 + this.untrustSimulations)};
   }
 }
 
@@ -271,6 +287,8 @@ export class FakeAvatarSafeService implements IAvatarSafeService {
 export class FakeBackingInstanceService implements IBackingInstanceService {
   simulateReset: Record<string, ResetCowSwapOrderResult> = {};
   simulateCreate: Record<string, CreateLBPResult> = {};
+  simulateResetTxCalls: string[] = [];
+  simulateCreateTxCalls: string[] = [];
   resetCalls: string[] = [];
   createCalls: string[] = [];
 
@@ -290,6 +308,16 @@ export class FakeBackingInstanceService implements IBackingInstanceService {
   async createLbp(addr: string): Promise<string> {
     this.createCalls.push(addr.toLowerCase());
     return `0xcreate_${addr.toLowerCase()}`;
+  }
+
+  async simulateResetCowSwapOrderTx(addr: string): Promise<TransactionSimulationResult> {
+    this.simulateResetTxCalls.push(addr.toLowerCase());
+    return {gasEstimate: 210_000n};
+  }
+
+  async simulateCreateLbpTx(addr: string): Promise<TransactionSimulationResult> {
+    this.simulateCreateTxCalls.push(addr.toLowerCase());
+    return {gasEstimate: 310_000n};
   }
 }
 
@@ -326,7 +354,9 @@ export class FakeAffiliateGroupEvents implements IAffiliateGroupEventsService {
 
 export class FakeRouterService implements IRouterService {
   calls: { baseGroup: string; crcAddresses: string[] }[] = [];
+  simulations: { baseGroup: string; crcAddresses: string[] }[] = [];
   txHashes: string[] = [];
+  simulationCalls = 0;
   private readonly responseQueue: string[];
   failWith?: Error;
 
@@ -345,6 +375,16 @@ export class FakeRouterService implements IRouterService {
       : `0xtx_${this.calls.length}`;
     this.txHashes.push(txHash);
     return txHash;
+  }
+
+  async simulateEnableCRCForRouting(baseGroup: string, crcAddresses: string[]): Promise<TransactionSimulationResult> {
+    this.simulationCalls += 1;
+    this.simulations.push({baseGroup, crcAddresses: [...crcAddresses]});
+    if (this.failWith) {
+      throw this.failWith;
+    }
+
+    return {gasEstimate: BigInt(150_000 + this.simulationCalls)};
   }
 }
 

@@ -1,5 +1,6 @@
 import Safe from "@safe-global/protocol-kit";
 import { getAddress, JsonRpcProvider, Wallet } from "ethers";
+import {TransactionSimulationResult} from "../interfaces/ITransactionSimulation";
 import { retryWithBackoff } from "./retryWithBackoff";
 import { createProvider, primaryRpcUrl } from "./rpcProvider";
 
@@ -95,6 +96,37 @@ export class SafeTransactionExecutor {
     ensureSuccessfulReceipt(receipt, `Safe tx to ${normalizedTo}`);
 
     return txHash;
+  }
+
+  async simulate(
+    to: string,
+    data: string,
+    value: string | bigint = 0n
+  ): Promise<TransactionSimulationResult> {
+    const safe = await this.safePromise;
+    const normalizedTo = getAddress(to);
+    const normalizedValue = typeof value === "bigint" ? value.toString() : value ?? "0";
+
+    const unsignedSafeTx = await safe.createTransaction({
+      transactions: [
+        {
+          to: normalizedTo,
+          value: normalizedValue,
+          data
+        }
+      ]
+    });
+    const signedSafeTx = await safe.signTransaction(unsignedSafeTx);
+    const gasEstimate = await this.estimateExecutionGasLimit(safe, signedSafeTx);
+    const encodedSafeTx = await safe.getEncodedTransaction(signedSafeTx);
+
+    await retryWithBackoff(() => this.provider.call({
+      from: this.signerAddress,
+      to: this.safeAddress,
+      data: encodedSafeTx
+    }));
+
+    return {gasEstimate};
   }
 
   private async estimateExecutionGasLimit(safe: Safe, safeTx: Awaited<ReturnType<Safe["createTransaction"]>>): Promise<bigint> {

@@ -160,6 +160,7 @@ describe("gp-crc runOnce (query-based)", () => {
     expect(outcome.trustedAvatars).toEqual([avatar]);
     expect(outcome.trustTxHashes).toEqual([]);
     expect(groupService.calls).toHaveLength(0);
+    expect(groupService.trustSimulations).toBe(1);
   });
 
   it("retries trust batches on retryable errors before succeeding", async () => {
