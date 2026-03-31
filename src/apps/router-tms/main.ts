@@ -42,7 +42,7 @@ const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slac
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
   console.warn(`[CirclesRpc] ${msg}`);
-  void slackService.notifySlackStartOrCrash(`⚠️ *router-tms* pagination cap: ${msg}`, SlackSeverity.WARNING).catch(() => {});
+  void slackService.notifySlackStartOrCrash(`⚠️ *router-tms* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
 });
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const enablementStore = new InMemoryRouterEnablementStore();
