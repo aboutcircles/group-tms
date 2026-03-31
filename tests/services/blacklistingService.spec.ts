@@ -190,6 +190,35 @@ describe("BlacklistingService", () => {
 
       expect(svc.getBlacklistCount()).toBe(0);
     });
+
+    it("handles total larger than actual addresses (API lies about total)", async () => {
+      mockFetchPages([
+        { addresses: ["0xa"], total: 9999 },
+      ]);
+      const svc = new BlacklistingService(SERVICE_URL, 30_000, 1000);
+      await svc.loadBlacklist();
+      expect(svc.getBlacklistCount()).toBe(1);
+    });
+
+    it("throws on invalid total (null/NaN)", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "ok", total: null, count: 0, v2_only: true, addresses: [] }),
+      }) as typeof fetch;
+
+      const svc = new BlacklistingService(SERVICE_URL);
+      await expect(svc.loadBlacklist()).rejects.toThrow(/invalid total/);
+    });
+
+    it("throws on invalid count (NaN)", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ status: "ok", total: 0, count: "many", v2_only: true, addresses: [] }),
+      }) as typeof fetch;
+
+      const svc = new BlacklistingService(SERVICE_URL);
+      await expect(svc.loadBlacklist()).rejects.toThrow(/invalid count/);
+    });
   });
 
   describe("checkBlacklist case-insensitivity", () => {

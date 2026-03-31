@@ -2,6 +2,7 @@ import {IBlacklistingService, IBlacklistServiceVerdict} from "../interfaces/IBla
 
 const DEFAULT_PAGE_TIMEOUT_MS = 30_000;
 const DEFAULT_PAGE_SIZE = 1000;
+const MAX_PAGES = 100; // 100k addresses max — well beyond expected blacklist size
 
 type BlacklistResponse = {
     status: string;
@@ -25,9 +26,14 @@ export class BlacklistingService implements IBlacklistingService {
         const allAddresses: string[] = [];
         let offset = 0;
         let total: number | undefined;
+        let pageCount = 0;
 
         // Fetch all pages. If ANY page fails, throw — no partial state.
         while (total === undefined || offset < total) {
+            if (++pageCount > MAX_PAGES) {
+                throw new Error(`Failed to load blacklist: exceeded ${MAX_PAGES} pages (${offset} addresses fetched)`);
+            }
+
             const page = await this.fetchPage(offset);
             total = page.total;
 
@@ -71,6 +77,12 @@ export class BlacklistingService implements IBlacklistingService {
             if (!data || !Array.isArray(data.addresses)) {
                 throw new Error("Failed to load blacklist: malformed response payload");
             }
+            if (typeof data.total !== "number" || !Number.isFinite(data.total) || data.total < 0) {
+                throw new Error(`Failed to load blacklist: invalid total=${data.total}`);
+            }
+            if (typeof data.count !== "number" || !Number.isFinite(data.count) || data.count < 0) {
+                throw new Error(`Failed to load blacklist: invalid count=${data.count}`);
+            }
 
             return data;
         } catch (error) {
@@ -85,6 +97,10 @@ export class BlacklistingService implements IBlacklistingService {
 
     async checkBlacklist(addresses: string[]): Promise<IBlacklistServiceVerdict[]> {
         if (!this.loaded) {
+            // WARN: Blacklist not loaded — all addresses pass through as allowed.
+            // Callers MUST call loadBlacklist() before checkBlacklist().
+            // The polling loop enforces this: refreshBlacklist() throws on failure,
+            // preventing runOnce() from executing with stale/empty data.
             return addresses.map((address) => ({
                 address,
                 is_bot: false
