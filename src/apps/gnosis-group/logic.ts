@@ -88,7 +88,7 @@ export class ScoreCache {
 }
 
 export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
-export const DEFAULT_SCORE_BATCH_SIZE = 200;
+export const DEFAULT_SCORE_BATCH_SIZE = 20;
 export const DEFAULT_SCORE_THRESHOLD = 100;
 export const DEFAULT_GROUP_BATCH_SIZE = 10;
 export const DEFAULT_BACKERS_GROUP_ADDRESS = "0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026";
