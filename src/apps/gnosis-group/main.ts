@@ -11,6 +11,7 @@ import {
   ScoreCache,
   DEFAULT_FETCH_PAGE_SIZE,
   DEFAULT_SCORE_BATCH_SIZE,
+  DEFAULT_SCORE_FETCH_TIMEOUT_MS,
   DEFAULT_SCORE_THRESHOLD,
   DEFAULT_GROUP_BATCH_SIZE,
   FIXED_AUTO_TRUST_GROUP_ADDRESSES,
@@ -50,6 +51,7 @@ if (!targetGroupAddress) {
 
 const fetchPageSize = parseEnvInt("GNOSIS_GROUP_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
 const scoreBatchSize = parseEnvInt("GNOSIS_GROUP_SCORE_BATCH_SIZE", DEFAULT_SCORE_BATCH_SIZE);
+const scoreFetchTimeoutMs = Math.max(1000, parseEnvInt("GNOSIS_GROUP_SCORE_FETCH_TIMEOUT_MS", DEFAULT_SCORE_FETCH_TIMEOUT_MS));
 const scoreThreshold = parseEnvNumber("GNOSIS_GROUP_SCORE_THRESHOLD", DEFAULT_SCORE_THRESHOLD);
 const groupBatchSize = parseEnvInt("GNOSIS_GROUP_BATCH_SIZE", DEFAULT_GROUP_BATCH_SIZE);
 const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFAULT_SCORE_CACHE_TTL_MS / 60_000) * 60_000;
@@ -88,6 +90,7 @@ const config: RunConfig = {
   targetGroupAddress,
   fetchPageSize,
   scoreBatchSize,
+  scoreFetchTimeoutMs,
   scoreThreshold,
   groupBatchSize,
   scoreCacheTtlMs,
@@ -101,6 +104,7 @@ rootLogger.info(`  - scoringServiceUrl=${scoringServiceUrl}`);
 rootLogger.info(`  - targetGroupAddress=${targetGroupAddress}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
 rootLogger.info(`  - scoreBatchSize=${scoreBatchSize}`);
+rootLogger.info(`  - scoreFetchTimeoutMs=${scoreFetchTimeoutMs}`);
 rootLogger.info(`  - scoreThreshold=${scoreThreshold}`);
 rootLogger.info(`  - groupBatchSize=${groupBatchSize}`);
 rootLogger.info(`  - fixedAutoTrustGroupAddresses=${FIXED_AUTO_TRUST_GROUP_ADDRESSES.join(",")}`);
