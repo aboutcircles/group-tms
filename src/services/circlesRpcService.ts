@@ -76,6 +76,9 @@ export class CirclesRpcService implements ICirclesRpc {
       }
       await delay(PAGE_DELAY_MS);
     }
+    if (pages >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchAllTrustees for ${trusterLc}: hit ${MAX_PAGES}-page cap — result may be truncated`);
+    }
 
     return allTrustees;
   }
@@ -159,6 +162,9 @@ export class CirclesRpcService implements ICirclesRpc {
       }
       await delay(PAGE_DELAY_MS);
     }
+    if (this.lastBulkTrusteesForTrustersStats.pagesFetched >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchAllTrusteesForTrusters: hit ${MAX_PAGES}-page cap — result may be truncated (${normalizedTrusters.length} trusters)`);
+    }
 
     return trusteesByTruster;
   }
@@ -230,6 +236,9 @@ export class CirclesRpcService implements ICirclesRpc {
       }
       await delay(PAGE_DELAY_MS);
     }
+    if (pages >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchActiveGroupMembersAtBlock for ${normalizedGroupAddress} at block ${blockNumber}: hit ${MAX_PAGES}-page cap — result may be truncated`);
+    }
 
     return members;
   }
@@ -267,17 +276,19 @@ export class CirclesRpcService implements ICirclesRpc {
           ([k]) => !["blockNumber", "timestamp", "transactionIndex", "logIndex", "transactionHash"].includes(k)
         )
       );
+      const parseHex = (val: unknown): number | undefined => {
+        if (typeof val === "number") return Number.isFinite(val) ? val : undefined;
+        if (typeof val !== "string") return undefined;
+        const parsed = parseInt(val, 16);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
       return {
         ...extra,
         $event: e.event,
-        blockNumber: typeof e.values?.blockNumber === "string"
-          ? parseInt(e.values.blockNumber, 16) : e.values?.blockNumber,
-        timestamp: typeof e.values?.timestamp === "string"
-          ? parseInt(e.values.timestamp, 16) : e.values?.timestamp,
-        transactionIndex: typeof e.values?.transactionIndex === "string"
-          ? parseInt(e.values.transactionIndex, 16) : e.values?.transactionIndex,
-        logIndex: typeof e.values?.logIndex === "string"
-          ? parseInt(e.values.logIndex, 16) : e.values?.logIndex,
+        blockNumber: parseHex(e.values?.blockNumber),
+        timestamp: parseHex(e.values?.timestamp),
+        transactionIndex: parseHex(e.values?.transactionIndex),
+        logIndex: parseHex(e.values?.logIndex),
         transactionHash: e.values?.transactionHash,
       };
     }) as T[];
@@ -294,7 +305,11 @@ export class CirclesRpcService implements ICirclesRpc {
       this.fetchEventsPage(emitterAddress, fromBlock, toBlock, eventTypes),
       PAGE_TIMEOUT_MS
     );
-    if (rawEvents.length < CIRCLES_EVENTS_RESULT_LIMIT || fromBlock >= toBlock || depth >= MAX_EVENT_RECURSION_DEPTH) {
+    if (rawEvents.length < CIRCLES_EVENTS_RESULT_LIMIT || fromBlock >= toBlock) {
+      return this.mapEvents<T>(rawEvents);
+    }
+    if (depth >= MAX_EVENT_RECURSION_DEPTH) {
+      console.warn(`[CirclesRpc] fetchEventsRecursive: hit depth cap (${MAX_EVENT_RECURSION_DEPTH}) with ${rawEvents.length} events in range [${fromBlock}, ${toBlock}] — events beyond the first ${CIRCLES_EVENTS_RESULT_LIMIT} in this range are LOST`);
       return this.mapEvents<T>(rawEvents);
     }
 
@@ -396,6 +411,9 @@ export class CirclesRpcService implements ICirclesRpc {
       }
       await delay(PAGE_DELAY_MS);
     }
+    if (pages >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchAllBaseGroups: hit ${MAX_PAGES}-page cap — result may be truncated`);
+    }
 
     return Array.from(groups);
   }
@@ -428,6 +446,10 @@ export class CirclesRpcService implements ICirclesRpc {
       await delay(PAGE_DELAY_MS);
     }
 
+    if (pages >= MAX_PAGES) {
+      const msg = `fetchAllHumanAvatars: hit ${MAX_PAGES}-page cap — result may be truncated (${avatars.length} avatars so far)`;
+      logger?.warn(msg) ?? console.warn(`[CirclesRpc] ${msg}`);
+    }
     if (skipped > 0) {
       logger?.warn(`Skipped ${skipped} invalid avatar address(es) from RPC.`);
     }
