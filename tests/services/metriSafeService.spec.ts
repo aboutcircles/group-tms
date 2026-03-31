@@ -143,6 +143,47 @@ describe("MetriSafeService", () => {
     expect(result.selectedOwnersBySafe.get(safeChecksum)?.avatar).toBe(getAddress(owner2));
   });
 
+  it("breaks equal-timestamp ties deterministically instead of depending on API order", async () => {
+    const owner1 = "0xb00e2ed54bed3e4df0656781d36609c0b0138e98";
+    const owner2 = "0x13b0d6834e7d0a014166da74acdc277bce0bd365";
+    const safe = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+    const expectedOwner = getAddress(owner2);
+
+    mockFetchOk({
+      data: {
+        Metri_Pay_DelayModule: [{
+          safeAddress: safe,
+          owners: [
+            {ownerAddress: owner1, timestamp: "1000"},
+            {ownerAddress: owner2, timestamp: "1000"},
+          ],
+        }],
+      },
+    });
+
+    const serviceA = new MetriSafeService(endpoint, undefined);
+    const resultA = await serviceA.findAvatarsWithSafes([owner1, owner2]);
+
+    mockFetchOk({
+      data: {
+        Metri_Pay_DelayModule: [{
+          safeAddress: safe,
+          owners: [
+            {ownerAddress: owner2, timestamp: "1000"},
+            {ownerAddress: owner1, timestamp: "1000"},
+          ],
+        }],
+      },
+    });
+
+    const serviceB = new MetriSafeService(endpoint, undefined);
+    const resultB = await serviceB.findAvatarsWithSafes([owner1, owner2]);
+
+    const safeChecksum = getAddress(safe);
+    expect(resultA.selectedOwnersBySafe.get(safeChecksum)?.avatar).toBe(expectedOwner);
+    expect(resultB.selectedOwnersBySafe.get(safeChecksum)?.avatar).toBe(expectedOwner);
+  });
+
   // --- Edge cases: null/invalid data in modules ---
 
   it("module with null safeAddress → skipped", async () => {
@@ -249,6 +290,33 @@ describe("MetriSafeService", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(result.mappings.size).toBe(2);
+  });
+
+  it("default chunk size splits requests above 500 addresses", async () => {
+    const addresses = Array.from({length: 501}, (_, index) =>
+      getAddress(`0x${(index + 1).toString(16).padStart(40, "0")}`)
+    );
+    const fetchMock = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({data: {Metri_Pay_DelayModule: []}}),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({data: {Metri_Pay_DelayModule: []}}),
+      });
+    global.fetch = fetchMock as typeof fetch;
+
+    const service = new MetriSafeService(endpoint, undefined);
+    await service.findAvatarsWithSafes(addresses);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
+
+    expect(firstBody.variables.addresses).toHaveLength(500);
+    expect(secondBody.variables.addresses).toHaveLength(1);
   });
 
   // --- Edge cases: input normalization ---

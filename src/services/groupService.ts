@@ -1,5 +1,6 @@
 import {GroupOwnerAndServiceAddress, IGroupService} from "../interfaces/IGroupService";
-import {Contract, getAddress, JsonRpcProvider, Wallet} from "ethers";
+import {Contract, FallbackProvider, getAddress, JsonRpcProvider, Wallet} from "ethers";
+import {TransactionSimulationResult} from "../interfaces/ITransactionSimulation";
 import {TransactionConfirmationTimeoutError} from "./safeTransactionExecutor";
 import {retryWithBackoff} from "./retryWithBackoff";
 import {createProvider} from "./rpcProvider";
@@ -25,12 +26,17 @@ export const GROUP_MINI_ABI = [
 ];
 
 export class GroupService implements IGroupService {
-  private readonly provider: JsonRpcProvider;
+  private readonly provider: JsonRpcProvider | FallbackProvider;
   private readonly wallet: Wallet;
 
-  constructor(private readonly rpcUrl: string, private readonly servicePrivateKey: string) {
-    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
-    this.wallet = new Wallet(servicePrivateKey, this.provider);
+  constructor(
+    private readonly rpcUrl: string,
+    private readonly servicePrivateKey: string,
+    txRpcUrl: string = rpcUrl
+  ) {
+    this.provider = createProvider(rpcUrl);
+    const txProvider = createProvider(txRpcUrl);
+    this.wallet = new Wallet(servicePrivateKey, txProvider);
   }
 
   async trustBatchWithConditions(groupAddress: string, trusteeAddresses: string[]): Promise<string> {
@@ -77,7 +83,30 @@ export class GroupService implements IGroupService {
     };
   }
 
+  async simulateTrustBatchWithConditions(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult> {
+    return this.simulateGroupWrite(groupAddress, trusteeAddresses, (1n << 96n) - 1n);
+  }
+
+  async simulateUntrustBatch(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult> {
+    return this.simulateGroupWrite(groupAddress, trusteeAddresses, 0n);
+  }
+
   private getWritableGroupContract(groupAddress: string): Contract {
     return new Contract(groupAddress, GROUP_MINI_ABI, this.wallet);
+  }
+
+  private async simulateGroupWrite(
+    groupAddress: string,
+    trusteeAddresses: string[],
+    expiry: bigint
+  ): Promise<TransactionSimulationResult> {
+    const group = this.getWritableGroupContract(groupAddress);
+
+    await retryWithBackoff(() => group.trustBatchWithConditions.staticCall(trusteeAddresses, expiry));
+    const gasEstimate = await retryWithBackoff(() =>
+      group.trustBatchWithConditions.estimateGas(trusteeAddresses, expiry)
+    );
+
+    return {gasEstimate};
   }
 }

@@ -9,7 +9,7 @@ describe("isTransientRpcError", () => {
     expect(isTransientRpcError({ error: { code: -32016 }, message: "x" })).toBe(true);
   });
 
-  it.each(["timeout", "canceled", "cancelled", "ECONNRESET", "ECONNREFUSED", "socket hang up"])(
+  it.each(["timeout", "canceled", "cancelled", "ECONNRESET", "ECONNREFUSED", "socket hang up", "429", "Too Many Requests"])(
     "returns true for message containing '%s'",
     (keyword) => {
       expect(isTransientRpcError(new Error(`Request ${keyword} by server`))).toBe(true);

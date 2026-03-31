@@ -20,6 +20,7 @@ import {
 import {IRouterService} from "../src/interfaces/IRouterService";
 import {IRouterEnablementStore} from "../src/interfaces/IRouterEnablementStore";
 import {IAvatarSafeMappingStore, SafeTrustState} from "../src/interfaces/IAvatarSafeMappingStore";
+import {TransactionSimulationResult} from "../src/interfaces/ITransactionSimulation";
 
 export class FakeLogger implements ILoggerService {
   logs: { level: "info" | "warn" | "error" | "debug" | "table"; args: unknown[] }[] = [];
@@ -65,6 +66,7 @@ export class FakeCirclesRpc implements ICirclesRpc {
   initiated: BackingInitiatedEvent[] = [];
   completed: BackingCompletedEvent[] = [];
   trusteesByTruster: Record<string, string[]> = {};
+  activeGroupMembersAtBlock: Record<string, string[]> = {};
   baseGroups: string[] = [];
   humanityOverrides = new Map<string, boolean>();
   humanAvatars: string[] = [];
@@ -81,6 +83,19 @@ export class FakeCirclesRpc implements ICirclesRpc {
 
   async fetchAllTrustees(truster: string): Promise<string[]> {
     return this.trusteesByTruster[truster.toLowerCase()] ?? [];
+  }
+
+  async fetchAllTrusteesForTrusters(trusters: string[]): Promise<Map<string, string[]>> {
+    const result = new Map<string, string[]>();
+    for (const truster of trusters) {
+      const normalized = truster.toLowerCase();
+      result.set(normalized, [...(this.trusteesByTruster[normalized] ?? [])]);
+    }
+    return result;
+  }
+
+  async fetchActiveGroupMembersAtBlock(groupAddress: string, blockNumber: number): Promise<string[]> {
+    return this.activeGroupMembersAtBlock[this.makeGroupBlockKey(groupAddress, blockNumber)] ?? [];
   }
 
   async fetchAllBaseGroups(_pageSize?: number): Promise<string[]> {
@@ -111,6 +126,10 @@ export class FakeCirclesRpc implements ICirclesRpc {
 
   async fetchAllHumanAvatars(_pageSize?: number): Promise<string[]> {
     return [...this.humanAvatars];
+  }
+
+  private makeGroupBlockKey(groupAddress: string, blockNumber: number): string {
+    return `${groupAddress.toLowerCase()}@${blockNumber}`;
   }
 }
 
@@ -157,8 +176,11 @@ export class FakeBlacklist implements IBlacklistingService {
 
 export class FakeGroupService implements IGroupService {
   calls: { type: "trust" | "untrust"; groupAddress: string; trusteeAddresses: string[] }[] = [];
+  simulations: { type: "trust" | "untrust"; groupAddress: string; trusteeAddresses: string[] }[] = [];
   trustCalls = 0;
   untrustCalls = 0;
+  trustSimulations = 0;
+  untrustSimulations = 0;
 
   async trustBatchWithConditions(groupAddress: string, trusteeAddresses: string[]): Promise<string> {
     this.trustCalls += 1;
@@ -174,6 +196,18 @@ export class FakeGroupService implements IGroupService {
 
   async fetchGroupOwnerAndService(): Promise<any> {
     throw new Error("Not under test");
+  }
+
+  async simulateTrustBatchWithConditions(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult> {
+    this.trustSimulations += 1;
+    this.simulations.push({type: "trust", groupAddress, trusteeAddresses: [...trusteeAddresses]});
+    return {gasEstimate: BigInt(100_000 + this.trustSimulations)};
+  }
+
+  async simulateUntrustBatch(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult> {
+    this.untrustSimulations += 1;
+    this.simulations.push({type: "untrust", groupAddress, trusteeAddresses: [...trusteeAddresses]});
+    return {gasEstimate: BigInt(100_000 + this.untrustSimulations)};
   }
 }
 
@@ -233,7 +267,7 @@ export class FakeAvatarSafeService implements IAvatarSafeService {
     const selectedOwnersBySafe = new Map<string, SafeOwnerSelection>();
     for (const candidate of candidates) {
       const existing = selectedOwnersBySafe.get(candidate.safe);
-      if (!existing || compareTimestamp(candidate.timestamp, existing.timestamp) > 0) {
+      if (!existing || shouldReplaceSelection(existing, candidate.avatar, candidate.timestamp)) {
         selectedOwnersBySafe.set(candidate.safe, {
           avatar: candidate.avatar,
           timestamp: candidate.timestamp
@@ -253,6 +287,8 @@ export class FakeAvatarSafeService implements IAvatarSafeService {
 export class FakeBackingInstanceService implements IBackingInstanceService {
   simulateReset: Record<string, ResetCowSwapOrderResult> = {};
   simulateCreate: Record<string, CreateLBPResult> = {};
+  simulateResetTxCalls: string[] = [];
+  simulateCreateTxCalls: string[] = [];
   resetCalls: string[] = [];
   createCalls: string[] = [];
 
@@ -272,6 +308,16 @@ export class FakeBackingInstanceService implements IBackingInstanceService {
   async createLbp(addr: string): Promise<string> {
     this.createCalls.push(addr.toLowerCase());
     return `0xcreate_${addr.toLowerCase()}`;
+  }
+
+  async simulateResetCowSwapOrderTx(addr: string): Promise<TransactionSimulationResult> {
+    this.simulateResetTxCalls.push(addr.toLowerCase());
+    return {gasEstimate: 210_000n};
+  }
+
+  async simulateCreateLbpTx(addr: string): Promise<TransactionSimulationResult> {
+    this.simulateCreateTxCalls.push(addr.toLowerCase());
+    return {gasEstimate: 310_000n};
   }
 }
 
@@ -308,7 +354,9 @@ export class FakeAffiliateGroupEvents implements IAffiliateGroupEventsService {
 
 export class FakeRouterService implements IRouterService {
   calls: { baseGroup: string; crcAddresses: string[] }[] = [];
+  simulations: { baseGroup: string; crcAddresses: string[] }[] = [];
   txHashes: string[] = [];
+  simulationCalls = 0;
   private readonly responseQueue: string[];
   failWith?: Error;
 
@@ -327,6 +375,16 @@ export class FakeRouterService implements IRouterService {
       : `0xtx_${this.calls.length}`;
     this.txHashes.push(txHash);
     return txHash;
+  }
+
+  async simulateEnableCRCForRouting(baseGroup: string, crcAddresses: string[]): Promise<TransactionSimulationResult> {
+    this.simulationCalls += 1;
+    this.simulations.push({baseGroup, crcAddresses: [...crcAddresses]});
+    if (this.failWith) {
+      throw this.failWith;
+    }
+
+    return {gasEstimate: BigInt(150_000 + this.simulationCalls)};
   }
 }
 
@@ -417,6 +475,22 @@ function compareTimestamp(left: string, right: string): number {
   if (leftBigInt > rightBigInt) return 1;
   if (leftBigInt < rightBigInt) return -1;
   return 0;
+}
+
+function shouldReplaceSelection(
+  existing: SafeOwnerSelection,
+  candidateAvatar: string,
+  candidateTimestamp: string
+): boolean {
+  const timestampComparison = compareTimestamp(candidateTimestamp, existing.timestamp);
+  if (timestampComparison > 0) {
+    return true;
+  }
+  if (timestampComparison < 0) {
+    return false;
+  }
+
+  return candidateAvatar.toLowerCase().localeCompare(existing.avatar.toLowerCase()) < 0;
 }
 
 function toComparableBigInt(raw: string): bigint | null {

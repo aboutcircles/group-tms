@@ -1,4 +1,5 @@
 import {getEffectiveDryRun, LeaderElection} from "../../src/services/leaderElection";
+import {FakeLogger} from "../../fakes/fakes";
 
 // --- Mock pg ---
 const mockQuery = jest.fn();
@@ -33,12 +34,14 @@ describe("getEffectiveDryRun", () => {
 describe("LeaderElection", () => {
   let statusUpdates: boolean[];
   let slackMessages: string[];
+  let logger: FakeLogger;
 
   beforeEach(() => {
     jest.clearAllMocks();
     jest.useFakeTimers();
     statusUpdates = [];
     slackMessages = [];
+    logger = new FakeLogger(true);
     // Default: ensureTable succeeds
     mockQuery.mockResolvedValue({rows: [], rowCount: 0});
     mockEnd.mockResolvedValue(undefined);
@@ -52,6 +55,7 @@ describe("LeaderElection", () => {
     return new LeaderElection(
       "postgres://test",
       instanceId,
+      logger,
       {notifySlackStartOrCrash: async (msg: string) => { slackMessages.push(msg); }},
       (isLeader: boolean) => { statusUpdates.push(isLeader); }
     );
@@ -102,7 +106,6 @@ describe("LeaderElection", () => {
     });
 
     it("PG error during tryAcquire → falls back to non-leader (safe)", async () => {
-      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
       mockQuery
         .mockResolvedValueOnce({rows: [], rowCount: 0})  // CREATE TABLE
         .mockRejectedValueOnce(new Error("connection refused")); // tryAcquire fails
@@ -111,12 +114,13 @@ describe("LeaderElection", () => {
       await le.start();
 
       expect(le.isLeader).toBe(false);
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("PG error"),
-        expect.stringContaining("connection refused")
-      );
-
-      consoleSpy.mockRestore();
+      expect(logger.logs).toContainEqual({
+        level: "error",
+        args: [
+          expect.stringContaining("PG error"),
+          expect.stringContaining("connection refused")
+        ]
+      });
       await le.stop();
     });
 
@@ -208,7 +212,6 @@ describe("LeaderElection", () => {
     });
 
     it("PG error during stop release → warns but doesn't throw", async () => {
-      const consoleSpy = jest.spyOn(console, "warn").mockImplementation();
       mockQuery
         .mockResolvedValueOnce({rows: [], rowCount: 0})
         .mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1});
@@ -219,27 +222,34 @@ describe("LeaderElection", () => {
       mockQuery.mockRejectedValueOnce(new Error("pg gone"));
       await le.stop(); // should not throw
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to release"),
-        expect.stringContaining("pg gone")
-      );
-      consoleSpy.mockRestore();
+      expect(logger.logs).toContainEqual({
+        level: "warn",
+        args: [
+          expect.stringContaining("Failed to release"),
+          expect.stringContaining("pg gone")
+        ]
+      });
     });
   });
 
   describe("LeaderElection.create", () => {
     it("returns null when dbUrl is missing", async () => {
-      const result = await LeaderElection.create(undefined, "host-1");
+      const result = await LeaderElection.create(undefined, "host-1", logger);
       expect(result).toBeNull();
     });
 
     it("returns null when instanceId is missing", async () => {
-      const result = await LeaderElection.create("postgres://test", undefined);
+      const result = await LeaderElection.create("postgres://test", undefined, logger);
       expect(result).toBeNull();
     });
 
     it("returns null when both are missing", async () => {
-      const result = await LeaderElection.create(undefined, undefined);
+      const result = await LeaderElection.create(undefined, undefined, logger);
+      expect(result).toBeNull();
+    });
+
+    it("returns null when logger is missing", async () => {
+      const result = await LeaderElection.create("postgres://test", "host-1");
       expect(result).toBeNull();
     });
   });
