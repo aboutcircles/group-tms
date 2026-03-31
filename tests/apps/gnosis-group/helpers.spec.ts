@@ -132,7 +132,7 @@ describe("gnosis-group helpers", () => {
       })
     });
 
-    const results = await fetchRelativeTrustScores("https://scores.local", [valid], [valid]);
+    const results = await fetchRelativeTrustScores("https://scores.local", [valid], [valid], 30_000);
     expect(results.get("0x4000000000000000000000000000000000000004")).toBe(44);
   });
 
@@ -145,7 +145,7 @@ describe("gnosis-group helpers", () => {
     });
 
     await expect(
-      fetchRelativeTrustScores("https://scores.local", [], [])
+      fetchRelativeTrustScores("https://scores.local", [], [], 30_000)
     ).rejects.toThrow("HTTP 503 Unavailable");
 
     fetchMock.mockResolvedValueOnce({
@@ -156,7 +156,7 @@ describe("gnosis-group helpers", () => {
     });
 
     await expect(
-      fetchRelativeTrustScores("https://scores.local", [], [])
+      fetchRelativeTrustScores("https://scores.local", [], [], 30_000)
     ).rejects.toThrow("response malformed");
   });
 });
