@@ -1,6 +1,6 @@
 import {IBlacklistingService, IBlacklistServiceVerdict} from "../interfaces/IBlacklistingService";
 
-const DEFAULT_PAGE_TIMEOUT_MS = 30_000;
+export const DEFAULT_BLACKLIST_PAGE_TIMEOUT_MS = 60_000;
 const DEFAULT_PAGE_SIZE = 1000;
 const MAX_PAGES = 100; // 100k addresses max — well beyond expected blacklist size
 
@@ -18,7 +18,7 @@ export class BlacklistingService implements IBlacklistingService {
 
     constructor(
         private serviceUrl: string,
-        private readonly pageTimeoutMs: number = DEFAULT_PAGE_TIMEOUT_MS,
+        private readonly pageTimeoutMs: number = DEFAULT_BLACKLIST_PAGE_TIMEOUT_MS,
         private readonly pageSize: number = DEFAULT_PAGE_SIZE
     ) {}
 

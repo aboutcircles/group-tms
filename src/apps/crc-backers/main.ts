@@ -55,7 +55,8 @@ const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
   void slackService.notifySlackStartOrCrash(`⚠️ *crc-backers* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
 });
 const chainRpc = new ChainRpcService(rpcUrl);
-const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
+const blacklistTimeoutMs = Math.max(1000, Number(process.env.BLACKLIST_TIMEOUT_MS) || 60_000);
+const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
 const groupService = (!dryRun || canSimulateTransactions)
   ? new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress, txRpcUrl)
   : undefined;
