@@ -64,11 +64,16 @@ npm run start:all
 
 ## Configuration (.env)
 
+`RPC_URL` remains the default read RPC for all apps. Set `TX_RPC_URL` when you want transaction submission and confirmation to use a different RPC; if unset, writes keep using `RPC_URL`.
+
+When `DRY_RUN=1`, the apps now attempt gas estimation plus transaction simulation for write batches if the relevant signer/Safe credentials are configured. If those credentials are omitted in dry-run mode, the app still logs planned actions and explicitly skips the simulation step.
+
 ### CRC Backers App Configuration
 
 ```dotenv
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 BACKING_FACTORY_ADDRESS=0xeced91232c609a42f6016860e8223b8aecaa7bd0
 BACKERS_GROUP_ADDRESS=0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026
 
@@ -100,6 +105,7 @@ DRY_RUN=0             # Set to "1" to skip Safe transactions and only log action
 ```dotenv
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 GP_CRC_GROUP_ADDRESS=0xb629a1e86f3efada0f87c83494da8cc34c3f84ef
 
 # Safe execution (required unless dry run)
@@ -131,6 +137,7 @@ VERBOSE_LOGGING=1
 ```dotenv
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 OIC_GROUP_ADDRESS=0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5
 OIC_META_ORG_ADDRESS=                    # REQUIRED - Meta organization address
 AFFILIATE_REGISTRY_ADDRESS=0xca8222e780d046707083f51377b5fd85e2866014
@@ -160,6 +167,7 @@ VERBOSE_LOGGING=1     # any truthy value enables debug/table
 ```dotenv
 # RPC
 RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 
 # RegisterHuman source + target group
 DUBLIN_TMS_ADDRESS=0xAeCda439CC8Ac2a2da32bE871E0C2D7155350f80
@@ -193,6 +201,7 @@ VERBOSE_LOGGING=1
 ```dotenv
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 ROUTER_ADDRESS=0xdc287474114cc0551a81ddc2eb51783fbf34802f
 ROUTER_BASE_GROUP_ADDRESS=0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026
 
@@ -221,6 +230,7 @@ VERBOSE_LOGGING=1
 ```dotenv
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 GNOSIS_GROUP_ADDRESS=0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c
 
 # Safe execution

@@ -23,7 +23,7 @@ type GraphqlResponse = {
 };
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_CHUNK_SIZE = 2500;
+const DEFAULT_CHUNK_SIZE = 500;
 
 const QUERY = `query($addresses:[String!]!){
   Metri_Pay_DelayModule(where:{owners:{ownerAddress:{_in:$addresses}}}){
@@ -147,7 +147,7 @@ export class MetriSafeService implements IAvatarSafeService {
         }
 
         const existing = accumulator.get(safe);
-        if (!existing || compareTimestamp(timestamp, existing.timestamp) > 0) {
+        if (!existing || shouldReplaceSelection(existing, avatar, timestamp)) {
           accumulator.set(safe, {avatar, timestamp});
         }
       }
@@ -217,6 +217,23 @@ function compareTimestamp(left: string, right: string): number {
   }
 
   return left.localeCompare(right);
+}
+
+function shouldReplaceSelection(
+  existing: SafeOwnerSelection,
+  candidateAvatar: string,
+  candidateTimestamp: string
+): boolean {
+  const timestampComparison = compareTimestamp(candidateTimestamp, existing.timestamp);
+  if (timestampComparison > 0) {
+    return true;
+  }
+  if (timestampComparison < 0) {
+    return false;
+  }
+
+  // Break ties deterministically so response ordering cannot flip the selected owner.
+  return candidateAvatar.toLowerCase().localeCompare(existing.avatar.toLowerCase()) < 0;
 }
 
 function toComparableBigInt(value: string): bigint | null {

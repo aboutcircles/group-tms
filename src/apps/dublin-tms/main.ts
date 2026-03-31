@@ -16,6 +16,7 @@ import {formatErrorWithCauses} from "../../formatError";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {getAddress, Wallet} from "ethers";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
+import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
 const DEFAULT_RPC_URL = "https://rpc.aboutcircles.com/";
 const DEFAULT_INVITATION_MODULE = "0x00738aca013B7B2e6cfE1690F0021C3182Fa40B5";
@@ -36,6 +37,7 @@ const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "dublin-tms");
 
 const rpcUrl = process.env.RPC_URL || DEFAULT_RPC_URL;
+const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const invitationModuleAddress = DEFAULT_INVITATION_MODULE;
 const targetGroupAddress = normalizeAddressOrThrow(
   process.env.DUBLIN_TMS_ADDRESS || DEFAULT_TARGET_GROUP,
@@ -55,6 +57,7 @@ const configuredServiceEoa = normalizeAddressOrThrow(
 
 const dryRun = process.env.DRY_RUN === "1";
 const servicePrivateKey = process.env.DUBLIN_TMS_SERVICE_PRIVATE_KEY || "";
+const canSimulateTransactions = servicePrivateKey.trim().length > 0;
 const slackWebhookUrl = process.env.DUBLIN_TMS_SLACK_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.DUBLIN_TMS_SLACK_WEBHOOK_URL_INFO || process.env.SLACK_WEBHOOK_URL_INFO || "";
 const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
@@ -74,14 +77,14 @@ const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slac
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 
 let groupService: IGroupService | undefined;
-if (!dryRun) {
+if (!dryRun || canSimulateTransactions) {
   const signerAddress = normalizeAddressOrThrow(new Wallet(servicePrivateKey).address, "DUBLIN_TMS_SERVICE_PRIVATE_KEY");
   if (signerAddress.toLowerCase() !== configuredServiceEoa.toLowerCase()) {
     throw new Error(
       `Configured DUBLIN_TMS_SERVICE_EOA (${configuredServiceEoa}) does not match signer address (${signerAddress}).`
     );
   }
-  groupService = new GroupService(rpcUrl, servicePrivateKey);
+  groupService = new GroupService(rpcUrl, servicePrivateKey, txRpcUrl);
 }
 
 const runLogger = rootLogger.child("run");
@@ -100,6 +103,7 @@ let nextFromBlock = configuredStartBlock;
 
 rootLogger.info("Starting dublin-tms watcher with config:");
 rootLogger.info(`  - rpcUrl=${rpcUrl}`);
+rootLogger.info(`  - txRpcUrl=${txRpcUrl}`);
 rootLogger.info(`  - invitationModuleAddress=${invitationModuleAddress}`);
 rootLogger.info(`  - targetGroupAddress=${targetGroupAddress}`);
 rootLogger.info(`  - configuredStartBlock=${configuredStartBlock}`);
@@ -112,6 +116,7 @@ rootLogger.info(`  - originInviters=${originInviters.join(",")}`);
 rootLogger.info(`  - dryRun=${dryRun}`);
 rootLogger.info(`  - serviceEoa=${configuredServiceEoa}`);
 rootLogger.info(`  - servicePrivateKeyConfigured=${servicePrivateKey.trim().length > 0}`);
+rootLogger.info(`  - dryRunSimulationConfigured=${canSimulateTransactions}`);
 rootLogger.info(`  - slackConfigured=${slackConfigured}`);
 
 const errorsBeforeCrash = 3;
@@ -214,6 +219,8 @@ async function notifySlackStartup(): Promise<void> {
   const message =
     `${header}\n\n` +
     `Watching RegisterHuman and trusting matching avatars.\n` +
+    `- RPC: ${rpcUrl}\n` +
+    `- TX RPC: ${txRpcUrl}\n` +
     `- Target Group: ${targetGroupAddress}\n` +
     `- Service EOA: ${configuredServiceEoa}\n` +
     `- Origin Inviters: ${originInviters.join(", ")}\n` +

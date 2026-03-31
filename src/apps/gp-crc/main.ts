@@ -19,11 +19,13 @@ import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
+import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gp-crc");
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
+const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
@@ -48,6 +50,7 @@ const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slac
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 let groupService: IGroupService | undefined;
 let avatarSafeService: MetriSafeService;
+const canSimulateTransactions = safeSignerPrivateKey.trim().length > 0 && safeAddress.trim().length > 0;
 
 if (!groupAddress) {
   throw new Error("GP_CRC_GROUP_ADDRESS is required");
@@ -69,8 +72,8 @@ if (!dryRun && safeAddress.trim().length === 0) {
   throw new Error("GP_CRC_SAFE_ADDRESS is required when not running gp-crc in dry-run mode");
 }
 
-if (!dryRun) {
-  groupService = new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress);
+if (!dryRun || canSimulateTransactions) {
+  groupService = new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress, txRpcUrl);
 }
 
 const runLogger = rootLogger.child("run");
@@ -85,6 +88,7 @@ const config: RunConfig = {
 
 rootLogger.info("Starting gp-crc watcher with config:");
 rootLogger.info(`  - rpcUrl=${rpcUrl}`);
+rootLogger.info(`  - txRpcUrl=${txRpcUrl}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
 rootLogger.info(`  - pollIntervalMs=${pollIntervalMs}`);
 rootLogger.info(`  - groupAddress=${groupAddress}`);
@@ -92,6 +96,7 @@ rootLogger.info(`  - groupBatchSize=${groupBatchSize}`);
 rootLogger.info(`  - metriSafeGraphqlUrl=${metriSafeGraphqlUrl}`);
 rootLogger.info(`  - safeAddress=${safeAddress || "(not set)"}`);
 rootLogger.info(`  - safeSignerConfigured=${safeSignerPrivateKey.trim().length > 0}`);
+rootLogger.info(`  - dryRunSimulationConfigured=${canSimulateTransactions}`);
 rootLogger.info(`  - dryRun=${dryRun}`);
 
 void notifySlackStartup();
@@ -135,6 +140,7 @@ async function mainLoop(): Promise<void> {
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
+    rootLogger.child("leader-election"),
     slackService,
     (isLeader) => setLeaderStatus("gp-crc", isLeader)
   );
@@ -239,6 +245,7 @@ async function notifySlackStartup(): Promise<void> {
     const startupMessage = `✅ *GP-CRC TMS Service started*\n\n` +
     `Monitoring CRC avatars who also have a GP account in Metri.\n` +
     `- RPC: ${rpcUrl}\n` +
+    `- TX RPC: ${txRpcUrl}\n` +
     `- Blacklisting Service: ${blacklistingServiceUrl}\n` +
     `- Fetch Page Size: ${fetchPageSize}\n` +
     `- Metri Safe GraphQL: ${metriSafeGraphqlUrl}\n` +

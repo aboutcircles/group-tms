@@ -14,6 +14,8 @@ import {
   DEFAULT_SCORE_THRESHOLD,
   DEFAULT_GROUP_BATCH_SIZE,
   FIXED_AUTO_TRUST_GROUP_ADDRESSES,
+  HISTORIC_AUTO_TRUST_GROUP_ADDRESS,
+  HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER,
   DEFAULT_SCORE_CACHE_TTL_MS,
   RunOutcome
 } from "./logic";
@@ -23,11 +25,13 @@ import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
+import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, "gnosis-group");
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
+const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 const scoringServiceUrl = process.env.GNOSIS_GROUP_SCORING_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore/batch";
 const targetGroupAddress = process.env.GNOSIS_GROUP_ADDRESS || "0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c";
@@ -58,6 +62,7 @@ const scoreCache = new ScoreCache();
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
+const canSimulateTransactions = safeSignerPrivateKey.trim().length > 0 && safeAddress.trim().length > 0;
 
 const runLogger = rootLogger.child("run");
 let groupService: IGroupService | undefined;
@@ -70,8 +75,8 @@ if (!dryRun && safeAddress.trim().length === 0) {
   throw new Error("GNOSIS_GROUP_SAFE_ADDRESS is required when not running gnosis-group in dry-run mode");
 }
 
-if (!dryRun) {
-  groupService = new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress);
+if (!dryRun || canSimulateTransactions) {
+  groupService = new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress, txRpcUrl);
 }
 
 const config: RunConfig = {
@@ -88,6 +93,7 @@ const config: RunConfig = {
 
 rootLogger.info("Starting gnosis-group run with config:");
 rootLogger.info(`  - rpcUrl=${rpcUrl}`);
+rootLogger.info(`  - txRpcUrl=${txRpcUrl}`);
 rootLogger.info(`  - scoringServiceUrl=${scoringServiceUrl}`);
 rootLogger.info(`  - targetGroupAddress=${targetGroupAddress}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
@@ -95,8 +101,11 @@ rootLogger.info(`  - scoreBatchSize=${scoreBatchSize}`);
 rootLogger.info(`  - scoreThreshold=${scoreThreshold}`);
 rootLogger.info(`  - groupBatchSize=${groupBatchSize}`);
 rootLogger.info(`  - fixedAutoTrustGroupAddresses=${FIXED_AUTO_TRUST_GROUP_ADDRESSES.join(",")}`);
+rootLogger.info(`  - historicAutoTrustGroupAddress=${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}`);
+rootLogger.info(`  - historicAutoTrustGroupBlockNumber=${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}`);
 rootLogger.info(`  - safeAddress=${safeAddress || "(not set)"}`);
 rootLogger.info(`  - safeSignerPrivateKeyConfigured=${safeSignerPrivateKey.trim().length > 0}`);
+rootLogger.info(`  - dryRunSimulationConfigured=${canSimulateTransactions}`);
 rootLogger.info(`  - dryRun=${dryRun}`);
 rootLogger.info(`  - runIntervalMinutes=${runIntervalMinutes}`);
 rootLogger.info(`  - scoreCacheTtlMinutes=${scoreCacheTtlMs / 60_000}`);
@@ -135,12 +144,14 @@ async function mainLoop(): Promise<void> {
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
+    rootLogger.child("leader-election"),
     slackService,
     (isLeader) => setLeaderStatus("gnosis-group", isLeader)
   );
   const maxDelay = Math.min(runIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = runIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
+  let historicAutoTrustSnapshotMembers: string[] | null = null;
 
   while (true) {
     const runStartedAt = Date.now();
@@ -152,6 +163,9 @@ async function mainLoop(): Promise<void> {
         logger: rootLogger
       });
       if (!isHealthy) { await delay(currentDelay); continue; }
+      if (historicAutoTrustSnapshotMembers === null) {
+        historicAutoTrustSnapshotMembers = await loadHistoricAutoTrustSnapshotMembers();
+      }
       await refreshBlacklist();
       const outcome = await runOnce(
         {
@@ -161,7 +175,11 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           scoreCache
         },
-        { ...config, dryRun: effectiveDryRun }
+        {
+          ...config,
+          dryRun: effectiveDryRun,
+          historicAutoTrustSnapshotMembers
+        }
       );
 
       await stateStore?.save("gnosis-group", 0, { lastSuccessfulRunAt: new Date().toISOString() });
@@ -196,6 +214,20 @@ async function mainLoop(): Promise<void> {
       rootLogger.info("Run interval elapsed; starting next run immediately.");
     }
   }
+}
+
+async function loadHistoricAutoTrustSnapshotMembers(): Promise<string[]> {
+  runLogger.info(
+    `Loading historical auto-trust snapshot ${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}@${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}.`
+  );
+  const members = await circlesRpc.fetchActiveGroupMembersAtBlock(
+    HISTORIC_AUTO_TRUST_GROUP_ADDRESS,
+    HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER
+  );
+  runLogger.info(
+    `Loaded ${members.length} historical auto-trust snapshot member(s) from ${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}@${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}.`
+  );
+  return members;
 }
 
 function delay(ms: number): Promise<void> {
@@ -265,6 +297,7 @@ async function notifySlackStartup(): Promise<void> {
   const message =
     `${header}\n\n` +
     `- RPC: ${rpcUrl}\n` +
+    `- TX RPC: ${txRpcUrl}\n` +
     `- Scoring Service: ${scoringServiceUrl}\n` +
     `- Gnosis Group: ${targetGroupAddress}\n` +
     `- Score Threshold: ${scoreThreshold}\n` +

@@ -1,5 +1,6 @@
 import {ResetCowSwapOrderResult, IBackingInstanceService, CreateLBPResult} from "../interfaces/IBackingInstanceService";
 import {Contract, Interface, JsonRpcProvider, FallbackProvider} from "ethers";
+import {TransactionSimulationResult} from "../interfaces/ITransactionSimulation";
 import CirclesBackingABI from "../abi/CirclesBackingABI.json";
 import {SafeTransactionExecutor} from "./safeTransactionExecutor";
 import {createProvider} from "./rpcProvider";
@@ -10,10 +11,10 @@ export class BackingInstanceService implements IBackingInstanceService {
   private readonly provider: JsonRpcProvider | FallbackProvider;
   private readonly executor?: SafeTransactionExecutor;
 
-  constructor(rpcUrl: string, signerPrivateKey?: string, safeAddress?: string) {
+  constructor(rpcUrl: string, signerPrivateKey?: string, safeAddress?: string, txRpcUrl: string = rpcUrl) {
     this.provider = createProvider(rpcUrl);
     if (signerPrivateKey && signerPrivateKey.trim().length > 0 && safeAddress && safeAddress.trim().length > 0) {
-      this.executor = new SafeTransactionExecutor(rpcUrl, signerPrivateKey, safeAddress);
+      this.executor = new SafeTransactionExecutor(txRpcUrl, signerPrivateKey, safeAddress);
     }
   }
 
@@ -35,6 +36,22 @@ export class BackingInstanceService implements IBackingInstanceService {
     }
     const data = BACKING_INTERFACE.encodeFunctionData("createLBP", []);
     return this.executor.execute(circlesBackingInstance, data);
+  }
+
+  async simulateResetCowSwapOrderTx(circlesBackingInstance: string): Promise<TransactionSimulationResult> {
+    if (!this.executor) {
+      throw new Error("simulateResetCowSwapOrderTx requires a configured Safe signer");
+    }
+    const data = BACKING_INTERFACE.encodeFunctionData("resetCowswapOrder", []);
+    return this.executor.simulate(circlesBackingInstance, data);
+  }
+
+  async simulateCreateLbpTx(circlesBackingInstance: string): Promise<TransactionSimulationResult> {
+    if (!this.executor) {
+      throw new Error("simulateCreateLbpTx requires a configured Safe signer");
+    }
+    const data = BACKING_INTERFACE.encodeFunctionData("createLBP", []);
+    return this.executor.simulate(circlesBackingInstance, data);
   }
 
   async simulateCreateLbp(circlesBackingInstance: string): Promise<CreateLBPResult> {

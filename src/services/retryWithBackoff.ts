@@ -10,18 +10,23 @@ const TRANSIENT_MESSAGES = [
   "ECONNRESET",
   "ECONNREFUSED",
   "socket hang up",
-  "429",
   "Too Many Requests",
 ];
 
-const TRANSIENT_CODES = new Set<number>([-32016]);
+const TRANSIENT_CODES = new Set<number>([-32016, 429]);
+
+/** Match "429" only as a standalone token, not inside larger numbers like "42900001". */
+const RATE_LIMIT_PATTERN = /\b429\b/;
 
 export function isTransientRpcError(err: unknown): boolean {
   if (err == null) return false;
   const msg = String((err as any)?.message ?? err);
   const code = ((err as any)?.code ?? (err as any)?.error?.code) as number | undefined;
+  const status = ((err as any)?.status ?? (err as any)?.statusCode) as number | undefined;
 
   if (code !== undefined && TRANSIENT_CODES.has(code)) return true;
+  if (status !== undefined && TRANSIENT_CODES.has(status)) return true;
+  if (RATE_LIMIT_PATTERN.test(msg)) return true;
   return TRANSIENT_MESSAGES.some((t) => msg.includes(t));
 }
 

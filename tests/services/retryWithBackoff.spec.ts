@@ -9,12 +9,30 @@ describe("isTransientRpcError", () => {
     expect(isTransientRpcError({ error: { code: -32016 }, message: "x" })).toBe(true);
   });
 
-  it.each(["timeout", "canceled", "cancelled", "ECONNRESET", "ECONNREFUSED", "socket hang up"])(
+  it.each(["timeout", "canceled", "cancelled", "ECONNRESET", "ECONNREFUSED", "socket hang up", "Too Many Requests"])(
     "returns true for message containing '%s'",
     (keyword) => {
       expect(isTransientRpcError(new Error(`Request ${keyword} by server`))).toBe(true);
     }
   );
+
+  it("returns true for standalone 429 in message", () => {
+    expect(isTransientRpcError(new Error("HTTP 429 rate limited"))).toBe(true);
+    expect(isTransientRpcError(new Error("status 429"))).toBe(true);
+  });
+
+  it("returns false when 429 is part of a larger number (e.g. block 42900001)", () => {
+    expect(isTransientRpcError(new Error("block 42900001 not found"))).toBe(false);
+  });
+
+  it("returns true for numeric status/statusCode 429", () => {
+    expect(isTransientRpcError({ status: 429, message: "rate limited" })).toBe(true);
+    expect(isTransientRpcError({ statusCode: 429, message: "rate limited" })).toBe(true);
+  });
+
+  it("returns true for numeric code 429", () => {
+    expect(isTransientRpcError({ code: 429, message: "error" })).toBe(true);
+  });
 
   it("returns false for revert error", () => {
     expect(isTransientRpcError(new Error("execution reverted"))).toBe(false);

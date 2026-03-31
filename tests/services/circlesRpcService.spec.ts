@@ -54,8 +54,29 @@ function buildService(): CirclesRpcService {
   return new CirclesRpcService(RPC_URL);
 }
 
+function makeRawBackingCompletedEvent(blockNumber: number, suffix: string) {
+  const hex = (value: number) => `0x${value.toString(16)}`;
+  return {
+    event: "CrcV2_CirclesBackingCompleted",
+    values: {
+      blockNumber: hex(blockNumber),
+      timestamp: hex(blockNumber + 1000),
+      transactionIndex: "0x1",
+      logIndex: "0x2",
+      transactionHash: `0xtx${suffix}`,
+      backer: `0xbacker${suffix}`,
+      circlesBackingInstance: `0xinst${suffix}`,
+      lbp: `0xlbp${suffix}`,
+      emitter: FACTORY,
+    },
+  };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
-beforeEach(() => jest.clearAllMocks());
+beforeEach(() => {
+  jest.clearAllMocks();
+  nextPagedQueryMock = null;
+});
 
 describe("CirclesRpcService", () => {
   // ────────────────────────────────────────────────────────────────────────
@@ -78,13 +99,43 @@ describe("CirclesRpcService", () => {
     });
 
     it("passes toBlock=null when toBlock is omitted", async () => {
-      mockClientCall.mockResolvedValueOnce({ events: [] });
+      mockClientCall
+        .mockResolvedValueOnce("0x32")
+        .mockResolvedValueOnce({ events: [] });
       const svc = buildService();
       await svc.fetchBackingCompletedEvents(FACTORY, 50);
 
-      const args = mockClientCall.mock.calls[0][1];
+      expect(mockClientCall.mock.calls[0]).toEqual(["eth_blockNumber", []]);
+      const args = mockClientCall.mock.calls[1][1];
       expect(args[0]).toBeUndefined();   // address
-      expect(args[2]).toBeNull();         // toBlock
+      expect(args[2]).toBe(50);           // resolved head block
+    });
+
+    it("splits ranges when circles_events returns the capped result size", async () => {
+      mockClientCall
+        .mockResolvedValueOnce(Array.from({ length: 100 }, (_, index) => makeRawBackingCompletedEvent(1000 - index, `cap${index}`)))
+        .mockResolvedValueOnce([makeRawBackingCompletedEvent(12, "left")])
+        .mockResolvedValueOnce([
+          makeRawBackingCompletedEvent(18, "right-a"),
+          makeRawBackingCompletedEvent(16, "right-b"),
+        ]);
+
+      const svc = buildService();
+      const events = await svc.fetchBackingCompletedEvents(FACTORY, 10, 18);
+
+      expect(mockClientCall).toHaveBeenCalledTimes(3);
+      expect(mockClientCall.mock.calls[0]).toEqual(["circles_events", [
+        undefined,
+        10,
+        18,
+        ["CrcV2_CirclesBackingCompleted"],
+        [{ Type: "FilterPredicate", FilterType: "Equals", Column: "emitter", Value: FACTORY }],
+      ]]);
+      expect(mockClientCall.mock.calls[1][1][1]).toBe(10);
+      expect(mockClientCall.mock.calls[1][1][2]).toBe(14);
+      expect(mockClientCall.mock.calls[2][1][1]).toBe(15);
+      expect(mockClientCall.mock.calls[2][1][2]).toBe(18);
+      expect(events.map((event) => event.blockNumber)).toEqual([18, 16, 12]);
     });
   });
 
@@ -108,6 +159,35 @@ describe("CirclesRpcService", () => {
   // Event transformation: hex → number parsing
   // ────────────────────────────────────────────────────────────────────────
   describe("event transformation", () => {
+    it("parses events when circles_events returns a bare array", async () => {
+      mockClientCall.mockResolvedValueOnce([
+        {
+          event: "CrcV2_CirclesBackingCompleted",
+          values: {
+            blockNumber: "0x1a3",
+            timestamp: "0x2710",
+            transactionIndex: "0xa",
+            logIndex: "0x1f",
+            transactionHash: "0xabc123",
+            backer: "0xbacker",
+            circlesBackingInstance: "0xinst",
+            lbp: "0xlbp",
+            emitter: "0xfactory",
+          },
+        },
+      ]);
+
+      const svc = buildService();
+      const events = await svc.fetchBackingCompletedEvents(FACTORY, 1, 999);
+
+      expect(events).toHaveLength(1);
+      expect(events[0].blockNumber).toBe(419);
+      expect(events[0].timestamp).toBe(10000);
+      expect(events[0].backer).toBe("0xbacker");
+      expect(events[0].circlesBackingInstance).toBe("0xinst");
+      expect(events[0].lbp).toBe("0xlbp");
+    });
+
     it("parses hex blockNumber/timestamp/transactionIndex/logIndex to numbers", async () => {
       mockClientCall.mockResolvedValueOnce({
         events: [
@@ -146,23 +226,25 @@ describe("CirclesRpcService", () => {
     });
 
     it("handles already-numeric values gracefully", async () => {
-      mockClientCall.mockResolvedValueOnce({
-        events: [
-          {
-            event: "CrcV2_CirclesBackingInitiated",
-            values: {
-              blockNumber: 500,
-              timestamp: 12345,
-              transactionIndex: 2,
-              logIndex: 7,
-              transactionHash: "0xdef",
-              backer: "0xb",
-              circlesBackingInstance: "0xi",
-              emitter: "0xe",
+      mockClientCall
+        .mockResolvedValueOnce("0x64")
+        .mockResolvedValueOnce({
+          events: [
+            {
+              event: "CrcV2_CirclesBackingInitiated",
+              values: {
+                blockNumber: 500,
+                timestamp: 12345,
+                transactionIndex: 2,
+                logIndex: 7,
+                transactionHash: "0xdef",
+                backer: "0xb",
+                circlesBackingInstance: "0xi",
+                emitter: "0xe",
+              },
             },
-          },
-        ],
-      });
+          ],
+        });
 
       const svc = buildService();
       const events = await svc.fetchBackingInitiatedEvents(FACTORY, 1);
@@ -171,7 +253,9 @@ describe("CirclesRpcService", () => {
     });
 
     it("returns empty array when response has no events", async () => {
-      mockClientCall.mockResolvedValueOnce({});
+      mockClientCall
+        .mockResolvedValueOnce("0x64")
+        .mockResolvedValueOnce({});
       const svc = buildService();
       const events = await svc.fetchBackingCompletedEvents(FACTORY, 1);
       expect(events).toEqual([]);
@@ -242,6 +326,87 @@ describe("CirclesRpcService", () => {
       const svc = buildService();
       const trustees = await svc.fetchAllTrustees(truster);
       expect(trustees).toEqual(["0xbbb", "0xddd"]);
+    });
+  });
+
+  describe("fetchAllTrusteesForTrusters", () => {
+    it("returns grouped trustees for multiple trusters from one paged query", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const trusterB = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [
+          { truster: trusterA, trustee: "0x111" },
+          { truster: trusterB, trustee: "0x222" }
+        ]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA, trusterB]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111"]],
+        [trusterB, ["0x222"]]
+      ]));
+      expect(svc.getLastBulkTrusteesForTrustersStats()).toEqual({
+        pagesFetched: 1,
+        rowsScanned: 2
+      });
+    });
+
+    it("initializes empty arrays for requested trusters with no rows", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      const trusterB = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [{ truster: trusterA, trustee: "0x111" }]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA, trusterB]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111"]],
+        [trusterB, []]
+      ]));
+    });
+
+    it("aggregates trustees across multiple pages", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [{ truster: trusterA, trustee: "0x111" }],
+        [{ truster: trusterA, trustee: "0x222" }]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111", "0x222"]]
+      ]));
+      expect(svc.getLastBulkTrusteesForTrustersStats()).toEqual({
+        pagesFetched: 2,
+        rowsScanned: 2
+      });
+    });
+
+    it("ignores rows whose truster is not in the requested batch", async () => {
+      const trusterA = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      nextPagedQueryMock = makeMockPagedQuery([
+        [
+          { truster: trusterA, trustee: "0x111" },
+          { truster: "0xcccccccccccccccccccccccccccccccccccccccc", trustee: "0x999" }
+        ]
+      ]);
+
+      const svc = buildService();
+      const result = await svc.fetchAllTrusteesForTrusters([trusterA]);
+
+      expect(result).toEqual(new Map([
+        [trusterA, ["0x111"]]
+      ]));
+      expect(svc.getLastBulkTrusteesForTrustersStats()).toEqual({
+        pagesFetched: 1,
+        rowsScanned: 2
+      });
     });
   });
 
@@ -342,6 +507,125 @@ describe("CirclesRpcService", () => {
   });
 
   // ────────────────────────────────────────────────────────────────────────
+  // Pagination guards: page cap, timeout, delay
+  // ────────────────────────────────────────────────────────────────────────
+  describe("pagination guards", () => {
+    it("fetchAllTrustees stops at MAX_PAGES (500) even if RPC keeps returning pages", async () => {
+      jest.useFakeTimers();
+
+      const truster = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      let callCount = 0;
+      const infiniteQuery = {
+        queryNextPage: jest.fn(async () => {
+          callCount++;
+          return true; // always has more pages
+        }),
+        get currentPage() {
+          return { results: [{ truster, trustee: `0x${callCount.toString().padStart(40, "0")}` }] };
+        },
+      };
+      mockGetTrustRelations.mockReturnValueOnce(infiniteQuery);
+
+      const svc = buildService();
+      const promise = svc.fetchAllTrustees("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+      await jest.runAllTimersAsync();
+      const trustees = await promise;
+
+      expect(infiniteQuery.queryNextPage).toHaveBeenCalledTimes(500);
+      expect(trustees).toHaveLength(500);
+
+      jest.useRealTimers();
+    });
+
+    it("fetchAllTrusteesForTrusters stops at MAX_PAGES", async () => {
+      jest.useFakeTimers();
+
+      let callCount = 0;
+      const truster = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      nextPagedQueryMock = {
+        queryNextPage: jest.fn(async () => {
+          callCount++;
+          return true;
+        }),
+        get currentPage() {
+          return { results: [{ truster, trustee: `0x${callCount.toString().padStart(40, "0")}` }] };
+        },
+      } as any;
+
+      const svc = buildService();
+      const promise = svc.fetchAllTrusteesForTrusters([truster]);
+      await jest.runAllTimersAsync();
+      const result = await promise;
+
+      expect(result.get(truster)!.length).toBe(500);
+      expect(svc.getLastBulkTrusteesForTrustersStats().pagesFetched).toBe(500);
+
+      jest.useRealTimers();
+    });
+
+    it("fetchAllBaseGroups normalizes group addresses to lowercase", async () => {
+      mockGetGroups.mockReturnValueOnce(
+        makeMockPagedQuery([
+          [{ group: "0xAbCdEf1234567890AbCdEf1234567890AbCdEf12" }],
+        ]),
+      );
+
+      const svc = buildService();
+      const groups = await svc.fetchAllBaseGroups();
+      expect(groups).toEqual(["0xabcdef1234567890abcdef1234567890abcdef12"]);
+    });
+
+    it("fetchAllHumanAvatars warns about skipped invalid addresses via logger", async () => {
+      nextPagedQueryMock = makeMockPagedQuery([
+        [
+          { avatar: "0x1111111111111111111111111111111111111111" },
+          { avatar: "invalid-addr" },
+          { avatar: "also-bad" },
+        ],
+      ]);
+      const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+
+      const svc = buildService();
+      await svc.fetchAllHumanAvatars(1000, mockLogger as any);
+      expect(mockLogger.warn).toHaveBeenCalledWith("Skipped 2 invalid avatar address(es) from RPC.");
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // mapEvents spread order: core fields override extras
+  // ────────────────────────────────────────────────────────────────────────
+  describe("mapEvents spread order", () => {
+    it("core fields (blockNumber, timestamp, etc.) are not overridden by extras with same name", async () => {
+      mockClientCall.mockResolvedValueOnce({
+        events: [
+          {
+            event: "CrcV2_CirclesBackingCompleted",
+            values: {
+              blockNumber: "0xa",
+              timestamp: "0xb",
+              transactionIndex: "0xc",
+              logIndex: "0xd",
+              transactionHash: "0xtxhash",
+              backer: "0xbacker",
+              circlesBackingInstance: "0xinst",
+              lbp: "0xlbp",
+              emitter: "0xemitter",
+            },
+          },
+        ],
+      });
+
+      const svc = buildService();
+      const events = await svc.fetchBackingCompletedEvents(FACTORY, 1, 999);
+      // Core fields should be parsed numbers, not the raw hex strings
+      expect(events[0].blockNumber).toBe(10);
+      expect(events[0].timestamp).toBe(11);
+      expect(events[0].transactionIndex).toBe(12);
+      expect(events[0].logIndex).toBe(13);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
   // Edge cases: multiple events in single response
   // ────────────────────────────────────────────────────────────────────────
   describe("backing events — multiple events in response", () => {
@@ -362,10 +646,10 @@ describe("CirclesRpcService", () => {
       const svc = buildService();
       const events = await svc.fetchBackingCompletedEvents(FACTORY, 1, 999);
       expect(events).toHaveLength(2);
-      expect(events[0].blockNumber).toBe(1);
-      expect(events[1].blockNumber).toBe(16); // 0x10
-      expect(events[0].backer).toBe("0xb1");
-      expect(events[1].backer).toBe("0xb2");
+      expect(events[0].blockNumber).toBe(16); // 0x10
+      expect(events[1].blockNumber).toBe(1);
+      expect(events[0].backer).toBe("0xb2");
+      expect(events[1].backer).toBe("0xb1");
     });
   });
 });

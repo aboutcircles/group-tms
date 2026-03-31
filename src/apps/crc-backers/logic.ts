@@ -193,16 +193,28 @@ export async function trustAllNewBackers(
   if (dryRun || !groupService) {
     if (willUntrustAny) {
       LOG.info(`  - Dry-run enabled; would untrust ${toUntrust.length} backers in ${untrustBatches.length} batch(es).`);
-      untrustBatches.forEach((batch, index) => {
+      for (const [index, batch] of untrustBatches.entries()) {
         LOG.info(`    DRY RUN untrust batch ${index + 1}/${untrustBatches.length}: ${batch.length} backers -> ${batch.join(", ")}`);
-      });
+        if (groupService?.simulateUntrustBatch) {
+          const simulation = await groupService.simulateUntrustBatch(groupAddress, batch);
+          LOG.info(`    DRY RUN untrust simulation ${index + 1}/${untrustBatches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`);
+        } else {
+          LOG.info(`    DRY RUN untrust simulation ${index + 1}/${untrustBatches.length}: skipped (no signer-backed simulator configured).`);
+        }
+      }
     }
     if (willAddAny) {
       LOG.info(`  - Dry-run enabled; would trust ${notAlreadyTrusted.length} backers in ${trustBatches.length} batch(es).`);
-      trustBatches.forEach((batch, index) => {
+      for (const [index, batch] of trustBatches.entries()) {
         const backersToTrust = batch.map((e) => e.backer);
         LOG.info(`    DRY RUN trust batch ${index + 1}/${trustBatches.length}: ${batch.length} backers -> ${backersToTrust.join(", ")}`);
-      });
+        if (groupService?.simulateTrustBatchWithConditions) {
+          const simulation = await groupService.simulateTrustBatchWithConditions(groupAddress, backersToTrust);
+          LOG.info(`    DRY RUN trust simulation ${index + 1}/${trustBatches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`);
+        } else {
+          LOG.info(`    DRY RUN trust simulation ${index + 1}/${trustBatches.length}: skipped (no signer-backed simulator configured).`);
+        }
+      }
     }
   } else {
     if (willUntrustAny) {
@@ -455,6 +467,12 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunResult> {
         case "Success": {
           if (dryRun) {
             LOG.info(`[DRY RUN] Would create LBP for ${event.backer} at ${event.circlesBackingInstance}.`);
+            if (cowSwapService.simulateCreateLbpTx) {
+              const simulation = await cowSwapService.simulateCreateLbpTx(event.circlesBackingInstance);
+              LOG.info(`[DRY RUN] createLBP simulation ok for ${event.circlesBackingInstance}; gasEstimate=${simulation.gasEstimate.toString()}.`);
+            } else {
+              LOG.info(`[DRY RUN] createLBP simulation skipped for ${event.circlesBackingInstance} (no signer-backed simulator configured).`);
+            }
           } else {
             LOG.info(`Creating LBP for ${event.backer} at ${event.circlesBackingInstance}...`);
             const txHash = await cowSwapService.createLbp(event.circlesBackingInstance);
@@ -469,7 +487,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunResult> {
           const reason = `OrderNotYetFilled for ${event.circlesBackingInstance} after our deadline calc; will re-check later.`;
           LOG.info(reason);
           await slackService.notifyBackingNotCompleted(event, reason);
-          break; // fall through to reset below
+          continue; // skip this instance — order expired unfilled, reset would be pointless
         }
         case "BackingAssetBalanceInsufficient": {
           const reason = "BackingAssetBalanceInsufficient - backing asset balance insufficient after filled order";
@@ -488,6 +506,12 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunResult> {
       case "OrderValid": {
         if (dryRun) {
           LOG.info(`[DRY RUN] Would reset order for ${event.backer} at ${event.circlesBackingInstance}.`);
+          if (cowSwapService.simulateResetCowSwapOrderTx) {
+            const simulation = await cowSwapService.simulateResetCowSwapOrderTx(event.circlesBackingInstance);
+            LOG.info(`[DRY RUN] resetCowswapOrder simulation ok for ${event.circlesBackingInstance}; gasEstimate=${simulation.gasEstimate.toString()}.`);
+          } else {
+            LOG.info(`[DRY RUN] resetCowswapOrder simulation skipped for ${event.circlesBackingInstance} (no signer-backed simulator configured).`);
+          }
         } else {
           LOG.info(`Resetting order for ${event.backer} at ${event.circlesBackingInstance}...`);
           const txHash = await cowSwapService.resetCowSwapOrder(event.circlesBackingInstance);
@@ -500,6 +524,12 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunResult> {
         if (lbpState === "Success") {
           if (dryRun) {
             LOG.info(`[DRY RUN] Would create LBP for ${event.circlesBackingInstance} after settled order.`);
+            if (cowSwapService.simulateCreateLbpTx) {
+              const simulation = await cowSwapService.simulateCreateLbpTx(event.circlesBackingInstance);
+              LOG.info(`[DRY RUN] createLBP simulation ok for ${event.circlesBackingInstance}; gasEstimate=${simulation.gasEstimate.toString()}.`);
+            } else {
+              LOG.info(`[DRY RUN] createLBP simulation skipped for ${event.circlesBackingInstance} (no signer-backed simulator configured).`);
+            }
           } else {
             LOG.info(`LBP posthook likely missed; creating LBP for ${event.circlesBackingInstance}...`);
             const txHash = await cowSwapService.createLbp(event.circlesBackingInstance);
