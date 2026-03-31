@@ -8,17 +8,36 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-function mockFetchOk(addresses: string[]) {
+function mockFetchOk(addresses: string[], total?: number) {
   const fn = jest.fn().mockResolvedValue({
     ok: true,
-    json: async () => ({status: "ok", total: addresses.length, count: addresses.length, v2_only: true, addresses}),
+    json: async () => ({status: "ok", total: total ?? addresses.length, count: addresses.length, v2_only: true, addresses}),
+  });
+  global.fetch = fn as typeof fetch;
+  return fn;
+}
+
+function mockFetchPages(pages: { addresses: string[]; total: number }[]) {
+  let callIndex = 0;
+  const fn = jest.fn().mockImplementation(async () => {
+    const page = pages[callIndex++];
+    if (!page) throw new Error("Unexpected extra fetch call");
+    return {
+      ok: true,
+      json: async () => ({
+        status: "ok",
+        total: page.total,
+        count: page.addresses.length,
+        v2_only: true,
+        addresses: page.addresses,
+      }),
+    };
   });
   global.fetch = fn as typeof fetch;
   return fn;
 }
 
 describe("BlacklistingService", () => {
-  // --- The silent failure mode: checkBlacklist before load returns all-allowed ---
   describe("checkBlacklist before loadBlacklist", () => {
     it("returns all addresses as allowed (is_bot: false) — silent pass-through", async () => {
       const svc = new BlacklistingService(SERVICE_URL);
@@ -46,7 +65,6 @@ describe("BlacklistingService", () => {
     });
 
     it("skips non-string entries in addresses array without crashing", async () => {
-      // API could return garbage — does the service survive?
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
         json: async () => ({
@@ -82,7 +100,6 @@ describe("BlacklistingService", () => {
       const svc = new BlacklistingService(SERVICE_URL);
       await expect(svc.loadBlacklist()).rejects.toThrow(/HTTP 500/);
 
-      // Critical: checkBlacklist should still return all-allowed (not loaded)
       const verdicts = await svc.checkBlacklist(["0xtest"]);
       expect(verdicts[0].is_bot).toBe(false);
     });
@@ -90,19 +107,88 @@ describe("BlacklistingService", () => {
     it("malformed response (no addresses array) throws", async () => {
       global.fetch = jest.fn().mockResolvedValue({
         ok: true,
-        json: async () => ({status: "ok", total: 0}), // missing addresses
+        json: async () => ({status: "ok", total: 0}),
       }) as typeof fetch;
 
       const svc = new BlacklistingService(SERVICE_URL);
       await expect(svc.loadBlacklist()).rejects.toThrow(/malformed/);
     });
 
-    it("timeout wraps as descriptive error", async () => {
+    it("timeout wraps as descriptive error with offset", async () => {
       const abortError = new DOMException("The operation was aborted", "AbortError");
       global.fetch = jest.fn().mockRejectedValue(abortError) as typeof fetch;
 
       const svc = new BlacklistingService(SERVICE_URL, 100);
       await expect(svc.loadBlacklist()).rejects.toThrow(/timed out/);
+    });
+  });
+
+  describe("pagination", () => {
+    it("fetches multiple pages and combines all addresses", async () => {
+      const fn = mockFetchPages([
+        { addresses: ["0xa", "0xb", "0xc"], total: 5 },
+        { addresses: ["0xd", "0xe"], total: 5 },
+      ]);
+
+      const svc = new BlacklistingService(SERVICE_URL, 30_000, 3);
+      await svc.loadBlacklist();
+
+      expect(svc.getBlacklistCount()).toBe(5);
+      expect(fn).toHaveBeenCalledTimes(2);
+
+      // verify offset params
+      const url0 = new URL(fn.mock.calls[0][0]);
+      expect(url0.searchParams.get("offset")).toBe("0");
+      expect(url0.searchParams.get("limit")).toBe("3");
+      const url1 = new URL(fn.mock.calls[1][0]);
+      expect(url1.searchParams.get("offset")).toBe("3");
+    });
+
+    it("stops after first page if count < pageSize", async () => {
+      const fn = mockFetchOk(["0xa", "0xb"]);
+
+      const svc = new BlacklistingService(SERVICE_URL, 30_000, 1000);
+      await svc.loadBlacklist();
+
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(svc.getBlacklistCount()).toBe(2);
+    });
+
+    it("does not update blacklist if a middle page fails", async () => {
+      // Pre-load a valid blacklist
+      mockFetchOk(["0xoriginal"]);
+      const svc = new BlacklistingService(SERVICE_URL, 30_000, 2);
+      await svc.loadBlacklist();
+      expect(svc.getBlacklistCount()).toBe(1);
+
+      // Now mock: page 1 ok, page 2 fails
+      let callIndex = 0;
+      global.fetch = jest.fn().mockImplementation(async () => {
+        callIndex++;
+        if (callIndex === 1) {
+          return {
+            ok: true,
+            json: async () => ({ status: "ok", total: 4, count: 2, v2_only: true, addresses: ["0xnew1", "0xnew2"] }),
+          };
+        }
+        throw new Error("network error on page 2");
+      }) as typeof fetch;
+
+      await expect(svc.loadBlacklist()).rejects.toThrow(/network error/);
+
+      // Original blacklist should still be intact
+      expect(svc.getBlacklistCount()).toBe(1);
+      const verdicts = await svc.checkBlacklist(["0xoriginal"]);
+      expect(verdicts[0].is_bot).toBe(true);
+    });
+
+    it("handles empty blacklist (total=0)", async () => {
+      mockFetchPages([{ addresses: [], total: 0 }]);
+
+      const svc = new BlacklistingService(SERVICE_URL, 30_000, 1000);
+      await svc.loadBlacklist();
+
+      expect(svc.getBlacklistCount()).toBe(0);
     });
   });
 

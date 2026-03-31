@@ -1,8 +1,7 @@
 import {IBlacklistingService, IBlacklistServiceVerdict} from "../interfaces/IBlacklistingService";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_LIMIT = 10000;
-const DEFAULT_OFFSET = 0;
+const DEFAULT_PAGE_TIMEOUT_MS = 30_000;
+const DEFAULT_PAGE_SIZE = 1000;
 
 type BlacklistResponse = {
     status: string;
@@ -18,30 +17,50 @@ export class BlacklistingService implements IBlacklistingService {
 
     constructor(
         private serviceUrl: string,
-        private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
-        private readonly limit: number = DEFAULT_LIMIT,
-        private readonly offset: number = DEFAULT_OFFSET
-    ) {
-        // https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist
-    }
+        private readonly pageTimeoutMs: number = DEFAULT_PAGE_TIMEOUT_MS,
+        private readonly pageSize: number = DEFAULT_PAGE_SIZE
+    ) {}
 
     async loadBlacklist(): Promise<void> {
+        const allAddresses: string[] = [];
+        let offset = 0;
+        let total: number | undefined;
+
+        // Fetch all pages. If ANY page fails, throw — no partial state.
+        while (total === undefined || offset < total) {
+            const page = await this.fetchPage(offset);
+            total = page.total;
+
+            for (const address of page.addresses) {
+                if (typeof address === "string") {
+                    allAddresses.push(address.toLowerCase());
+                }
+            }
+
+            if (page.count < this.pageSize) break;
+            offset += this.pageSize;
+        }
+
+        // Only swap in the complete set after ALL pages succeed
+        this.blacklistedAddresses = new Set(allAddresses);
+        this.loaded = true;
+    }
+
+    private async fetchPage(offset: number): Promise<BlacklistResponse> {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+        const timer = setTimeout(() => controller.abort(), this.pageTimeoutMs);
 
         try {
             const url = new URL(this.serviceUrl);
             url.searchParams.set("include_reason", "false");
             url.searchParams.set("v2_only", "true");
-            url.searchParams.set("limit", this.limit.toString());
-            url.searchParams.set("offset", this.offset.toString());
+            url.searchParams.set("limit", this.pageSize.toString());
+            url.searchParams.set("offset", offset.toString());
 
             const response = await fetch(url.toString(), {
                 method: "GET",
                 signal: controller.signal,
-                headers: {
-                    "User-Agent": "group-tms/1.0"
-                }
+                headers: { "User-Agent": "group-tms/1.0" }
             });
 
             if (!response.ok) {
@@ -53,17 +72,10 @@ export class BlacklistingService implements IBlacklistingService {
                 throw new Error("Failed to load blacklist: malformed response payload");
             }
 
-            this.blacklistedAddresses.clear();
-            for (const address of data.addresses) {
-                if (typeof address === "string") {
-                    this.blacklistedAddresses.add(address.toLowerCase());
-                }
-            }
-
-            this.loaded = true;
+            return data;
         } catch (error) {
             if (error && typeof error === "object" && (error as any).name === "AbortError") {
-                throw new Error("Failed to load blacklist: request timed out");
+                throw new Error(`Failed to load blacklist: page at offset ${offset} timed out after ${this.pageTimeoutMs}ms`);
             }
             throw error;
         } finally {
@@ -73,7 +85,6 @@ export class BlacklistingService implements IBlacklistingService {
 
     async checkBlacklist(addresses: string[]): Promise<IBlacklistServiceVerdict[]> {
         if (!this.loaded) {
-            // Return all addresses as allowed if blacklist hasn't been loaded
             return addresses.map((address) => ({
                 address,
                 is_bot: false
