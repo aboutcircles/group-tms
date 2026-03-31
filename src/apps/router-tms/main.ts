@@ -40,7 +40,10 @@ const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://
 const rootLogger = new LoggerService(verboseLogging, "router-tms");
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
-const circlesRpc = new CirclesRpcService(rpcUrl);
+const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
+  console.warn(`[CirclesRpc] ${msg}`);
+  void slackService.notifySlackStartOrCrash(`⚠️ *router-tms* pagination cap: ${msg}`, SlackSeverity.WARNING).catch(() => {});
+});
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const enablementStore = new InMemoryRouterEnablementStore();
 const errorsBeforeCrash = 3;

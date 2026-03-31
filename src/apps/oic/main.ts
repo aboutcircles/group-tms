@@ -32,7 +32,10 @@ const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const outputBatchSize = 20;
 
 const rootLogger = new LoggerService(verboseLogging);
-const circlesRpc = new CirclesRpcService(rpcUrl);
+const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
+  console.warn(`[CirclesRpc] ${msg}`);
+  void slackService.notifySlackStartOrCrash(`⚠️ *oic* pagination cap: ${msg}`, SlackSeverity.WARNING).catch(() => {});
+});
 const chainRpc = new ChainRpcService(rpcUrl);
 let groupService: IGroupService;
 const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl, rootLogger.child("oic:affiliate-registry"));

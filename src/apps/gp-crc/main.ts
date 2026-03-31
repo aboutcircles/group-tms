@@ -44,7 +44,10 @@ const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
 
-const circlesRpc = new CirclesRpcService(rpcUrl);
+const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
+  console.warn(`[CirclesRpc] ${msg}`);
+  void slackService.notifySlackStartOrCrash(`⚠️ *gp-crc* pagination cap: ${msg}`, SlackSeverity.WARNING).catch(() => {});
+});
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = slackWebhookUrl.trim().length > 0;

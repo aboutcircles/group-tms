@@ -55,7 +55,10 @@ const groupBatchSize = parseEnvInt("GNOSIS_GROUP_BATCH_SIZE", DEFAULT_GROUP_BATC
 const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFAULT_SCORE_CACHE_TTL_MS / 60_000) * 60_000;
 
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
-const circlesRpc = new CirclesRpcService(rpcUrl);
+const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
+  console.warn(`[CirclesRpc] ${msg}`);
+  void slackService.notifySlackStartOrCrash(`⚠️ *gnosis-group* pagination cap: ${msg}`, SlackSeverity.WARNING).catch(() => {});
+});
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const scoreCache = new ScoreCache();
