@@ -56,7 +56,13 @@ const scoreThreshold = parseEnvNumber("GNOSIS_GROUP_SCORE_THRESHOLD", DEFAULT_SC
 const groupBatchSize = parseEnvInt("GNOSIS_GROUP_BATCH_SIZE", DEFAULT_GROUP_BATCH_SIZE);
 const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFAULT_SCORE_CACHE_TTL_MS / 60_000) * 60_000;
 
-const blacklistTimeoutMs = Math.max(1000, Number(process.env.BLACKLIST_TIMEOUT_MS) || 60_000);
+const blacklistTimeoutMs = (() => {
+  const raw = process.env.BLACKLIST_TIMEOUT_MS;
+  if (!raw) return 60_000;
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) { console.warn(`[config] Invalid BLACKLIST_TIMEOUT_MS="${raw}", using default 60000`); return 60_000; }
+  return parsed;
+})();
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
