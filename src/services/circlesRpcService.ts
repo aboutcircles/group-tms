@@ -10,6 +10,7 @@ const PAGE_TIMEOUT_MS = 30_000;
 const CIRCLES_EVENTS_RESULT_LIMIT = 100;
 const DEFAULT_TRUST_QUERY_PAGE_SIZE = 1000;
 const MAX_EVENT_RECURSION_DEPTH = 10;
+const WARNING_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -40,7 +41,16 @@ export class CirclesRpcService implements ICirclesRpc {
 
   constructor(rpcUrl: string, onWarning?: (msg: string) => void) {
     this.rpc = new CirclesRpc(primaryRpcUrl(rpcUrl));
-    this.onWarning = onWarning ?? ((msg) => console.warn(`[CirclesRpc] ${msg}`));
+    const rawWarning = onWarning ?? ((msg) => console.warn(`[CirclesRpc] ${msg}`));
+    const lastWarningAt = new Map<string, number>();
+    this.onWarning = (msg) => {
+      const key = msg.split(":")[0]; // dedupe by method name prefix
+      const now = Date.now();
+      const last = lastWarningAt.get(key) ?? 0;
+      if (now - last < WARNING_COOLDOWN_MS) return;
+      lastWarningAt.set(key, now);
+      rawWarning(msg);
+    };
   }
 
   async isHuman(address: string): Promise<boolean> {

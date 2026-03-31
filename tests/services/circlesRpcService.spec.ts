@@ -50,8 +50,8 @@ jest.mock("@aboutcircles/sdk-rpc", () => ({
 const FACTORY = "0xFACT0RY000000000000000000000000DeAdBeEf";
 const RPC_URL = "https://rpc.example.com";
 
-function buildService(): CirclesRpcService {
-  return new CirclesRpcService(RPC_URL);
+function buildService(onWarning?: (msg: string) => void): CirclesRpcService {
+  return new CirclesRpcService(RPC_URL, onWarning);
 }
 
 function makeRawBackingCompletedEvent(blockNumber: number, suffix: string) {
@@ -561,6 +561,45 @@ describe("CirclesRpcService", () => {
       expect(svc.getLastBulkTrusteesForTrustersStats().pagesFetched).toBe(500);
 
       jest.useRealTimers();
+    });
+
+    it("calls onWarning callback when MAX_PAGES cap is hit", async () => {
+      jest.useFakeTimers();
+
+      const onWarning = jest.fn();
+      const truster = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      let callCount = 0;
+      const infiniteQuery = {
+        queryNextPage: jest.fn(async () => { callCount++; return true; }),
+        get currentPage() {
+          return { results: [{ truster, trustee: `0x${callCount.toString().padStart(40, "0")}` }] };
+        },
+      };
+      mockGetTrustRelations.mockReturnValueOnce(infiniteQuery);
+
+      const svc = buildService(onWarning);
+      const promise = svc.fetchAllTrustees(truster);
+      await jest.runAllTimersAsync();
+      await promise;
+
+      expect(onWarning).toHaveBeenCalledTimes(1);
+      expect(onWarning).toHaveBeenCalledWith(expect.stringContaining("hit 500-page cap"));
+
+      jest.useRealTimers();
+    });
+
+    it("does not call onWarning when pagination completes normally", async () => {
+      const onWarning = jest.fn();
+      mockGetTrustRelations.mockReturnValueOnce(
+        makeMockPagedQuery([
+          [{ truster: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", trustee: "0xbbb" }],
+        ]),
+      );
+
+      const svc = buildService(onWarning);
+      await svc.fetchAllTrustees("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+
+      expect(onWarning).not.toHaveBeenCalled();
     });
 
     it("fetchAllBaseGroups normalizes group addresses to lowercase", async () => {
