@@ -166,6 +166,11 @@ async function mainLoop(): Promise<void> {
       await stateStore?.save("router-tms", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("router-tms", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      if (errorTracker.wasAlertingAndRecovered()) {
+        slackService.notifySlackResolved("Router TMS").catch((err) => {
+          rootLogger.warn("Failed to send Slack resolved notification:", err);
+        });
+      }
       currentDelay = pollIntervalMs;
       runLogger.info(
         "router-tms run completed: " +

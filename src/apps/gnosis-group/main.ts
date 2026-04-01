@@ -199,6 +199,11 @@ async function mainLoop(): Promise<void> {
       await stateStore?.save("gnosis-group", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gnosis-group", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      if (errorTracker.wasAlertingAndRecovered()) {
+        slackService.notifySlackResolved("Gnosis Group").catch((err) => {
+          rootLogger.warn("Failed to send Slack resolved notification:", err);
+        });
+      }
       currentDelay = runIntervalMs;
       rootLogger.info(
         `Run completed. Addresses with relative score > ${outcome.threshold}: ${outcome.aboveThresholdCount}`

@@ -47,6 +47,30 @@ export class SlackService implements ISlackService {
     }
   }
 
+  async notifySlackResolved(appName: string): Promise<void> {
+    const message = `${this.tag} ✅ *${appName} recovered* — consecutive error streak resolved.`;
+    const webhookUrl = this.selectWebhook(SlackSeverity.INFO);
+    if (!webhookUrl) {
+      const ts = new Date().toISOString();
+      console.warn(`[${ts}]`, `Slack resolved notification (no webhook configured): ${message}`);
+      return;
+    }
+
+    const payload: Record<string, string> = { text: message };
+    if (this.infoChannel) {
+      payload.channel = this.infoChannel;
+    }
+
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      throw new Error(`Slack resolved notify failed: ${res.status} ${await res.text()}`);
+    }
+  }
+
   async notifySlackStartOrCrash(message: string, severity: SlackSeverity = SlackSeverity.CRITICAL): Promise<void> {
     const tagged = `${this.tag} ${message}`;
     const webhookUrl = this.selectWebhook(severity);

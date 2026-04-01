@@ -11,4 +11,6 @@ export interface ISlackService {
     notifyBackingNotCompleted(backingInitiatedEvent: BackingInitiatedEvent, reason: string): Promise<void>;
 
     notifySlackStartOrCrash(message: string, severity?: SlackSeverity): Promise<void>;
+
+    notifySlackResolved(appName: string): Promise<void>;
 }
