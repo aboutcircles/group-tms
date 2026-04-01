@@ -183,6 +183,11 @@ async function mainLoop(): Promise<void> {
       await stateStore?.save("gp-crc", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gp-crc", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      if (errorTracker.wasAlertingAndRecovered()) {
+        slackService.notifySlackResolved("GP-CRC TMS").catch((err) => {
+          rootLogger.warn("Failed to send Slack resolved notification:", err);
+        });
+      }
       currentDelay = pollIntervalMs;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));

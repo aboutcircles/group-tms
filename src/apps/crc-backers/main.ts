@@ -192,6 +192,11 @@ async function loop(leaderElection: LeaderElection | null) {
       await stateStore?.save("crc-backers", nextFromBlock);
       recordRunSuccess("crc-backers", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      if (errorTracker.wasAlertingAndRecovered()) {
+        slackService.notifySlackResolved("CRC Backers").catch((err) => {
+          rootLogger.warn("Failed to send Slack resolved notification:", err);
+        });
+      }
       currentDelay = pollIntervalMs; // reset on success
     } catch (caught: unknown) {
       const isError = caught instanceof Error;
