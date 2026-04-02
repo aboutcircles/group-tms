@@ -10,9 +10,14 @@ const TRANSIENT_MESSAGES = [
   "ECONNRESET",
   "ECONNREFUSED",
   "socket hang up",
+  "evm timeout",
+  "missing revert data",
 ];
 
-const TRANSIENT_CODES = new Set<number>([-32016]);
+const TRANSIENT_CODES = new Set<number>([
+  -32016,
+  -32009, // Gnosis RPC "evm timeout" during gas estimation
+]);
 
 export function isTransientRpcError(err: unknown): boolean {
   if (err == null) return false;
@@ -20,6 +25,11 @@ export function isTransientRpcError(err: unknown): boolean {
   const code = ((err as any)?.code ?? (err as any)?.error?.code) as number | undefined;
 
   if (code !== undefined && TRANSIENT_CODES.has(code)) return true;
+
+  // ethers CALL_EXCEPTION with no revert data = RPC failed to simulate, not a real revert
+  const ethersCode = (err as any)?.code as string | undefined;
+  if (ethersCode === "CALL_EXCEPTION" && !(err as any)?.data) return true;
+
   return TRANSIENT_MESSAGES.some((t) => msg.includes(t));
 }
 

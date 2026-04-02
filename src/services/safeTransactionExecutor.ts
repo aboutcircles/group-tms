@@ -131,13 +131,14 @@ export class SafeTransactionExecutor {
 
   private async estimateExecutionGasLimit(safe: Safe, safeTx: Awaited<ReturnType<Safe["createTransaction"]>>): Promise<bigint> {
     // Estimate the fully encoded execTransaction with ethers to avoid Protocol Kit's
-    // internal viem estimate path, which is flaky on the Circles RPC.
+    // internal viem estimate path. Wrapped in retryWithBackoff because public RPCs
+    // intermittently return "evm timeout" or empty CALL_EXCEPTION on complex Safe calls.
     const encodedSafeTx = await safe.getEncodedTransaction(safeTx);
-    const gasEstimate = await this.provider.estimateGas({
+    const gasEstimate = await retryWithBackoff<bigint>(() => this.provider.estimateGas({
       from: this.signerAddress,
       to: this.safeAddress,
       data: encodedSafeTx
-    });
+    }));
 
     return ((gasEstimate * GAS_LIMIT_BUFFER_NUMERATOR) + (GAS_LIMIT_BUFFER_DENOMINATOR - 1n)) / GAS_LIMIT_BUFFER_DENOMINATOR;
   }
