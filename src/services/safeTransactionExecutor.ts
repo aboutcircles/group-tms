@@ -74,9 +74,10 @@ export class SafeTransactionExecutor {
     const signedSafeTx = await safe.signTransaction(unsignedSafeTx);
     const gasLimit = await this.estimateExecutionGasLimit(safe, signedSafeTx);
 
-    const execution = await retryWithBackoff(() =>
-      safe.executeTransaction(signedSafeTx, { gasLimit: gasLimit.toString() })
-    );
+    // Do NOT retry executeTransaction — if the first attempt reaches the mempool but
+    // the response is lost (timeout), a retry would send a second tx with a new EOA nonce,
+    // causing duplicate on-chain execution. Gas estimation (above) is safe to retry.
+    const execution = await safe.executeTransaction(signedSafeTx, { gasLimit: gasLimit.toString() });
 
     const txHash =
       (execution as any).hash ?? (execution as any).transactionResponse?.hash;
@@ -131,9 +132,10 @@ export class SafeTransactionExecutor {
 
   private async estimateExecutionGasLimit(safe: Safe, safeTx: Awaited<ReturnType<Safe["createTransaction"]>>): Promise<bigint> {
     // Estimate the fully encoded execTransaction with ethers to avoid Protocol Kit's
-    // internal viem estimate path, which is flaky on the Circles RPC.
+    // internal viem estimate path. Wrapped in retryWithBackoff because public RPCs
+    // intermittently return "evm timeout" or empty CALL_EXCEPTION on complex Safe calls.
     const encodedSafeTx = await safe.getEncodedTransaction(safeTx);
-    const gasEstimate = await retryWithBackoff(() => this.provider.estimateGas({
+    const gasEstimate = await retryWithBackoff<bigint>(() => this.provider.estimateGas({
       from: this.signerAddress,
       to: this.safeAddress,
       data: encodedSafeTx
