@@ -1,5 +1,5 @@
 import Safe from "@safe-global/protocol-kit";
-import { getAddress, JsonRpcProvider, Wallet } from "ethers";
+import { FallbackProvider, getAddress, JsonRpcProvider, Wallet } from "ethers";
 import {TransactionSimulationResult} from "../interfaces/ITransactionSimulation";
 import { retryWithBackoff } from "./retryWithBackoff";
 import { createProvider, primaryRpcUrl } from "./rpcProvider";
@@ -26,12 +26,18 @@ function ensureSuccessfulReceipt(receipt: any, context: string) {
 
 /**
  * Thin helper around Safe Protocol Kit to execute arbitrary contract calls and wait for confirmations.
+ *
+ * execute() is serialized via an async lock to prevent nonce collisions when multiple
+ * callers share the same Safe address (e.g. gnosis-group + router-tms in separate processes
+ * won't help, but concurrent calls within a single process are safe).
  */
 export class SafeTransactionExecutor {
-  private readonly provider: JsonRpcProvider;
+  private readonly provider: JsonRpcProvider | FallbackProvider;
   private readonly safePromise: Promise<Safe>;
   private readonly safeAddress: string;
   private readonly signerAddress: string;
+  /** Async mutex: each execute() waits for the previous one to finish. */
+  private _executeLock: Promise<void> = Promise.resolve();
 
   constructor(rpcUrl: string, signerPrivateKey: string, safeAddress: string) {
     if (!signerPrivateKey || signerPrivateKey.trim().length === 0) {
@@ -41,7 +47,7 @@ export class SafeTransactionExecutor {
       throw new Error("Safe address is required");
     }
 
-    this.provider = createProvider(rpcUrl) as JsonRpcProvider;
+    this.provider = createProvider(rpcUrl);
     this.safeAddress = getAddress(safeAddress);
     this.signerAddress = getAddress(SafeTransactionExecutor.privateKeyToAddress(signerPrivateKey));
     this.safePromise = Safe.init({
@@ -57,6 +63,27 @@ export class SafeTransactionExecutor {
     confirmationsToWait = 1,
     value: string | bigint = 0n,
     confirmationTimeoutMs: number = DEFAULT_TX_CONFIRMATION_TIMEOUT_MS
+  ): Promise<string> {
+    // Serialize: wait for any in-flight execute() to finish before starting.
+    let release: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const prev = this._executeLock;
+    this._executeLock = gate;
+    await prev;
+
+    try {
+      return await this._executeInner(to, data, confirmationsToWait, value, confirmationTimeoutMs);
+    } finally {
+      release!();
+    }
+  }
+
+  private async _executeInner(
+    to: string,
+    data: string,
+    confirmationsToWait: number,
+    value: string | bigint,
+    confirmationTimeoutMs: number
   ): Promise<string> {
     const safe = await this.safePromise;
     const normalizedTo = getAddress(to);

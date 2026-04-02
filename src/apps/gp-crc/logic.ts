@@ -5,6 +5,7 @@ import {IGroupService} from "../../interfaces/IGroupService";
 import {IAvatarSafeService} from "../../interfaces/IAvatarSafeService";
 import {IAvatarSafeMappingStore} from "../../interfaces/IAvatarSafeMappingStore";
 import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
+import {isTransientRpcError} from "../../services/retryWithBackoff";
 
 export type RunConfig = {
   rpcUrl: string;
@@ -567,33 +568,11 @@ function isRetryableFetchError(error: unknown): boolean {
   return false;
 }
 
-function isRetryableTrustError(error: unknown): boolean {
-  if (typeof error !== "object" || error === null) {
-    return true;
-  }
-
-  const anyError = error as { code?: unknown; message?: unknown };
-  const code = typeof anyError.code === "string" ? anyError.code.toUpperCase() : "";
-  const message = typeof anyError.message === "string" ? anyError.message.toLowerCase() : "";
-
-  if (code === "CALL_EXCEPTION" || code === "UNPREDICTABLE_GAS_LIMIT" || code === "INSUFFICIENT_FUNDS") {
-    return false;
-  }
-
-  if (code.includes("NETWORK") || code.includes("SERVER") || code.includes("TIMEOUT")) {
-    return true;
-  }
-
-  if (message.includes("timeout") || message.includes("network") || message.includes("econnreset") || message.includes("temporarily")) {
-    return true;
-  }
-
-  if (message.includes("insufficient funds") || message.includes("underpriced") || message.includes("nonce")) {
-    return false;
-  }
-
-  return false;
-}
+// Use the shared transient error classifier to avoid drift between retry layers.
+// The inner retryWithBackoff in GroupService/SafeTransactionExecutor handles
+// RPC-level transients; this outer retry catches errors that surface after
+// the inner retry is exhausted (e.g. confirmation timeouts).
+const isRetryableTrustError = isTransientRpcError;
 
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error) {
