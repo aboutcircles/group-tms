@@ -72,11 +72,8 @@ if (!dryRun && servicePrivateKey.trim().length === 0) {
   throw new Error("DUBLIN_TMS_SERVICE_PRIVATE_KEY is required when not running in dry-run mode");
 }
 
+const circlesRpc = new CirclesRpcService(rpcUrl);
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
-const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
-  console.warn(`[CirclesRpc] ${msg}`);
-  void slackService.notifySlackStartOrCrash(`⚠️ *dublin-tms* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
-});
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 
 let groupService: IGroupService | undefined;
@@ -179,11 +176,6 @@ async function mainLoop(): Promise<void> {
 
       await notifySlackRunSummary(outcome);
       errorTracker.recordSuccess();
-      if (errorTracker.wasAlertingAndRecovered()) {
-        slackService.notifySlackResolved("Dublin TMS").catch((err) => {
-          rootLogger.warn("Failed to send Slack resolved notification:", err);
-        });
-      }
       currentDelay = pollIntervalMs;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));

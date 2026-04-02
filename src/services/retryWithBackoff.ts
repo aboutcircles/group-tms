@@ -11,9 +11,15 @@ const TRANSIENT_MESSAGES = [
   "ECONNREFUSED",
   "socket hang up",
   "Too Many Requests",
+  "evm timeout",
+  "missing revert data",
 ];
 
-const TRANSIENT_CODES = new Set<number>([-32016, 429]);
+const TRANSIENT_CODES = new Set<number>([
+  -32016,
+  -32009, // Gnosis RPC "evm timeout" during gas estimation
+  429,
+]);
 
 /** Match "429" only as a standalone token, not inside larger numbers like "42900001". */
 const RATE_LIMIT_PATTERN = /\b429\b/;
@@ -27,6 +33,11 @@ export function isTransientRpcError(err: unknown): boolean {
   if (code !== undefined && TRANSIENT_CODES.has(code)) return true;
   if (status !== undefined && TRANSIENT_CODES.has(status)) return true;
   if (RATE_LIMIT_PATTERN.test(msg)) return true;
+
+  // ethers CALL_EXCEPTION with no revert data = RPC failed to simulate, not a real revert
+  const ethersCode = (err as any)?.code as string | undefined;
+  if (ethersCode === "CALL_EXCEPTION" && !(err as any)?.data) return true;
+
   return TRANSIENT_MESSAGES.some((t) => msg.includes(t));
 }
 

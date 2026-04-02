@@ -24,7 +24,6 @@ export type RunConfig = {
   historicAutoTrustSnapshotMembers?: string[];
   fetchPageSize?: number;
   scoreBatchSize?: number;
-  scoreFetchTimeoutMs?: number;
   scoreThreshold?: number;
   groupBatchSize?: number;
   scoreCacheTtlMs?: number;
@@ -104,7 +103,7 @@ const SCORE_THRESHOLD_ENV_VAR = "GNOSIS_GROUP_SCORE_THRESHOLD";
 const BLACKLIST_FETCH_MAX_ATTEMPTS = 3;
 const BLACKLIST_FETCH_RETRY_DELAY_MS = 2_000;
 
-export const DEFAULT_SCORE_FETCH_TIMEOUT_MS = 90_000;
+const SCORE_FETCH_TIMEOUT_MS = 30_000;
 const SCORE_FETCH_MAX_ATTEMPTS = 3;
 const SCORE_FETCH_RETRY_DELAY_MS = 2_000;
 const GROUP_BATCH_MAX_ATTEMPTS = 3;
@@ -114,7 +113,6 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   const {blacklistingService, circlesRpc, groupService, logger} = deps;
   const fetchPageSize = Math.max(1, cfg.fetchPageSize ?? DEFAULT_FETCH_PAGE_SIZE);
   const scoreBatchSize = Math.max(1, cfg.scoreBatchSize ?? DEFAULT_SCORE_BATCH_SIZE);
-  const scoreFetchTimeoutMs = Math.max(1000, cfg.scoreFetchTimeoutMs ?? DEFAULT_SCORE_FETCH_TIMEOUT_MS);
   const scoreThreshold = resolveScoreThreshold(cfg.scoreThreshold, logger);
   const groupBatchSize = Math.max(1, cfg.groupBatchSize ?? DEFAULT_GROUP_BATCH_SIZE);
   const dryRun = !!cfg.dryRun;
@@ -333,7 +331,6 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
         cfg.scoringServiceUrl,
         batch,
         trustedTargets,
-        scoreFetchTimeoutMs,
         loggerScores
       );
       for (const [address, score] of batchScores.entries()) {
@@ -790,12 +787,11 @@ async function fetchRelativeTrustScoresWithRetry(
   scoringUrl: string,
   avatars: string[],
   trustedTargets: string[],
-  timeoutMs: number,
   logger: ILoggerService
 ): Promise<Map<string, number>> {
   for (let attempt = 1; attempt <= SCORE_FETCH_MAX_ATTEMPTS; attempt++) {
     try {
-      return await fetchRelativeTrustScores(scoringUrl, avatars, trustedTargets, timeoutMs);
+      return await fetchRelativeTrustScores(scoringUrl, avatars, trustedTargets);
     } catch (error) {
       const retryable = isRetryableFetchError(error);
       if (attempt >= SCORE_FETCH_MAX_ATTEMPTS || !retryable) {
@@ -816,8 +812,7 @@ async function fetchRelativeTrustScoresWithRetry(
 async function fetchRelativeTrustScores(
   scoringUrl: string,
   avatars: string[],
-  trustedTargets: string[],
-  timeoutMs: number
+  trustedTargets: string[]
 ): Promise<Map<string, number>> {
   const response = await timedFetch(
     scoringUrl,
@@ -832,7 +827,7 @@ async function fetchRelativeTrustScores(
         target_sets: [trustedTargets]
       })
     },
-    timeoutMs
+    SCORE_FETCH_TIMEOUT_MS
   );
 
   if (!response.ok) {

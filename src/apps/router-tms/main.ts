@@ -40,18 +40,8 @@ const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://
 const rootLogger = new LoggerService(verboseLogging, "router-tms");
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
-const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
-  console.warn(`[CirclesRpc] ${msg}`);
-  void slackService.notifySlackStartOrCrash(`⚠️ *router-tms* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
-});
-const blacklistTimeoutMs = (() => {
-  const raw = process.env.BLACKLIST_TIMEOUT_MS;
-  if (!raw) return 60_000;
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isNaN(parsed) || parsed <= 0) { console.warn(`[config] Invalid BLACKLIST_TIMEOUT_MS="${raw}", using default 60000`); return 60_000; }
-  return parsed;
-})();
-const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
+const circlesRpc = new CirclesRpcService(rpcUrl);
+const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const enablementStore = new InMemoryRouterEnablementStore();
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
@@ -166,11 +156,6 @@ async function mainLoop(): Promise<void> {
       await stateStore?.save("router-tms", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("router-tms", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
-      if (errorTracker.wasAlertingAndRecovered()) {
-        slackService.notifySlackResolved("Router TMS").catch((err) => {
-          rootLogger.warn("Failed to send Slack resolved notification:", err);
-        });
-      }
       currentDelay = pollIntervalMs;
       runLogger.info(
         "router-tms run completed: " +

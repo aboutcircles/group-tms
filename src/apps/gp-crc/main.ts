@@ -44,19 +44,9 @@ const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
 
+const circlesRpc = new CirclesRpcService(rpcUrl);
+const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
-const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
-  console.warn(`[CirclesRpc] ${msg}`);
-  void slackService.notifySlackStartOrCrash(`⚠️ *gp-crc* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
-});
-const blacklistTimeoutMs = (() => {
-  const raw = process.env.BLACKLIST_TIMEOUT_MS;
-  if (!raw) return 60_000;
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isNaN(parsed) || parsed <= 0) { console.warn(`[config] Invalid BLACKLIST_TIMEOUT_MS="${raw}", using default 60000`); return 60_000; }
-  return parsed;
-})();
-const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 let groupService: IGroupService | undefined;
 let avatarSafeService: MetriSafeService;
@@ -183,11 +173,6 @@ async function mainLoop(): Promise<void> {
       await stateStore?.save("gp-crc", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gp-crc", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
-      if (errorTracker.wasAlertingAndRecovered()) {
-        slackService.notifySlackResolved("GP-CRC TMS").catch((err) => {
-          rootLogger.warn("Failed to send Slack resolved notification:", err);
-        });
-      }
       currentDelay = pollIntervalMs;
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));

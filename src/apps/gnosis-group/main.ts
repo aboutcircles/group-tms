@@ -11,7 +11,6 @@ import {
   ScoreCache,
   DEFAULT_FETCH_PAGE_SIZE,
   DEFAULT_SCORE_BATCH_SIZE,
-  DEFAULT_SCORE_FETCH_TIMEOUT_MS,
   DEFAULT_SCORE_THRESHOLD,
   DEFAULT_GROUP_BATCH_SIZE,
   FIXED_AUTO_TRUST_GROUP_ADDRESSES,
@@ -51,24 +50,13 @@ if (!targetGroupAddress) {
 
 const fetchPageSize = parseEnvInt("GNOSIS_GROUP_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
 const scoreBatchSize = parseEnvInt("GNOSIS_GROUP_SCORE_BATCH_SIZE", DEFAULT_SCORE_BATCH_SIZE);
-const scoreFetchTimeoutMs = Math.max(1000, parseEnvInt("GNOSIS_GROUP_SCORE_FETCH_TIMEOUT_MS", DEFAULT_SCORE_FETCH_TIMEOUT_MS));
 const scoreThreshold = parseEnvNumber("GNOSIS_GROUP_SCORE_THRESHOLD", DEFAULT_SCORE_THRESHOLD);
 const groupBatchSize = parseEnvInt("GNOSIS_GROUP_BATCH_SIZE", DEFAULT_GROUP_BATCH_SIZE);
 const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFAULT_SCORE_CACHE_TTL_MS / 60_000) * 60_000;
 
-const blacklistTimeoutMs = (() => {
-  const raw = process.env.BLACKLIST_TIMEOUT_MS;
-  if (!raw) return 60_000;
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isNaN(parsed) || parsed <= 0) { console.warn(`[config] Invalid BLACKLIST_TIMEOUT_MS="${raw}", using default 60000`); return 60_000; }
-  return parsed;
-})();
-const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
+const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
+const circlesRpc = new CirclesRpcService(rpcUrl);
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
-const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
-  console.warn(`[CirclesRpc] ${msg}`);
-  void slackService.notifySlackStartOrCrash(`⚠️ *gnosis-group* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
-});
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const scoreCache = new ScoreCache();
 const errorsBeforeCrash = 3;
@@ -97,7 +85,6 @@ const config: RunConfig = {
   targetGroupAddress,
   fetchPageSize,
   scoreBatchSize,
-  scoreFetchTimeoutMs,
   scoreThreshold,
   groupBatchSize,
   scoreCacheTtlMs,
@@ -111,7 +98,6 @@ rootLogger.info(`  - scoringServiceUrl=${scoringServiceUrl}`);
 rootLogger.info(`  - targetGroupAddress=${targetGroupAddress}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
 rootLogger.info(`  - scoreBatchSize=${scoreBatchSize}`);
-rootLogger.info(`  - scoreFetchTimeoutMs=${scoreFetchTimeoutMs}`);
 rootLogger.info(`  - scoreThreshold=${scoreThreshold}`);
 rootLogger.info(`  - groupBatchSize=${groupBatchSize}`);
 rootLogger.info(`  - fixedAutoTrustGroupAddresses=${FIXED_AUTO_TRUST_GROUP_ADDRESSES.join(",")}`);
@@ -199,11 +185,6 @@ async function mainLoop(): Promise<void> {
       await stateStore?.save("gnosis-group", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gnosis-group", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
-      if (errorTracker.wasAlertingAndRecovered()) {
-        slackService.notifySlackResolved("Gnosis Group").catch((err) => {
-          rootLogger.warn("Failed to send Slack resolved notification:", err);
-        });
-      }
       currentDelay = runIntervalMs;
       rootLogger.info(
         `Run completed. Addresses with relative score > ${outcome.threshold}: ${outcome.aboveThresholdCount}`

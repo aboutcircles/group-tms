@@ -32,17 +32,15 @@ const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const outputBatchSize = 20;
 
 const rootLogger = new LoggerService(verboseLogging);
+const circlesRpc = new CirclesRpcService(rpcUrl);
+const chainRpc = new ChainRpcService(rpcUrl);
+let groupService: IGroupService;
+const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl, rootLogger.child("oic:affiliate-registry"));
+
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
-const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
-  console.warn(`[CirclesRpc] ${msg}`);
-  void slackService.notifySlackStartOrCrash(`⚠️ *oic* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
-});
-const chainRpc = new ChainRpcService(rpcUrl);
-let groupService: IGroupService;
-const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl, rootLogger.child("oic:affiliate-registry"));
 const slackConfigured = !!slackWebhookUrl;
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
@@ -220,11 +218,6 @@ async function loop() {
       await stateStore?.save("oic", state.lastSafeHeadScanned);
       recordRunSuccess("oic", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
-      if (errorTracker.wasAlertingAndRecovered()) {
-        slackService.notifySlackResolved("OIC").catch((err) => {
-          rootLogger.warn("Failed to send Slack resolved notification:", err);
-        });
-      }
       currentDelay = pollIntervalMs;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));

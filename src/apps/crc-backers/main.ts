@@ -49,20 +49,10 @@ if (!dryRun) {
 }
 
 // Concrete services
-const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
-const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
-  console.warn(`[CirclesRpc] ${msg}`);
-  void slackService.notifySlackStartOrCrash(`⚠️ *crc-backers* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
-});
+const circlesRpc = new CirclesRpcService(rpcUrl);
 const chainRpc = new ChainRpcService(rpcUrl);
-const blacklistTimeoutMs = (() => {
-  const raw = process.env.BLACKLIST_TIMEOUT_MS;
-  if (!raw) return 60_000;
-  const parsed = Number.parseInt(raw, 10);
-  if (Number.isNaN(parsed) || parsed <= 0) { console.warn(`[config] Invalid BLACKLIST_TIMEOUT_MS="${raw}", using default 60000`); return 60_000; }
-  return parsed;
-})();
-const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
+const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const groupService = (!dryRun || canSimulateTransactions)
   ? new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress, txRpcUrl)
   : undefined;
@@ -192,11 +182,6 @@ async function loop(leaderElection: LeaderElection | null) {
       await stateStore?.save("crc-backers", nextFromBlock);
       recordRunSuccess("crc-backers", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
-      if (errorTracker.wasAlertingAndRecovered()) {
-        slackService.notifySlackResolved("CRC Backers").catch((err) => {
-          rootLogger.warn("Failed to send Slack resolved notification:", err);
-        });
-      }
       currentDelay = pollIntervalMs; // reset on success
     } catch (caught: unknown) {
       const isError = caught instanceof Error;
