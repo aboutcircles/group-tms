@@ -2,7 +2,7 @@ import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
 import {IBlacklistingService} from "../../interfaces/IBlacklistingService";
 import {IGroupService} from "../../interfaces/IGroupService";
 import {IBackingInstanceService, ResetCowSwapOrderResult, CreateLBPResult} from "../../interfaces/IBackingInstanceService";
-import {ISlackService} from "../../interfaces/ISlackService";
+import {ISlackService, SlackSeverity} from "../../interfaces/ISlackService";
 import {IChainRpc} from "../../interfaces/IChainRpc";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {BackingCompletedEvent, BackingInitiatedEvent} from "../../interfaces/ICirclesRpc";
@@ -376,7 +376,7 @@ async function notifySlackTrustSummary(
   }
 
   try {
-    await slackService.notifySlackStartOrCrash(lines.join("\n"));
+    await slackService.notifySlackStartOrCrash(lines.join("\n"), SlackSeverity.INFO);
   } catch (error) {
     LOG.warn("Failed to send Slack trust/untrust summary:", error);
   }
