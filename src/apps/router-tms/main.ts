@@ -53,7 +53,7 @@ const blacklistTimeoutMs = (() => {
 })();
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
 const enablementStore = new InMemoryRouterEnablementStore();
-const errorsBeforeCrash = 3;
+const errorsBeforeCrash = Math.max(1, parseEnvInt("ERRORS_BEFORE_CRASH", 5));
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
 
@@ -64,7 +64,15 @@ async function refreshBlacklist(): Promise<void> {
     const count = blacklistingService.getBlacklistCount();
     runLogger.info(`Blacklist refreshed successfully. ${count} addresses blacklisted.`);
   } catch (error) {
-    runLogger.error("Failed to refresh blacklist:", error);
+    if (blacklistingService.isLoaded()) {
+      const staleCount = blacklistingService.getBlacklistCount();
+      runLogger.warn(
+        `Failed to refresh blacklist (${(error as Error).message}). ` +
+        `Proceeding with stale blacklist data (${staleCount} addresses).`
+      );
+      return;
+    }
+    runLogger.error("Failed to refresh blacklist on initial load:", error);
     throw error;
   }
 }
@@ -163,24 +171,47 @@ async function mainLoop(): Promise<void> {
         },
         { ...config, dryRun: effectiveDryRun }
       );
-      await stateStore?.save("router-tms", 0, { lastSuccessfulRunAt: new Date().toISOString() });
-      recordRunSuccess("router-tms", Date.now() - runStartedAt);
-      errorTracker.recordSuccess();
-      if (errorTracker.wasAlertingAndRecovered()) {
-        slackService.notifySlackResolved("Router TMS").catch((err) => {
-          rootLogger.warn("Failed to send Slack resolved notification:", err);
-        });
+      const allPendingFailed = outcome.pendingEnableCount > 0 && outcome.executedEnableCount === 0 && outcome.failedBatches.length > 0;
+      if (allPendingFailed) {
+        // All batches failed — treat as a run error for crash threshold
+        const consecutiveErrors = errorTracker.recordError();
+        recordRunError("router-tms");
+        rootLogger.error(`All ${outcome.failedBatches.length} batch(es) failed — counting as error ${consecutiveErrors} of ${errorsBeforeCrash}`);
+        if (errorTracker.shouldAlert()) {
+          rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
+          void notifySlackRunError(new Error(`All batches failed: ${outcome.failedBatches.map(fb => fb.error).join("; ")}`), consecutiveErrors).catch(() => {});
+          setTimeout(() => process.exit(1), 3000).unref();
+          return;
+        }
+        currentDelay = Math.min(currentDelay * 2, maxDelay);
+      } else {
+        await stateStore?.save("router-tms", 0, { lastSuccessfulRunAt: new Date().toISOString() });
+        recordRunSuccess("router-tms", Date.now() - runStartedAt);
+        errorTracker.recordSuccess();
+        if (errorTracker.wasAlertingAndRecovered()) {
+          slackService.notifySlackResolved("Router TMS").catch((err) => {
+            rootLogger.warn("Failed to send Slack resolved notification:", err);
+          });
+        }
+        currentDelay = pollIntervalMs;
       }
-      currentDelay = pollIntervalMs;
       runLogger.info(
         "router-tms run completed: " +
           `uniqueHumans=${outcome.uniqueHumanCount} ` +
           `allowed=${outcome.allowedHumanCount} ` +
           `blacklisted=${outcome.blacklistedHumanCount} ` +
           `pending=${outcome.pendingEnableCount} ` +
-          `executed=${outcome.executedEnableCount}`
+          `executed=${outcome.executedEnableCount} ` +
+          `failedBatches=${outcome.failedBatches.length}`
       );
-      if (outcome.pendingEnableCount === 0) {
+      if (outcome.failedBatches.length > 0) {
+        for (const fb of outcome.failedBatches) {
+          runLogger.warn(
+            `Failed batch ${fb.batchIndex} (${fb.batchSize} addresses) for base group ${fb.baseGroup}: ${fb.error}`
+          );
+        }
+      }
+      if (outcome.pendingEnableCount === 0 && outcome.failedBatches.length === 0) {
         runLogger.info("Router already trusts every allowed human avatar.");
       }
     } catch (cause) {

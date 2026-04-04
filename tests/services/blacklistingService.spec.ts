@@ -97,7 +97,7 @@ describe("BlacklistingService", () => {
         ok: false, status: 500, statusText: "Internal Server Error",
       }) as typeof fetch;
 
-      const svc = new BlacklistingService(SERVICE_URL);
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 0);
       await expect(svc.loadBlacklist()).rejects.toThrow(/HTTP 500/);
 
       const verdicts = await svc.checkBlacklist(["0xtest"]);
@@ -118,7 +118,7 @@ describe("BlacklistingService", () => {
       const abortError = new DOMException("The operation was aborted", "AbortError");
       global.fetch = jest.fn().mockRejectedValue(abortError) as typeof fetch;
 
-      const svc = new BlacklistingService(SERVICE_URL, 100);
+      const svc = new BlacklistingService(SERVICE_URL, 100, 1000, 0);
       await expect(svc.loadBlacklist()).rejects.toThrow(/timed out/);
     });
   });
@@ -218,6 +218,115 @@ describe("BlacklistingService", () => {
 
       const svc = new BlacklistingService(SERVICE_URL);
       await expect(svc.loadBlacklist()).rejects.toThrow(/invalid count/);
+    });
+  });
+
+  describe("fetchPage retry", () => {
+    it("retries on HTTP 504 and succeeds on second attempt", async () => {
+      let callCount = 0;
+      global.fetch = jest.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          return {ok: false, status: 504, statusText: "Gateway Timeout"};
+        }
+        return {
+          ok: true,
+          json: async () => ({status: "ok", total: 1, count: 1, v2_only: true, addresses: ["0xretried"]}),
+        };
+      }) as typeof fetch;
+
+      // fetchRetries=3, fetchRetryBaseDelayMs=10 (fast for tests)
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 3, 10);
+      await svc.loadBlacklist();
+      expect(svc.getBlacklistCount()).toBe(1);
+      expect(callCount).toBe(2);
+    });
+
+    it("retries on HTTP 502/503 as well", async () => {
+      let callCount = 0;
+      global.fetch = jest.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount <= 2) {
+          return {ok: false, status: callCount === 1 ? 502 : 503, statusText: "Bad Gateway"};
+        }
+        return {
+          ok: true,
+          json: async () => ({status: "ok", total: 1, count: 1, v2_only: true, addresses: ["0xok"]}),
+        };
+      }) as typeof fetch;
+
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 3, 10);
+      await svc.loadBlacklist();
+      expect(svc.getBlacklistCount()).toBe(1);
+      expect(callCount).toBe(3);
+    });
+
+    it("throws after exhausting all retries on persistent 504", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false, status: 504, statusText: "Gateway Timeout",
+      }) as typeof fetch;
+
+      // 3 retries → 4 total attempts (initial + 3 retries)
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 3, 10);
+      await expect(svc.loadBlacklist()).rejects.toThrow(/HTTP 504/);
+      expect(global.fetch).toHaveBeenCalledTimes(4);
+    });
+
+    it("does NOT retry HTTP 400 (client error, not retryable)", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false, status: 400, statusText: "Bad Request",
+      }) as typeof fetch;
+
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 3, 10);
+      await expect(svc.loadBlacklist()).rejects.toThrow(/HTTP 400/);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT retry HTTP 404 (not found)", async () => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false, status: 404, statusText: "Not Found",
+      }) as typeof fetch;
+
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 3, 10);
+      await expect(svc.loadBlacklist()).rejects.toThrow(/HTTP 404/);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it("retries on network errors (ECONNRESET)", async () => {
+      let callCount = 0;
+      global.fetch = jest.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("ECONNRESET");
+        }
+        return {
+          ok: true,
+          json: async () => ({status: "ok", total: 1, count: 1, v2_only: true, addresses: ["0xrecovered"]}),
+        };
+      }) as typeof fetch;
+
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 3, 10);
+      await svc.loadBlacklist();
+      expect(svc.getBlacklistCount()).toBe(1);
+    });
+
+    it("preserves stale data when retry-exhausted load fails", async () => {
+      // First load succeeds
+      mockFetchOk(["0xoriginal"]);
+      const svc = new BlacklistingService(SERVICE_URL, 60_000, 1000, 3, 10);
+      await svc.loadBlacklist();
+      expect(svc.getBlacklistCount()).toBe(1);
+
+      // Second load fails persistently
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false, status: 504, statusText: "Gateway Timeout",
+      }) as typeof fetch;
+
+      await expect(svc.loadBlacklist()).rejects.toThrow(/HTTP 504/);
+      // Original data preserved (swap-on-success pattern)
+      expect(svc.getBlacklistCount()).toBe(1);
+      const verdicts = await svc.checkBlacklist(["0xoriginal"]);
+      expect(verdicts[0].is_bot).toBe(true);
     });
   });
 
