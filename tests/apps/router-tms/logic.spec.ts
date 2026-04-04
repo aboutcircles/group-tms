@@ -373,6 +373,87 @@ describe("router-tms runOnce", () => {
       "Invalid address passed to isHuman check"
     );
   });
+
+  it("isolates per-batch execution failures: succeeding batches land, failed ones are recorded", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000A10");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000A11");
+    const humanCarol = getAddress("0x2000000000000000000000000000000000000A12");
+    const humanDave = getAddress("0x2000000000000000000000000000000000000A13");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol, humanDave];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService(["0xtx_batch1", "0xtx_batch2"]);
+    routerService.failWith = new Error("gas estimation CALL_EXCEPTION");
+    routerService.failOnCallIndex = 2; // second batch fails
+
+    const enablementStore = new FakeRouterEnablementStore();
+    const deps = makeDeps({circlesRpc, routerService, enablementStore});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 2});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // First batch (Alice, Bob) succeeded, second batch (Carol, Dave) failed
+    expect(outcome.executedEnableCount).toBe(2);
+    expect(outcome.txHashes).toEqual(["0xtx_batch1"]);
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.failedBatches[0].batchIndex).toBe(2);
+    expect(outcome.failedBatches[0].batchSize).toBe(2);
+    expect(outcome.failedBatches[0].error).toContain("gas estimation CALL_EXCEPTION");
+
+    // Failed batch addresses were NOT marked as enabled
+    const enabled = await enablementStore.loadEnabledAddresses();
+    expect(enabled.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
+    expect(enabled.map(a => a.toLowerCase())).toContain(humanBob.toLowerCase());
+    expect(enabled.map(a => a.toLowerCase())).not.toContain(humanCarol.toLowerCase());
+    expect(enabled.map(a => a.toLowerCase())).not.toContain(humanDave.toLowerCase());
+  });
+
+  it("dry-run simulation failures are isolated per batch and do not abort the run", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000A20");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000A21");
+    const humanCarol = getAddress("0x2000000000000000000000000000000000000A22");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    routerService.failWith = new Error("RPC timeout");
+    routerService.failOnSimulationIndex = 1; // first simulation fails
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: true, enableBatchSize: 2});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // Both batches were attempted; first failed, second succeeded
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.failedBatches[0].batchIndex).toBe(1);
+    expect(outcome.failedBatches[0].error).toContain("RPC timeout");
+    expect(routerService.simulationCalls).toBe(2);
+  });
+
+  it("all batches failing still returns outcome (not an exception)", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000A30");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    routerService.failWith = new Error("persistent failure");
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    expect(outcome.executedEnableCount).toBe(0);
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.txHashes).toEqual([]);
+  });
 });
 
 describe("router-tms helpers", () => {

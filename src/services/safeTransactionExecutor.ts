@@ -166,7 +166,7 @@ export class SafeTransactionExecutor {
       from: this.signerAddress,
       to: this.safeAddress,
       data: encodedSafeTx
-    }));
+    }), { maxRetries: 5, baseDelayMs: 2_000 });
 
     return ((gasEstimate * GAS_LIMIT_BUFFER_NUMERATOR) + (GAS_LIMIT_BUFFER_DENOMINATOR - 1n)) / GAS_LIMIT_BUFFER_DENOMINATOR;
   }

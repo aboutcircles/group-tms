@@ -12,6 +12,22 @@ type BlacklistResponse = {
     addresses: string[];
 };
 
+const DEFAULT_FETCH_RETRIES = 3;
+const DEFAULT_FETCH_RETRY_BASE_DELAY_MS = 2_000;
+
+/** Match HTTP 5xx status codes in error messages. */
+const HTTP_5XX_PATTERN = /HTTP 5\d\d/;
+
+function isRetryableHttpError(error: Error): boolean {
+    const msg = error.message;
+    return HTTP_5XX_PATTERN.test(msg) ||
+        msg.includes("timed out") ||
+        msg.includes("ECONNRESET") ||
+        msg.includes("ECONNREFUSED") ||
+        msg.includes("socket hang up") ||
+        msg.includes("fetch failed");
+}
+
 export class BlacklistingService implements IBlacklistingService {
     private blacklistedAddresses: Set<string> = new Set();
     private loaded: boolean = false;
@@ -19,7 +35,9 @@ export class BlacklistingService implements IBlacklistingService {
     constructor(
         private serviceUrl: string,
         private readonly pageTimeoutMs: number = DEFAULT_BLACKLIST_PAGE_TIMEOUT_MS,
-        private readonly pageSize: number = DEFAULT_PAGE_SIZE
+        private readonly pageSize: number = DEFAULT_PAGE_SIZE,
+        private readonly fetchRetries: number = DEFAULT_FETCH_RETRIES,
+        private readonly fetchRetryBaseDelayMs: number = DEFAULT_FETCH_RETRY_BASE_DELAY_MS
     ) {}
 
     async loadBlacklist(): Promise<void> {
@@ -53,6 +71,28 @@ export class BlacklistingService implements IBlacklistingService {
     }
 
     private async fetchPage(offset: number): Promise<BlacklistResponse> {
+        let lastError: Error | undefined;
+        for (let attempt = 0; attempt <= this.fetchRetries; attempt++) {
+            try {
+                return await this.fetchPageOnce(offset);
+            } catch (err) {
+                lastError = err instanceof Error ? err : new Error(String(err));
+                if (!isRetryableHttpError(lastError) || attempt >= this.fetchRetries) {
+                    throw lastError;
+                }
+                const jitter = 0.5 + Math.random() * 0.5;
+                const delayMs = Math.round(this.fetchRetryBaseDelayMs * Math.pow(2, attempt) * jitter);
+                console.warn(
+                    `[BLACKLIST_RETRY] page offset=${offset} attempt ${attempt + 1}/${this.fetchRetries + 1}, ` +
+                    `waiting ${delayMs}ms — ${lastError.message}`
+                );
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+            }
+        }
+        throw lastError!;
+    }
+
+    private async fetchPageOnce(offset: number): Promise<BlacklistResponse> {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), this.pageTimeoutMs);
 
@@ -119,5 +159,9 @@ export class BlacklistingService implements IBlacklistingService {
 
     getBlacklistCount(): number {
         return this.blacklistedAddresses.size;
+    }
+
+    isLoaded(): boolean {
+        return this.loaded;
     }
 }

@@ -292,7 +292,15 @@ async function refreshBlacklist(): Promise<void> {
     const count = blacklistingService.getBlacklistCount();
     runLogger.info(`Blacklist refreshed successfully. ${count} addresses blacklisted.`);
   } catch (error) {
-    runLogger.error("Failed to refresh blacklist:", error);
+    if (blacklistingService.isLoaded()) {
+      const staleCount = blacklistingService.getBlacklistCount();
+      runLogger.warn(
+        `Failed to refresh blacklist (${(error as Error).message}). ` +
+        `Proceeding with stale blacklist data (${staleCount} addresses).`
+      );
+      return;
+    }
+    runLogger.error("Failed to refresh blacklist on initial load:", error);
     throw error;
   }
 }
