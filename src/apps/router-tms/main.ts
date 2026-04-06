@@ -202,8 +202,16 @@ async function mainLoop(): Promise<void> {
           `blacklisted=${outcome.blacklistedHumanCount} ` +
           `pending=${outcome.pendingEnableCount} ` +
           `executed=${outcome.executedEnableCount} ` +
-          `failedBatches=${outcome.failedBatches.length}`
+          `failedBatches=${outcome.failedBatches.length} ` +
+          `quarantined=${outcome.quarantinedAddresses.length}`
       );
+      if (outcome.quarantinedAddresses.length > 0) {
+        runLogger.warn(
+          `Quarantined ${outcome.quarantinedAddresses.length} address(es) that cause on-chain reverts: ` +
+          outcome.quarantinedAddresses.join(", ")
+        );
+        void notifySlackQuarantine(outcome.quarantinedAddresses).catch(() => {});
+      }
       if (outcome.failedBatches.length > 0) {
         for (const fb of outcome.failedBatches) {
           runLogger.warn(
@@ -281,6 +289,17 @@ async function notifySlackRunError(error: Error, consecutiveErrors: number): Pro
     await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
   } catch (slackError) {
     rootLogger.warn("Failed to send Slack run-error notification:", slackError);
+  }
+}
+
+async function notifySlackQuarantine(addresses: string[]): Promise<void> {
+  const message = `🔒 *Router-TMS quarantined ${addresses.length} address(es)*\n\n` +
+    `These addresses cause on-chain reverts in \`enableCRCForRouting\` and were excluded from batch execution.\n` +
+    `Addresses:\n${addresses.map(a => `• \`${a}\``).join("\n")}`;
+  try {
+    await slackService.notifySlackStartOrCrash(message, SlackSeverity.WARNING);
+  } catch (slackError) {
+    rootLogger.warn("Failed to send Slack quarantine notification:", slackError);
   }
 }
 
