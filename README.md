@@ -245,7 +245,7 @@ GNOSIS_GROUP_SCORING_TARGET_SET_NAME=all_backers  # Server-side named target set
 # Scan window / timing
 GNOSIS_GROUP_RUN_INTERVAL_MINUTES=30      # Run interval in minutes
 GNOSIS_GROUP_FETCH_PAGE_SIZE=             # Fetch page size
-GNOSIS_GROUP_SCORE_BATCH_SIZE=            # Score batch size (default 200)
+GNOSIS_GROUP_SCORE_BATCH_SIZE=            # Score batch size (default 20)
 GNOSIS_GROUP_SCORE_THRESHOLD=             # Score threshold for membership
 GNOSIS_GROUP_BATCH_SIZE=                  # Transaction batch size
 GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES=240  # Score cache TTL in minutes

@@ -89,7 +89,7 @@ export class ScoreCache {
 }
 
 export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
-export const DEFAULT_SCORE_BATCH_SIZE = 200;
+export const DEFAULT_SCORE_BATCH_SIZE = 20;
 export const DEFAULT_SCORE_THRESHOLD = 100;
 export const DEFAULT_GROUP_BATCH_SIZE = 10;
 export const DEFAULT_SCORING_TARGET_SET_NAME = "all_backers";
