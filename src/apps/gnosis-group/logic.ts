@@ -14,7 +14,7 @@ type RelativeTrustScoreEntry = {
 
 type RelativeTrustScoreResponse = {
   status?: string;
-  batches?: Record<string, RelativeTrustScoreEntry[]>;
+  results?: RelativeTrustScoreEntry[];
 };
 
 export type RunConfig = {
@@ -28,6 +28,7 @@ export type RunConfig = {
   scoreThreshold?: number;
   groupBatchSize?: number;
   scoreCacheTtlMs?: number;
+  scoringTargetSetName?: string;
   dryRun?: boolean;
 };
 
@@ -91,6 +92,7 @@ export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
 export const DEFAULT_SCORE_BATCH_SIZE = 20;
 export const DEFAULT_SCORE_THRESHOLD = 100;
 export const DEFAULT_GROUP_BATCH_SIZE = 10;
+export const DEFAULT_SCORING_TARGET_SET_NAME = "all_backers";
 export const DEFAULT_BACKERS_GROUP_ADDRESS = "0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026";
 export const DEFAULT_GP_CRC_GROUP_ADDRESS = "0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef";
 export const HISTORIC_AUTO_TRUST_GROUP_ADDRESS = "0x86533d1ada8ffbe7b6f7244f9a1b707f7f3e239b";
@@ -117,6 +119,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   const scoreFetchTimeoutMs = Math.max(1000, cfg.scoreFetchTimeoutMs ?? DEFAULT_SCORE_FETCH_TIMEOUT_MS);
   const scoreThreshold = resolveScoreThreshold(cfg.scoreThreshold, logger);
   const groupBatchSize = Math.max(1, cfg.groupBatchSize ?? DEFAULT_GROUP_BATCH_SIZE);
+  const targetSetName = cfg.scoringTargetSetName ?? DEFAULT_SCORING_TARGET_SET_NAME;
   const dryRun = !!cfg.dryRun;
 
   const targetGroupAddress = normalizeAddress(cfg.targetGroupAddress);
@@ -332,7 +335,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
       const batchScores = await fetchRelativeTrustScoresWithRetry(
         cfg.scoringServiceUrl,
         batch,
-        trustedTargets,
+        targetSetName,
         scoreFetchTimeoutMs,
         loggerScores
       );
@@ -789,13 +792,13 @@ async function partitionBlacklistedAddresses(
 async function fetchRelativeTrustScoresWithRetry(
   scoringUrl: string,
   avatars: string[],
-  trustedTargets: string[],
+  targetSetName: string,
   timeoutMs: number,
   logger: ILoggerService
 ): Promise<Map<string, number>> {
   for (let attempt = 1; attempt <= SCORE_FETCH_MAX_ATTEMPTS; attempt++) {
     try {
-      return await fetchRelativeTrustScores(scoringUrl, avatars, trustedTargets, timeoutMs);
+      return await fetchRelativeTrustScores(scoringUrl, avatars, targetSetName, timeoutMs);
     } catch (error) {
       const retryable = isRetryableFetchError(error);
       if (attempt >= SCORE_FETCH_MAX_ATTEMPTS || !retryable) {
@@ -816,7 +819,7 @@ async function fetchRelativeTrustScoresWithRetry(
 async function fetchRelativeTrustScores(
   scoringUrl: string,
   avatars: string[],
-  trustedTargets: string[],
+  targetSetName: string,
   timeoutMs: number
 ): Promise<Map<string, number>> {
   const response = await timedFetch(
@@ -828,51 +831,49 @@ async function fetchRelativeTrustScores(
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        avatar_batches: [avatars],
-        target_sets: [trustedTargets]
+        avatars,
+        target_set_name: targetSetName,
+        include_details: false
       })
     },
     timeoutMs
   );
 
   if (!response.ok) {
-    throw new Error(`Relative trust score request failed: HTTP ${response.status} ${response.statusText}`);
+    void response.body?.cancel();
+    const err = new Error(`Relative trust score request failed: HTTP ${response.status} ${response.statusText}`);
+    if (response.status >= 500) {
+      (err as any).code = "SERVER_ERROR";
+    }
+    throw err;
   }
 
   const payload = (await response.json()) as RelativeTrustScoreResponse;
-  if (!payload || typeof payload !== "object" || payload.status !== "success" || !payload.batches) {
-    throw new Error("Relative trust score response malformed: missing success status or batches.");
+  if (!payload || typeof payload !== "object" || payload.status !== "success" || !Array.isArray(payload.results)) {
+    throw new Error("Relative trust score response malformed: missing success status or results.");
   }
 
   const results = new Map<string, number>();
-  const batches = payload.batches;
 
-  for (const batchKey of Object.keys(batches)) {
-    const entries = batches[batchKey];
-    if (!Array.isArray(entries)) {
+  for (const entry of payload.results) {
+    if (!entry || typeof entry.address !== "string") {
       continue;
     }
 
-    for (const entry of entries) {
-      if (!entry || typeof entry.address !== "string") {
-        continue;
-      }
-
-      const normalized = normalizeAddress(entry.address);
-      if (!normalized) {
-        continue;
-      }
-
-      const rawScore = typeof entry.relative_score === "number"
-        ? entry.relative_score
-        : Number(entry.relative_score);
-
-      if (!Number.isFinite(rawScore)) {
-        continue;
-      }
-
-      results.set(normalized, rawScore);
+    const normalized = normalizeAddress(entry.address);
+    if (!normalized) {
+      continue;
     }
+
+    const rawScore = typeof entry.relative_score === "number"
+      ? entry.relative_score
+      : Number(entry.relative_score);
+
+    if (!Number.isFinite(rawScore)) {
+      continue;
+    }
+
+    results.set(normalized, rawScore);
   }
 
   return results;

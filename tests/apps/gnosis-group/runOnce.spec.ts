@@ -107,12 +107,10 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [
-            {address: highScoreAddress, relative_score: 75},
-            {address: lowScoreAddress, relative_score: 10}
-          ]
-        }
+        results: [
+          {address: highScoreAddress, relative_score: 75},
+          {address: lowScoreAddress, relative_score: 10}
+        ]
       })
     });
 
@@ -133,7 +131,8 @@ describe("gnosis-group runOnce", () => {
     const [fetchUrl, fetchInit] = fetchMock.mock.calls[0] ?? [];
     expect(fetchUrl).toBe("https://scores.local");
     const requestBody = JSON.parse((fetchInit?.body ?? "{}") as string);
-    expect(requestBody.target_sets).toEqual([[trustedTarget]]);
+    expect(requestBody.target_set_name).toBe("all_backers");
+    expect(requestBody.avatars).toEqual([highScoreAddress, lowScoreAddress]);
   });
 
   it("uses env-defined score threshold when config omits the value", async () => {
@@ -167,9 +166,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [{address: trustedTarget, relative_score: 50}]
-        }
+        results: [{address: trustedTarget, relative_score: 50}]
       })
     });
 
@@ -229,9 +226,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [{address: allowedAddress, relative_score: 50}]
-        }
+        results: [{address: allowedAddress, relative_score: 50}]
       })
     });
 
@@ -285,12 +280,10 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [
-            {address: alreadyTrusted, relative_score: 75},
-            {address: eligible, relative_score: 80}
-          ]
-        }
+        results: [
+          {address: alreadyTrusted, relative_score: 75},
+          {address: eligible, relative_score: 80}
+        ]
       })
     });
 
@@ -346,13 +339,11 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [
-            {address: first, relative_score: 100},
-            {address: second, relative_score: 100},
-            {address: third, relative_score: 100}
-          ]
-        }
+        results: [
+          {address: first, relative_score: 100},
+          {address: second, relative_score: 100},
+          {address: third, relative_score: 100}
+        ]
       })
     });
 
@@ -409,12 +400,10 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [
-            {address: failing, relative_score: 100},
-            {address: succeeding, relative_score: 100}
-          ]
-        }
+        results: [
+          {address: failing, relative_score: 100},
+          {address: succeeding, relative_score: 100}
+        ]
       })
     });
 
@@ -472,9 +461,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [{address: active, relative_score: 60}]
-        }
+        results: [{address: active, relative_score: 60}]
       })
     });
 
@@ -521,9 +508,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [{address: active, relative_score: 80}]
-        }
+        results: [{address: active, relative_score: 80}]
       })
     });
 
@@ -549,7 +534,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {"0": [{address: eligible, relative_score: 75}]}
+        results: [{address: eligible, relative_score: 75}]
       })
     });
 
@@ -607,9 +592,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [{address: active, relative_score: 90}]
-        }
+        results: [{address: active, relative_score: 90}]
       })
     });
 
@@ -731,9 +714,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [{address: autoTrusted, relative_score: 25}]
-        }
+        results: [{address: autoTrusted, relative_score: 25}]
       })
     });
 
@@ -748,7 +729,7 @@ describe("gnosis-group runOnce", () => {
     expect(outcome.trustTxHashes).toEqual(["0xtrust_1"]);
     const [, fetchInit] = fetchMock.mock.calls[0] ?? [];
     const requestBody = JSON.parse((fetchInit?.body ?? "{}") as string);
-    expect(requestBody.target_sets).toEqual([[trustedTarget]]);
+    expect(requestBody.target_set_name).toBe("all_backers");
     expect(outcome.untrustTxHashes).toEqual([]);
   });
 
@@ -787,9 +768,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [{address: autoTrusted, relative_score: 25}]
-        }
+        results: [{address: autoTrusted, relative_score: 25}]
       })
     });
 
@@ -928,7 +907,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({status: "success", batches: {}})
+      json: async () => ({status: "success", results: []})
     });
 
     const outcome = await runOnce({
@@ -962,7 +941,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({status: "success", batches: {}})
+      json: async () => ({status: "success", results: []})
     });
 
     const outcome = await runOnce({
@@ -1030,7 +1009,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {"0": [{address: allowed, relative_score: 75}]}
+        results: [{address: allowed, relative_score: 75}]
       })
     });
 
@@ -1055,7 +1034,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({status: "success", batches: {}})
+      json: async () => ({status: "success", results: []})
     });
 
     const outcome = await runOnce({
@@ -1102,7 +1081,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {"0": [{address: eligible, relative_score: 75}]}
+        results: [{address: eligible, relative_score: 75}]
       })
     });
 
@@ -1151,7 +1130,7 @@ describe("gnosis-group runOnce", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {"0": [{address: candidate, relative_score: 75}]}
+        results: [{address: candidate, relative_score: 75}]
       })
     });
 
@@ -1187,7 +1166,7 @@ describe("gnosis-group runOnce", () => {
         statusText: "OK",
         json: async () => ({
           status: "success",
-          batches: {"0": [{address: candidate, relative_score: 75}]}
+          results: [{address: candidate, relative_score: 75}]
         })
       });
 
