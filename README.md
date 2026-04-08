@@ -239,15 +239,17 @@ GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY=     # Private key of a 1/n Safe signer
 
 # External services
 BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist
-GNOSIS_GROUP_SCORING_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore/batch
+GNOSIS_GROUP_SCORING_URL=https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore
+GNOSIS_GROUP_SCORING_TARGET_SET_NAME=all_backers  # Server-side named target set for scoring
 
 # Scan window / timing
 GNOSIS_GROUP_RUN_INTERVAL_MINUTES=30      # Run interval in minutes
 GNOSIS_GROUP_FETCH_PAGE_SIZE=             # Fetch page size
-GNOSIS_GROUP_SCORE_BATCH_SIZE=            # Score batch size
+GNOSIS_GROUP_SCORE_BATCH_SIZE=            # Score batch size (default 200)
 GNOSIS_GROUP_SCORE_THRESHOLD=             # Score threshold for membership
 GNOSIS_GROUP_BATCH_SIZE=                  # Transaction batch size
 GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES=240  # Score cache TTL in minutes
+GNOSIS_GROUP_SCORE_FETCH_TIMEOUT_MS=      # Timeout per scoring request (default 90000)
 
 # Operation mode
 DRY_RUN=0                              # Set to "1" to skip blacklist & scoring requests
