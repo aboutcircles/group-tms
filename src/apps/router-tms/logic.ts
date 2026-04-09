@@ -3,7 +3,11 @@ import {IBlacklistingService, IBlacklistServiceVerdict} from "../../interfaces/I
 import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {IRouterService} from "../../interfaces/IRouterService";
-import {IRouterEnablementStore} from "../../interfaces/IRouterEnablementStore";
+import {
+  IRouterEnablementStore,
+  RouterEnablementSource,
+  RouterEnablementStatus
+} from "../../interfaces/IRouterEnablementStore";
 
 export type RunConfig = {
   rpcUrl: string;
@@ -54,6 +58,21 @@ const BASE_GROUP_TRUST_QUERY_BATCH_SIZE = 100;
 const HUMANITY_CHECK_BATCH_SIZE = 50;
 
 export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
+  const {circlesRpc, logger} = deps;
+  const fetchPageSize = Math.max(1, cfg.fetchPageSize ?? DEFAULT_FETCH_PAGE_SIZE);
+
+  logger.info("Fetching human avatars from RegisterHuman table...");
+  const allHumanAvatars = await circlesRpc.fetchAllHumanAvatars(fetchPageSize, logger);
+  logger.info(`Fetched ${allHumanAvatars.length} avatar row(s) from RegisterHuman.`);
+
+  return runForHumanAvatars(deps, cfg, allHumanAvatars);
+}
+
+export async function runForHumanAvatars(
+  deps: Deps,
+  cfg: RunConfig,
+  humanAvatarEntries: string[]
+): Promise<RunOutcome> {
   const {circlesRpc, blacklistingService, routerService, logger, enablementStore} = deps;
   const dryRun = !!cfg.dryRun;
 
@@ -72,16 +91,13 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   }
 
   const enableBatchSize = Math.max(1, cfg.enableBatchSize ?? DEFAULT_ENABLE_BATCH_SIZE);
-  const fetchPageSize = Math.max(1, cfg.fetchPageSize ?? DEFAULT_FETCH_PAGE_SIZE);
   const humanityChecker = createHumanityChecker(circlesRpc);
   const {isHuman, isHumanBatch} = humanityChecker;
 
   await assertBaseGroupIsGroupAvatar(baseGroupAddress, isHuman, logger);
 
-  logger.info("Fetching human avatars from RegisterHuman table...");
-  const allHumanAvatars = await circlesRpc.fetchAllHumanAvatars(fetchPageSize, logger);
-  const totalAvatarEntries = allHumanAvatars.length;
-  const uniqueHumanAvatars = Array.from(new Set(allHumanAvatars));
+  const totalAvatarEntries = humanAvatarEntries.length;
+  const uniqueHumanAvatars = Array.from(new Set(humanAvatarEntries));
   logger.info(`Fetched ${totalAvatarEntries} avatar row(s) (${uniqueHumanAvatars.length} unique).`);
 
   logger.info(`Evaluating blacklist for ${uniqueHumanAvatars.length} unique avatar(s)...`);
@@ -100,14 +116,14 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   logger.info(`Router already trusts ${routerTrustSet.size} address(es).`);
 
   const alreadyTrusted = allowedHumanAvatars.filter((address) => routerTrustSet.has(address));
-  const previouslyEnabled = new Set(normalizeAddressArray(await enablementStore.loadEnabledAddresses()));
+  const enablementStatuses = createEnablementStatusMap(await enablementStore.loadEnablementStatuses());
 
   const allowedHumanSet = new Set(allowedHumanAvatars);
   const blacklistedSet = new Set(blacklistedHumanAvatars);
   const avatarBaseGroupAssignments = await buildAvatarBaseGroupAssignments(circlesRpc, logger);
 
-  const eligibilityFilter = (avatar: string): boolean =>
-    !routerTrustSet.has(avatar) && !previouslyEnabled.has(avatar);
+  const baseGroupEligibilityFilter = (avatar: string): boolean =>
+    shouldEnableAvatarForSource(avatar, "base-group", routerTrustSet, enablementStatuses);
 
   const {
     targets: baseGroupEnableTargets,
@@ -116,11 +132,13 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     avatarBaseGroupAssignments,
     allowedHumanSet,
     blacklistedSet,
-    eligibilityFilter
+    baseGroupEligibilityFilter
   );
 
   const remainingHumanAvatars = allowedHumanAvatars.filter(
-    (avatar) => eligibilityFilter(avatar) && !baseGroupScheduledAvatars.has(avatar)
+    (avatar) =>
+      shouldEnableAvatarForSource(avatar, "fallback", routerTrustSet, enablementStatuses) &&
+      !baseGroupScheduledAvatars.has(avatar)
   );
 
   const enableTargets: EnableTarget[] = [...baseGroupEnableTargets];
@@ -201,8 +219,21 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
       const txHash = await routerService.enableCRCForRouting(target.baseGroup, batch);
       txHashes.push(txHash);
       executedEnableCount += batch.length;
-      await enablementStore.markEnabled(batch);
+      await enablementStore.markEnabled(batch, target.source ?? "fallback");
       batch.forEach((address) => routerTrustSet.add(address));
+      batch.forEach((address) => {
+        const status = enablementStatuses.get(address) ?? {
+          avatar: address,
+          fallbackEnabled: false,
+          baseGroupEnabled: false
+        };
+        if ((target.source ?? "fallback") === "fallback") {
+          status.fallbackEnabled = true;
+        } else {
+          status.baseGroupEnabled = true;
+        }
+        enablementStatuses.set(address, status);
+      });
       logger.info(
         `enableCRCForRouting tx=${txHash} (batch ${batchIndex + 1}/${batches.length}) for ${batch.length} avatar(s) in base group ${target.baseGroup}.`
       );
@@ -301,6 +332,49 @@ function normalizeAddressArray(addresses: string[]): string[] {
     }
   }
   return Array.from(unique);
+}
+
+function createEnablementStatusMap(statuses: RouterEnablementStatus[]): Map<string, RouterEnablementStatus> {
+  const map = new Map<string, RouterEnablementStatus>();
+  for (const status of statuses) {
+    const normalized = normalizeAddress(status.avatar);
+    if (!normalized) {
+      continue;
+    }
+
+    map.set(normalized, {
+      avatar: normalized,
+      fallbackEnabled: status.fallbackEnabled === true,
+      baseGroupEnabled: status.baseGroupEnabled === true
+    });
+  }
+  return map;
+}
+
+function shouldEnableAvatarForSource(
+  avatar: string,
+  source: RouterEnablementSource,
+  routerTrustSet: Set<string>,
+  enablementStatuses: Map<string, RouterEnablementStatus>
+): boolean {
+  const status = enablementStatuses.get(avatar);
+
+  if (source === "fallback") {
+    if (status?.fallbackEnabled || status?.baseGroupEnabled) {
+      return false;
+    }
+    return !routerTrustSet.has(avatar);
+  }
+
+  if (status?.baseGroupEnabled) {
+    return false;
+  }
+
+  if (status?.fallbackEnabled) {
+    return true;
+  }
+
+  return !routerTrustSet.has(avatar);
 }
 
 function getBulkTrusteesStats(circlesRpc: ICirclesRpc): BulkTrusteesStats | undefined {

@@ -18,7 +18,11 @@ import {
   SafeOwnerSelection
 } from "../src/interfaces/IAvatarSafeService";
 import {IRouterService} from "../src/interfaces/IRouterService";
-import {IRouterEnablementStore} from "../src/interfaces/IRouterEnablementStore";
+import {
+  IRouterEnablementStore,
+  RouterEnablementSource,
+  RouterEnablementStatus
+} from "../src/interfaces/IRouterEnablementStore";
 import {IAvatarSafeMappingStore, SafeTrustState} from "../src/interfaces/IAvatarSafeMappingStore";
 import {TransactionSimulationResult} from "../src/interfaces/ITransactionSimulation";
 
@@ -389,21 +393,54 @@ export class FakeRouterService implements IRouterService {
 }
 
 export class FakeRouterEnablementStore implements IRouterEnablementStore {
-  private readonly enabled = new Set<string>();
+  private readonly enabled = new Map<string, RouterEnablementStatus>();
 
-  constructor(initial?: string[]) {
-    if (initial) {
-      initial.forEach((address) => this.enabled.add(address.toLowerCase()));
+  constructor(initial?: string[] | RouterEnablementStatus[]) {
+    if (!initial) {
+      return;
+    }
+
+    if (initial.length > 0 && typeof initial[0] === "string") {
+      for (const address of initial as string[]) {
+        const normalized = address.toLowerCase();
+        this.enabled.set(normalized, {
+          avatar: normalized,
+          fallbackEnabled: false,
+          baseGroupEnabled: true
+        });
+      }
+      return;
+    }
+
+    for (const status of initial as RouterEnablementStatus[]) {
+      this.enabled.set(status.avatar.toLowerCase(), {
+        avatar: status.avatar.toLowerCase(),
+        fallbackEnabled: status.fallbackEnabled,
+        baseGroupEnabled: status.baseGroupEnabled
+      });
     }
   }
 
-  async loadEnabledAddresses(): Promise<string[]> {
-    return Array.from(this.enabled);
+  async loadEnablementStatuses(): Promise<RouterEnablementStatus[]> {
+    return Array.from(this.enabled.values()).map((status) => ({...status}));
   }
 
-  async markEnabled(addresses: string[]): Promise<void> {
+  async markEnabled(addresses: string[], source: RouterEnablementSource): Promise<void> {
     for (const address of addresses) {
-      this.enabled.add(address.toLowerCase());
+      const normalized = address.toLowerCase();
+      const existing = this.enabled.get(normalized) ?? {
+        avatar: normalized,
+        fallbackEnabled: false,
+        baseGroupEnabled: false
+      };
+
+      if (source === "fallback") {
+        existing.fallbackEnabled = true;
+      } else {
+        existing.baseGroupEnabled = true;
+      }
+
+      this.enabled.set(normalized, existing);
     }
   }
 }

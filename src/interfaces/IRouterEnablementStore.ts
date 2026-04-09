@@ -1,12 +1,20 @@
+export type RouterEnablementSource = "fallback" | "base-group";
+
+export type RouterEnablementStatus = {
+  avatar: string;
+  fallbackEnabled: boolean;
+  baseGroupEnabled: boolean;
+};
+
 export interface IRouterEnablementStore {
   /**
-   * Returns every avatar address that has already been enabled for routing.
+   * Returns enablement status for avatars already processed for routing.
    */
-  loadEnabledAddresses(): Promise<string[]>;
+  loadEnablementStatuses(): Promise<RouterEnablementStatus[]>;
 
   /**
-   * Records the provided avatar addresses as having been enabled for routing.
+   * Records the provided avatar addresses as having been enabled for routing
+   * for the specified source.
    */
-  markEnabled(addresses: string[]): Promise<void>;
+  markEnabled(addresses: string[], source: RouterEnablementSource): Promise<void>;
 }
-

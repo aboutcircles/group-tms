@@ -1,6 +1,7 @@
 import {getAddress} from "ethers";
 import {
   runOnce,
+  runForHumanAvatars,
   type Deps,
   type RunConfig,
   DEFAULT_BASE_GROUP_ADDRESS,
@@ -296,6 +297,77 @@ describe("router-tms runOnce", () => {
     expect(secondOutcome.executedEnableCount).toBe(0);
     expect(secondOutcome.txHashes).toEqual([]);
     expect(routerService.calls).toHaveLength(1);
+  });
+
+  it("allows one later base-group enablement after a prior fallback enablement", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000220");
+    const assignedBaseGroup = getAddress("0xA000000000000000000000000000000000000220");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const enablementStore = new FakeRouterEnablementStore();
+    const routerService = new FakeRouterService(["0xtx_fallback", "0xtx_group"]);
+
+    const deps = makeDeps({
+      circlesRpc,
+      routerService,
+      enablementStore
+    });
+
+    const cfg = makeConfig({dryRun: false});
+
+    const firstOutcome = await runOnce(deps, cfg);
+    expect(firstOutcome.executedEnableCount).toBe(1);
+    expect(routerService.calls).toEqual([
+      {baseGroup: DEFAULT_BASE_GROUP_ADDRESS.toLowerCase(), crcAddresses: [humanAlice.toLowerCase()]}
+    ]);
+
+    circlesRpc.baseGroups = [assignedBaseGroup];
+    circlesRpc.trusteesByTruster[assignedBaseGroup.toLowerCase()] = [humanAlice];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [humanAlice];
+
+    const secondOutcome = await runOnce(deps, cfg);
+    expect(secondOutcome.pendingEnableCount).toBe(1);
+    expect(secondOutcome.executedEnableCount).toBe(1);
+    expect(routerService.calls).toEqual([
+      {baseGroup: DEFAULT_BASE_GROUP_ADDRESS.toLowerCase(), crcAddresses: [humanAlice.toLowerCase()]},
+      {baseGroup: assignedBaseGroup.toLowerCase(), crcAddresses: [humanAlice.toLowerCase()]}
+    ]);
+
+    const thirdOutcome = await runOnce(deps, cfg);
+    expect(thirdOutcome.pendingEnableCount).toBe(0);
+    expect(thirdOutcome.executedEnableCount).toBe(0);
+    expect(routerService.calls).toHaveLength(2);
+  });
+
+  it("can process a realtime subset of newly registered humans without re-scanning the full table", async () => {
+    const existingHuman = getAddress("0x2000000000000000000000000000000000000210");
+    const newHuman = getAddress("0x2000000000000000000000000000000000000211");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [existingHuman, newHuman];
+
+    const routerService = new FakeRouterService(["0xtx_realtime"]);
+    const deps = makeDeps({
+      circlesRpc,
+      routerService
+    });
+
+    const outcome = await runForHumanAvatars(
+      deps,
+      makeConfig({dryRun: false}),
+      [newHuman]
+    );
+
+    expect(outcome.totalAvatarEntries).toBe(1);
+    expect(outcome.uniqueHumanCount).toBe(1);
+    expect(outcome.pendingEnableCount).toBe(1);
+    expect(outcome.executedEnableCount).toBe(1);
+    expect(routerService.calls).toEqual([
+      {baseGroup: DEFAULT_BASE_GROUP_ADDRESS.toLowerCase(), crcAddresses: [newHuman.toLowerCase()]}
+    ]);
   });
 
   it("returns no pending enablement when every candidate is already trusted or blacklisted", async () => {
