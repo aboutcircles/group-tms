@@ -239,7 +239,7 @@ GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY=     # Private key of a 1/n Safe signer
 
 # External services
 BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist
-GNOSIS_GROUP_SCORING_URL=https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore
+GNOSIS_GROUP_SCORING_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore
 GNOSIS_GROUP_SCORING_TARGET_SET_NAME=all_backers  # Server-side named target set for scoring
 
 # Scan window / timing
