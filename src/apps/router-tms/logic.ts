@@ -58,6 +58,22 @@ type BulkTrusteesStatsProvider = {
   getLastBulkTrusteesForTrustersStats: () => BulkTrusteesStats;
 };
 
+/** Safe-level error codes that are NOT address-specific — they affect ALL transactions
+ *  regardless of the addresses in the batch payload.
+ *  - GS013: execTransaction failure when gasPrice=0 and safeTxGas=0
+ *  - GS020-GS026: checkNSignatures signature validation failures
+ *  These should NOT trigger per-address probing or quarantine since every address
+ *  would fail identically. */
+const SAFE_LEVEL_ERROR_CODES = ["GS013", "GS020", "GS021", "GS022", "GS023", "GS024", "GS025", "GS026"];
+const SAFE_LEVEL_PATTERN = new RegExp(SAFE_LEVEL_ERROR_CODES.join("|"));
+
+function isSafeLevelError(err: unknown): boolean {
+  if (err == null) return false;
+  const msg = String((err as any)?.message ?? "");
+  const reason = String((err as any)?.reason ?? "");
+  return SAFE_LEVEL_PATTERN.test(msg) || SAFE_LEVEL_PATTERN.test(reason);
+}
+
 export const DEFAULT_ENABLE_BATCH_SIZE = 10;
 export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
 export const DEFAULT_BASE_GROUP_ADDRESS = "0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026";
@@ -304,6 +320,23 @@ async function executeBatchWithFallback(
     logger.warn(
       `enableCRCForRouting FAILED (${batchLabel}) for ${batch.length} avatar(s) in base group ${baseGroup}: ${errMsg}`
     );
+
+    // Safe-level errors (e.g. GS026 "Invalid owner") are NOT address-specific.
+    // Probing individual addresses would produce the same error and wrongly
+    // quarantine them all. Fail fast with a clear message instead.
+    if (isSafeLevelError(batchError)) {
+      logger.error(
+        `Safe-level error in ${batchLabel}: ${errMsg}. ` +
+        `This is NOT address-specific — skipping per-address probing. ` +
+        `Check Safe signer configuration (GS026 = signature validation failed, typically signer not an owner or chainId/nonce mismatch).`
+      );
+      return {
+        txHashes: [],
+        enabledCount: 0,
+        quarantinedInThisBatch: [],
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg}
+      };
+    }
 
     // No simulation available — record as failed batch (existing behavior)
     if (!routerService.simulateEnableCRCForRouting) {
@@ -721,6 +754,7 @@ export const __testables = {
   createIsHumanBatchChecker,
   filterHumanAvatars,
   isBlacklisted,
+  isSafeLevelError,
   normalizeAddress,
   normalizeAddressArray,
   validateEnableTargets

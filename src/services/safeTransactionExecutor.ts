@@ -4,6 +4,20 @@ import {TransactionSimulationResult} from "../interfaces/ITransactionSimulation"
 import { retryWithBackoff } from "./retryWithBackoff";
 import { createProvider, primaryRpcUrl } from "./rpcProvider";
 
+export class SafeOwnershipError extends Error {
+  constructor(
+    public readonly signerAddress: string,
+    public readonly safeAddress: string
+  ) {
+    super(
+      `Signer ${signerAddress} is not an owner of Safe ${safeAddress}. ` +
+      `Safe transactions via execTransaction will fail with GS026 until ownership is restored. ` +
+      `Check SAFE_SIGNER_PRIVATE_KEY and SAFE_ADDRESS configuration.`
+    );
+    this.name = "SafeOwnershipError";
+  }
+}
+
 /** Default timeout for waiting on tx confirmation (5 minutes). */
 const DEFAULT_TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000;
 const GAS_LIMIT_BUFFER_NUMERATOR = 120n;
@@ -55,6 +69,14 @@ export class SafeTransactionExecutor {
       signer: signerPrivateKey,
       safeAddress: this.safeAddress
     });
+  }
+
+  async validateOwnership(): Promise<void> {
+    const safe = await this.safePromise;
+    const isOwner = await safe.isOwner(this.signerAddress);
+    if (!isOwner) {
+      throw new SafeOwnershipError(this.signerAddress, this.safeAddress);
+    }
   }
 
   async execute(

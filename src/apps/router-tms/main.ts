@@ -242,6 +242,20 @@ async function mainLoop(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  if (routerService) {
+    try {
+      await routerService.validateSafeOwnership();
+      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      rootLogger.error(`Safe ownership validation FAILED: ${errorMessage}`);
+      await slackService.notifySlackStartOrCrash(
+        `🚨 *Router-TMS Safe ownership check failed*\n\n${errorMessage}`,
+        SlackSeverity.CRITICAL
+      );
+      process.exit(1);
+    }
+  }
   await mainLoop();
 }
 
