@@ -22,6 +22,7 @@ const {
   createIsHumanBatchChecker,
   createIsHumanChecker,
   filterHumanAvatars,
+  isSafeLevelError,
   normalizeAddress,
   normalizeAddressArray,
   validateEnableTargets
@@ -649,6 +650,121 @@ describe("router-tms runOnce", () => {
     const enabled = await enablementStore.loadEnabledAddresses();
     expect(enabled.map(a => a.toLowerCase())).toContain(humanCarol.toLowerCase());
     expect(enabled.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
+  });
+});
+
+describe("isSafeLevelError", () => {
+  it("returns true for GS026 in error message", () => {
+    expect(isSafeLevelError(new Error('execution reverted: "GS026"'))).toBe(true);
+  });
+
+  it("returns true for GS013 in error reason field", () => {
+    const err = new Error("CALL_EXCEPTION");
+    (err as any).reason = "GS013";
+    expect(isSafeLevelError(err)).toBe(true);
+  });
+
+  it("returns true for other GS02x signature validation codes", () => {
+    expect(isSafeLevelError(new Error("GS020"))).toBe(true);
+    expect(isSafeLevelError(new Error("GS021"))).toBe(true);
+    expect(isSafeLevelError(new Error("GS024"))).toBe(true);
+    expect(isSafeLevelError(new Error("GS025"))).toBe(true);
+  });
+
+  it("returns false for generic revert errors", () => {
+    expect(isSafeLevelError(new Error("execution reverted"))).toBe(false);
+    expect(isSafeLevelError(new Error("CALL_EXCEPTION for 0xabc"))).toBe(false);
+  });
+
+  it("returns false for transient RPC errors", () => {
+    expect(isSafeLevelError(new Error("evm timeout"))).toBe(false);
+    expect(isSafeLevelError(new Error("rate limit exceeded"))).toBe(false);
+  });
+
+  it("returns false for null/undefined", () => {
+    expect(isSafeLevelError(null)).toBe(false);
+    expect(isSafeLevelError(undefined)).toBe(false);
+  });
+});
+
+describe("Safe-level error short-circuit in batch fallback", () => {
+  it("skips per-address probing and does not quarantine on GS026", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000BA0");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000BA1");
+    const humanCarol = getAddress("0x2000000000000000000000000000000000000BA2");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    routerService.failWith = new Error('execution reverted: "GS026"');
+
+    const enablementStore = new FakeRouterEnablementStore();
+    const deps = makeDeps({circlesRpc, routerService, enablementStore});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // No addresses should be quarantined — GS026 is a Safe-level error
+    expect(outcome.quarantinedAddresses).toHaveLength(0);
+    // Batch should be recorded as failed
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.executedEnableCount).toBe(0);
+    // No simulation calls — probing was skipped entirely
+    expect(routerService.simulationCalls).toBe(0);
+  });
+
+  it("skips probing on GS026 even for multi-batch runs", async () => {
+    const humans = [
+      getAddress("0x2000000000000000000000000000000000000BB0"),
+      getAddress("0x2000000000000000000000000000000000000BB1"),
+      getAddress("0x2000000000000000000000000000000000000BB2"),
+      getAddress("0x2000000000000000000000000000000000000BB3"),
+      getAddress("0x2000000000000000000000000000000000000BB4"),
+    ];
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = humans;
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    routerService.failWith = new Error('execution reverted: "GS026"');
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 2});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // All batches fail but NO addresses quarantined
+    expect(outcome.quarantinedAddresses).toHaveLength(0);
+    expect(outcome.failedBatches.length).toBeGreaterThan(0);
+    expect(routerService.simulationCalls).toBe(0);
+  });
+
+  it("still quarantines on non-Safe-level errors (existing behavior)", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000BC0");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000BC1");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    routerService.failWith = new Error("execution reverted: some inner contract error");
+    // Simulation also fails for both — they get quarantined (non-Safe error)
+    routerService.simulationFailAddresses.add(humanAlice.toLowerCase());
+    routerService.simulationFailAddresses.add(humanBob.toLowerCase());
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // Both addresses should be quarantined (non-Safe-level error, existing behavior)
+    expect(outcome.quarantinedAddresses).toHaveLength(2);
+    // Probing DID happen
+    expect(routerService.simulationCalls).toBe(2);
   });
 });
 

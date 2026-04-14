@@ -23,6 +23,10 @@ export class RouterService implements IRouterService {
     this.executor = new SafeTransactionExecutor(txRpcUrl, signerPrivateKey, safeAddress);
   }
 
+  async validateSafeOwnership(): Promise<void> {
+    return this.executor.validateOwnership();
+  }
+
   async enableCRCForRouting(baseGroup: string, crcAddresses: string[]): Promise<string> {
     if (crcAddresses.length === 0) {
       throw new Error("enableCRCForRouting requires at least one CRC address.");
