@@ -201,7 +201,7 @@ export async function runForHumanAvatars(
       if (dryRun || !routerService) {
         logger.info(
           `[DRY-RUN] Would call enableCRCForRouting with ${batch.length} avatar(s) ` +
-            `(batch ${batchIndex + 1}/${batches.length}) for base group ${target.baseGroup}.`
+            `(batch ${batchIndex + 1}/${batches.length}) for base group ${target.baseGroup}: ${batch.join(", ")}.`
         );
         if (routerService?.simulateEnableCRCForRouting) {
           const simulation = await routerService.simulateEnableCRCForRouting(target.baseGroup, batch);

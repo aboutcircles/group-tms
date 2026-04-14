@@ -1,5 +1,5 @@
 import {parseRpcSubscriptionMessage, type CirclesEvent, type RpcSubscriptionEvent} from "@aboutcircles/sdk-rpc";
-import {getAddress} from "ethers";
+import {Interface, getAddress} from "ethers";
 
 import {ILoggerService} from "../../interfaces/ILoggerService";
 
@@ -25,6 +25,15 @@ type JsonRpcMessage = {
     code?: number;
     message?: string;
   };
+};
+
+type EthLogSubscriptionEvent = {
+  address?: string;
+  topics?: unknown[];
+  data?: string;
+  blockNumber?: string | number;
+  transactionIndex?: string | number;
+  logIndex?: string | number;
 };
 
 type WebSocketMessageEventLike = {
@@ -79,6 +88,9 @@ const DEFAULT_RECONNECT_BASE_MS = 2_000;
 const DEFAULT_RECONNECT_MAX_MS = 60_000;
 const DEFAULT_CATCHUP_PAGE_SIZE = 1_000;
 const WebSocketImpl = (globalThis as any).WebSocket as { new(url: string): WebSocketLike };
+const REGISTER_HUMAN_LOG_ABI = ["event RegisterHuman(address indexed avatar, address indexed inviter)"] as const;
+const REGISTER_HUMAN_LOG_IFACE = new Interface(REGISTER_HUMAN_LOG_ABI);
+const REGISTER_HUMAN_TOPIC0 = REGISTER_HUMAN_LOG_IFACE.getEvent("RegisterHuman")!.topicHash.toLowerCase();
 
 export function startRegisterHumanListener(options: StartRegisterHumanListenerOptions): RegisterHumanListenerHandle {
   const {
@@ -97,7 +109,9 @@ export function startRegisterHumanListener(options: StartRegisterHumanListenerOp
   let flushTimer: NodeJS.Timeout | null = null;
   let reconnectAttempt = 0;
   let lastSeenCursor: RegisterHumanCursor | null = null;
+  let catchUpInFlight: Promise<void> | null = null;
   const pendingHumans = new Set<string>();
+  const subscriptionRequest = buildRegisterHumanSubscriptionRequest(wsUrl);
 
   const clearReconnectTimer = (): void => {
     if (reconnectTimer) {
@@ -168,22 +182,53 @@ export function startRegisterHumanListener(options: StartRegisterHumanListenerOp
     ws = null;
   };
 
+  const runCatchUp = async (): Promise<void> => {
+    if (catchUpInFlight) {
+      return catchUpInFlight;
+    }
+
+    catchUpInFlight = (async () => {
+      try {
+        const {events, currentHead} = await catchUpMissedRegistrations(httpRpcUrl, lastSeenCursor);
+        if (!lastSeenCursor && isFiniteNumber(currentHead)) {
+          lastSeenCursor = makeInclusiveHeadCursor(currentHead);
+        }
+
+        if (events.length > 0) {
+          handleRegisterHumanEvents(events);
+        } else if (isFiniteNumber(currentHead)) {
+          lastSeenCursor = maxCursor(lastSeenCursor, makeHeadCursor(currentHead));
+        }
+      } catch (error) {
+        logger.warn("RegisterHuman listener catch-up failed:", error);
+      } finally {
+        catchUpInFlight = null;
+      }
+    })();
+
+    return catchUpInFlight;
+  };
+
   const handleRegisterHumanEvents = (events: RegisterHumanEvent[]): void => {
     if (events.length === 0) {
       return;
     }
 
+    const avatars: string[] = [];
     for (const event of events) {
       pendingHumans.add(event.avatar);
+      avatars.push(event.avatar);
       lastSeenCursor = maxCursor(lastSeenCursor, event.cursor);
     }
 
-    logger.info(`RegisterHuman listener received ${events.length} avatar(s); scheduling realtime routing check.`);
+    logger.info(
+      `RegisterHuman listener detected ${events.length} new human avatar(s): ${Array.from(new Set(avatars)).join(", ")}`
+    );
     scheduleFlush();
   };
 
   const handleSubscriptionPayload = (payload: unknown): void => {
-    const events = extractRegisterHumanEventsFromSubscriptionResult(payload);
+    const events = extractRegisterHumanEventsFromSubscriptionPayload(payload);
     if (events.length === 0) {
       return;
     }
@@ -213,12 +258,12 @@ export function startRegisterHumanListener(options: StartRegisterHumanListenerOp
 
     ws.addEventListener("open", () => {
       reconnectAttempt = 0;
-      logger.info("RegisterHuman listener connected. Subscribing to Circles events...");
+      logger.info(`RegisterHuman listener connected. Subscribing to ${subscriptionRequest.description}...`);
       ws?.send(JSON.stringify({
         jsonrpc: "2.0",
         id: 1,
         method: "eth_subscribe",
-        params: ["circles", "{}"]
+        params: subscriptionRequest.params
       }));
     });
 
@@ -243,24 +288,9 @@ export function startRegisterHumanListener(options: StartRegisterHumanListenerOp
 
         logger.info(`RegisterHuman listener subscribed successfully (id=${String(message.result ?? "")}).`);
         if (!lastSeenCursor && Number.isFinite(connectStartedHead)) {
-          lastSeenCursor = makeHeadCursor(connectStartedHead as number);
+          lastSeenCursor = makeInclusiveHeadCursor(connectStartedHead as number);
         }
-        void catchUpMissedRegistrations(httpRpcUrl, lastSeenCursor, logger)
-          .then(({events, currentHead}) => {
-            if (!lastSeenCursor && isFiniteNumber(currentHead)) {
-              lastSeenCursor = makeHeadCursor(currentHead);
-            }
-
-            if (events.length > 0) {
-              logger.info(`RegisterHuman listener recovered ${events.length} avatar(s) via reconnect catch-up.`);
-              handleRegisterHumanEvents(events);
-            } else if (isFiniteNumber(currentHead)) {
-              lastSeenCursor = maxCursor(lastSeenCursor, makeHeadCursor(currentHead));
-            }
-          })
-          .catch((error) => {
-            logger.warn("RegisterHuman listener catch-up failed:", error);
-          });
+        void runCatchUp();
         return;
       }
 
@@ -310,9 +340,39 @@ export function deriveRegisterHumanWsUrl(rpcUrl: string): string {
   return url.toString();
 }
 
+export function buildRegisterHumanSubscriptionRequest(wsUrl: string): {
+  description: string;
+  params: ["circles", string] | ["logs", {topics: string[]}];
+} {
+  const trimmed = wsUrl.trim().toLowerCase();
+
+  if (trimmed.includes("/ws/chain")) {
+    return {
+      description: "chain logs",
+      params: ["logs", {topics: [REGISTER_HUMAN_TOPIC0]}]
+    };
+  }
+
+  return {
+    description: "Circles events",
+    params: ["circles", "{}"]
+  };
+}
+
+export function extractRegisterHumanEventsFromSubscriptionPayload(payload: unknown): RegisterHumanEvent[] {
+  if (looksLikeCirclesSubscriptionPayload(payload)) {
+    const rpcEvents = extractRegisterHumanEventsFromSubscriptionResult(payload);
+    if (rpcEvents.length > 0) {
+      return rpcEvents;
+    }
+  }
+
+  return extractRegisterHumanEventsFromLogSubscriptionResult(payload);
+}
+
 export function extractRegisterHumanAvatarsFromSubscriptionResult(payload: unknown): string[] {
   return Array.from(new Set(
-    extractRegisterHumanEventsFromSubscriptionResult(payload).map((event) => event.avatar)
+    extractRegisterHumanEventsFromSubscriptionPayload(payload).map((event) => event.avatar)
   ));
 }
 
@@ -337,6 +397,34 @@ function normalizeRegisteredHumanAvatar(event: CirclesEvent): string | undefined
 function getStringProperty(event: CirclesEvent, key: string): string | undefined {
   const value = event[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function normalizeAddressValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  try {
+    return getAddress(value).toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function looksLikeCirclesSubscriptionPayload(payload: unknown): boolean {
+  const events = Array.isArray(payload) ? payload : payload ? [payload] : [];
+
+  return events.every((event) => {
+    if (!event || typeof event !== "object") {
+      return false;
+    }
+
+    const maybeEvent = event as {event?: unknown; values?: unknown; $event?: unknown};
+    return (
+      (typeof maybeEvent.event === "string" && maybeEvent.values && typeof maybeEvent.values === "object") ||
+      typeof maybeEvent.$event === "string"
+    );
+  });
 }
 
 function extractRegisterHumanEventsFromSubscriptionResult(payload: unknown): RegisterHumanEvent[] {
@@ -364,10 +452,60 @@ function extractRegisterHumanEventsFromSubscriptionResult(payload: unknown): Reg
   return dedupeRegisterHumanEvents(events);
 }
 
+function extractRegisterHumanEventsFromLogSubscriptionResult(payload: unknown): RegisterHumanEvent[] {
+  const logs = Array.isArray(payload)
+    ? payload as EthLogSubscriptionEvent[]
+    : payload
+      ? [payload as EthLogSubscriptionEvent]
+      : [];
+
+  const events: RegisterHumanEvent[] = [];
+
+  for (const log of logs) {
+    const parsedLog = parseRegisterHumanLog(log);
+    if (parsedLog) {
+      events.push(parsedLog);
+    }
+  }
+
+  return dedupeRegisterHumanEvents(events);
+}
+
+function parseRegisterHumanLog(log: EthLogSubscriptionEvent): RegisterHumanEvent | undefined {
+  const topics = Array.isArray(log.topics)
+    ? log.topics.filter((topic): topic is string => typeof topic === "string")
+    : [];
+
+  if (topics.length === 0 || topics[0].toLowerCase() !== REGISTER_HUMAN_TOPIC0 || typeof log.data !== "string") {
+    return undefined;
+  }
+
+  let parsedLog;
+  try {
+    parsedLog = REGISTER_HUMAN_LOG_IFACE.parseLog({
+      topics,
+      data: log.data
+    });
+  } catch {
+    return undefined;
+  }
+
+  if (!parsedLog || parsedLog.name !== "RegisterHuman") {
+    return undefined;
+  }
+
+  const avatar = normalizeAddressValue(parsedLog.args.avatar);
+  const cursor = getCursorFromLog(log);
+  if (!avatar || !cursor) {
+    return undefined;
+  }
+
+  return {avatar, cursor};
+}
+
 async function catchUpMissedRegistrations(
   httpRpcUrl: string,
-  cursor: RegisterHumanCursor | null,
-  logger: ILoggerService
+  cursor: RegisterHumanCursor | null
 ): Promise<{events: RegisterHumanEvent[]; currentHead: number | null}> {
   const currentHead = await fetchCurrentBlockNumber(httpRpcUrl);
   if (!cursor) {
@@ -377,11 +515,6 @@ async function catchUpMissedRegistrations(
   if (!isFiniteNumber(currentHead) || currentHead <= cursor.blockNumber) {
     return {events: [], currentHead};
   }
-
-  logger.info(
-    `RegisterHuman listener catch-up: querying from block ${cursor.blockNumber} ` +
-      `tx ${cursor.transactionIndex} log ${cursor.logIndex} up to block ${currentHead}.`
-  );
 
   const events = await fetchRegisterHumanEventsBetween(httpRpcUrl, cursor, currentHead);
   return {events, currentHead};
@@ -587,6 +720,14 @@ function makeHeadCursor(blockNumber: number): RegisterHumanCursor {
   };
 }
 
+function makeInclusiveHeadCursor(blockNumber: number): RegisterHumanCursor {
+  return {
+    blockNumber,
+    transactionIndex: -1,
+    logIndex: -1
+  };
+}
+
 function getCursorFromEvent(event: CirclesEvent): RegisterHumanCursor | undefined {
   if (!Number.isFinite(event.blockNumber) || !Number.isFinite(event.transactionIndex) || !Number.isFinite(event.logIndex)) {
     return undefined;
@@ -596,6 +737,21 @@ function getCursorFromEvent(event: CirclesEvent): RegisterHumanCursor | undefine
     blockNumber: event.blockNumber,
     transactionIndex: event.transactionIndex,
     logIndex: event.logIndex
+  };
+}
+
+function getCursorFromLog(log: EthLogSubscriptionEvent): RegisterHumanCursor | undefined {
+  const blockNumber = toFiniteNumber(log.blockNumber);
+  const transactionIndex = toFiniteNumber(log.transactionIndex);
+  const logIndex = toFiniteNumber(log.logIndex);
+  if (blockNumber === null || transactionIndex === null || logIndex === null) {
+    return undefined;
+  }
+
+  return {
+    blockNumber,
+    transactionIndex,
+    logIndex
   };
 }
 

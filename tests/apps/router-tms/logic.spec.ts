@@ -145,6 +145,30 @@ describe("router-tms runOnce", () => {
     expect(routerService.simulationCalls).toBe(2);
   });
 
+  it("logs avatar addresses for dry-run enablement batches", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000013");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000014");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+    const logger = new FakeLogger(true);
+
+    await runOnce(
+      makeDeps({circlesRpc, logger}),
+      makeConfig({dryRun: true, enableBatchSize: 2})
+    );
+
+    const dryRunMessages = logger.logs
+      .filter((entry) => entry.level === "info")
+      .map((entry) => entry.args.join(" "));
+
+    expect(dryRunMessages).toEqual(expect.arrayContaining([
+      expect.stringContaining(humanAlice.toLowerCase()),
+      expect.stringContaining(humanBob.toLowerCase())
+    ]));
+  });
+
   it("uses default config values when optional settings are omitted", async () => {
     const humanAlice = getAddress("0x2000000000000000000000000000000000000012");
     const circlesRpc = new FakeCirclesRpc();

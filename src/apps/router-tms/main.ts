@@ -68,6 +68,35 @@ async function refreshBlacklist(): Promise<void> {
   }
 }
 
+function startRealtimeRegisterHumanListener(): void {
+  if (registerHumanListener) {
+    return;
+  }
+
+  rootLogger.info("Starting RegisterHuman realtime listener between scheduled runs.");
+  registerHumanListener = startRegisterHumanListener({
+    httpRpcUrl: rpcUrl,
+    wsUrl: registerHumanWsUrl,
+    logger: rootLogger.child("register-human"),
+    onHumansRegistered: handleRealtimeHumanRegistrations
+  });
+}
+
+function stopRealtimeRegisterHumanListener(reason: string): void {
+  if (!registerHumanListener) {
+    return;
+  }
+
+  rootLogger.info(`Stopping RegisterHuman realtime listener: ${reason}.`);
+  try {
+    registerHumanListener.stop();
+  } catch (error) {
+    rootLogger.warn("Failed to stop RegisterHuman listener:", error);
+  } finally {
+    registerHumanListener = null;
+  }
+}
+
 let routerService: RouterService | undefined;
 if (!dryRun || canSimulateTransactions) {
   if (!safeSignerPrivateKey || safeSignerPrivateKey.trim().length === 0) {
@@ -93,11 +122,7 @@ const runLogger = rootLogger.child("run");
 void notifySlackStartup();
 
 async function gracefulShutdown(signal: string) {
-  try {
-    registerHumanListener?.stop();
-  } catch (err) {
-    rootLogger.warn("Failed to stop RegisterHuman listener:", err);
-  }
+  stopRealtimeRegisterHumanListener(`graceful shutdown (${signal})`);
   try {
     await leaderElection?.stop();
   } catch (err) {
@@ -142,18 +167,13 @@ async function mainLoop(): Promise<void> {
     slackService,
     (isLeader) => setLeaderStatus("router-tms", isLeader)
   );
-  registerHumanListener = startRegisterHumanListener({
-    httpRpcUrl: rpcUrl,
-    wsUrl: registerHumanWsUrl,
-    logger: rootLogger.child("register-human"),
-    onHumansRegistered: handleRealtimeHumanRegistrations
-  });
   const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
 
   while (true) {
     const runStartedAt = Date.now();
+    stopRealtimeRegisterHumanListener("starting scheduled router-tms run");
     try {
       const outcome = await enqueueExclusive(async () => {
         const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
@@ -179,6 +199,7 @@ async function mainLoop(): Promise<void> {
         );
       });
       if (!outcome) {
+        startRealtimeRegisterHumanListener();
         await delay(currentDelay);
         continue;
       }
@@ -197,6 +218,7 @@ async function mainLoop(): Promise<void> {
       if (outcome.pendingEnableCount === 0) {
         runLogger.info("Router already trusts every allowed human avatar.");
       }
+      startRealtimeRegisterHumanListener();
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
@@ -210,6 +232,7 @@ async function mainLoop(): Promise<void> {
         return;
       }
       currentDelay = Math.min(currentDelay * 2, maxDelay);
+      startRealtimeRegisterHumanListener();
     }
 
     await delay(currentDelay);
@@ -227,6 +250,9 @@ async function handleRealtimeHumanRegistrations(avatars: string[]): Promise<void
 
   const startedAt = Date.now();
   const realtimeLogger = runLogger.child("realtime");
+  realtimeLogger.info(
+    `Processing realtime RegisterHuman avatar(s): ${avatars.join(", ")}`
+  );
 
   try {
     const outcome = await enqueueExclusive(async () => {

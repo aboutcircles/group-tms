@@ -202,6 +202,7 @@ VERBOSE_LOGGING=1
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
 TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
+ROUTER_WSS_URL=wss://rpc.aboutcircles.com/ws/chain 
 ROUTER_ADDRESS=0xdc287474114cc0551a81ddc2eb51783fbf34802f
 ROUTER_BASE_GROUP_ADDRESS=0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026
 

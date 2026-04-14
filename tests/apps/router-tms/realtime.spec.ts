@@ -1,8 +1,10 @@
 import {getAddress} from "ethers";
 
 import {
+  buildRegisterHumanSubscriptionRequest,
   buildRegisterHumanCatchUpFilter,
   deriveRegisterHumanWsUrl,
+  extractRegisterHumanEventsFromSubscriptionPayload,
   extractRegisterHumanAvatarsFromSubscriptionResult,
   extractRegisterHumanEventsFromQueryResponse
 } from "../../../src/apps/router-tms/realtime";
@@ -12,6 +14,20 @@ describe("router-tms realtime helpers", () => {
     expect(deriveRegisterHumanWsUrl("https://rpc.aboutcircles.com/")).toBe("wss://rpc.aboutcircles.com/ws");
     expect(deriveRegisterHumanWsUrl("http://localhost:8080/")).toBe("ws://localhost:8080/ws");
     expect(deriveRegisterHumanWsUrl("wss://rpc.aboutcircles.com/ws/subscribe")).toBe("wss://rpc.aboutcircles.com/ws/subscribe");
+  });
+
+  it("uses logs subscriptions for chain websocket endpoints", () => {
+    expect(buildRegisterHumanSubscriptionRequest("wss://rpc.aboutcircles.com/ws/chain")).toEqual({
+      description: "chain logs",
+      params: ["logs", {
+        topics: ["0xfea7c1e1973c8be64c654eb06dc19ffbfc2e924d57544b9da0c0a27d3f893d77"]
+      }]
+    });
+
+    expect(buildRegisterHumanSubscriptionRequest("wss://rpc.aboutcircles.com/ws")).toEqual({
+      description: "Circles events",
+      params: ["circles", "{}"]
+    });
   });
 
   it("extracts newly registered human avatars from Circles subscription payloads", () => {
@@ -58,6 +74,33 @@ describe("router-tms realtime helpers", () => {
     ]);
 
     expect(avatars).toEqual([avatar, human]);
+  });
+
+  it("extracts newly registered human avatars from chain log subscription payloads", () => {
+    const avatar = getAddress("0xe3493994e60f87e680f627297c21fcdeae28150b").toLowerCase();
+    const events = extractRegisterHumanEventsFromSubscriptionPayload({
+      address: "0xc12c1e50abb450d6205ea2c3fa861b3b834d13e8",
+      blockNumber: "0x2b8b598",
+      transactionIndex: "0x1d",
+      logIndex: "0x7c",
+      data: "0x",
+      topics: [
+        "0xfea7c1e1973c8be64c654eb06dc19ffbfc2e924d57544b9da0c0a27d3f893d77",
+        "0x000000000000000000000000e3493994e60f87e680f627297c21fcdeae28150b",
+        "0x0000000000000000000000008bdc8f71e02a016e6006d4e640b70a79f9b92437"
+      ]
+    });
+
+    expect(events).toEqual([
+      {
+        avatar,
+        cursor: {
+          blockNumber: 45659544,
+          transactionIndex: 29,
+          logIndex: 124
+        }
+      }
+    ]);
   });
 
   it("builds a composite catch-up filter from the last seen event cursor", () => {
