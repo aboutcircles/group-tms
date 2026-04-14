@@ -140,6 +140,11 @@ export class SafeTransactionExecutor {
         break;
       } catch (err) {
         if (attempt < MAX_NONCE_RACE_RETRIES && isNonceRaceError(err)) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[SafeExecutor] GS026 nonce race on attempt ${attempt}/${MAX_NONCE_RACE_RETRIES}, ` +
+            `retrying create→sign→estimate: ${errMsg}`
+          );
           continue;
         }
         throw err;
@@ -199,6 +204,11 @@ export class SafeTransactionExecutor {
         return {gasEstimate};
       } catch (err) {
         if (attempt < MAX_NONCE_RACE_RETRIES && isNonceRaceError(err)) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn(
+            `[SafeExecutor] GS026 nonce race during simulation on attempt ${attempt}/${MAX_NONCE_RACE_RETRIES}, ` +
+            `retrying create→sign→estimate: ${errMsg}`
+          );
           continue;
         }
         throw err;
