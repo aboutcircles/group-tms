@@ -23,6 +23,19 @@ const DEFAULT_TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000;
 const GAS_LIMIT_BUFFER_NUMERATOR = 120n;
 const GAS_LIMIT_BUFFER_DENOMINATOR = 100n;
 
+/** Max retries for the create→sign→estimate cycle when a nonce race causes GS026.
+ *  The Safe contract reads nonce from storage (not calldata); if it changed since
+ *  createTransaction fetched it, ecrecover returns a garbage address → GS026. */
+const MAX_NONCE_RACE_RETRIES = 3;
+const GS026_PATTERN = /GS026/;
+
+function isNonceRaceError(err: unknown): boolean {
+  if (err == null) return false;
+  const msg = String((err as any)?.message ?? "");
+  const reason = String((err as any)?.reason ?? "");
+  return GS026_PATTERN.test(msg) || GS026_PATTERN.test(reason);
+}
+
 export class TransactionConfirmationTimeoutError extends Error {
   constructor(public readonly txHash: string, public readonly timeoutMs: number) {
     super(`Tx ${txHash} confirmation timed out after ${timeoutMs}ms`);
@@ -111,17 +124,27 @@ export class SafeTransactionExecutor {
     const normalizedTo = getAddress(to);
     const normalizedValue = typeof value === "bigint" ? value.toString() : value ?? "0";
 
-    const unsignedSafeTx = await safe.createTransaction({
-      transactions: [
-        {
-          to: normalizedTo,
-          value: normalizedValue,
-          data
+    // Retry create→sign→estimate on nonce race (GS026). The Safe contract reads nonce
+    // from storage; if it changed since createTransaction fetched it, ecrecover returns
+    // a garbage address and the Safe reverts with GS026. Re-creating the transaction
+    // fetches the fresh nonce and produces a valid signature.
+    let signedSafeTx!: Awaited<ReturnType<Safe["signTransaction"]>>;
+    let gasLimit!: bigint;
+    for (let attempt = 1; attempt <= MAX_NONCE_RACE_RETRIES; attempt++) {
+      const unsignedSafeTx = await safe.createTransaction({
+        transactions: [{ to: normalizedTo, value: normalizedValue, data }]
+      });
+      signedSafeTx = await safe.signTransaction(unsignedSafeTx);
+      try {
+        gasLimit = await this.estimateExecutionGasLimit(safe, signedSafeTx);
+        break;
+      } catch (err) {
+        if (attempt < MAX_NONCE_RACE_RETRIES && isNonceRaceError(err)) {
+          continue;
         }
-      ]
-    });
-    const signedSafeTx = await safe.signTransaction(unsignedSafeTx);
-    const gasLimit = await this.estimateExecutionGasLimit(safe, signedSafeTx);
+        throw err;
+      }
+    }
 
     // Do NOT retry executeTransaction — if the first attempt reaches the mempool but
     // the response is lost (timeout), a retry would send a second tx with a new EOA nonce,
@@ -157,26 +180,32 @@ export class SafeTransactionExecutor {
     const normalizedTo = getAddress(to);
     const normalizedValue = typeof value === "bigint" ? value.toString() : value ?? "0";
 
-    const unsignedSafeTx = await safe.createTransaction({
-      transactions: [
-        {
-          to: normalizedTo,
-          value: normalizedValue,
-          data
+    // Same nonce-race retry as _executeInner — simulation also reads nonce from storage.
+    for (let attempt = 1; attempt <= MAX_NONCE_RACE_RETRIES; attempt++) {
+      const unsignedSafeTx = await safe.createTransaction({
+        transactions: [{ to: normalizedTo, value: normalizedValue, data }]
+      });
+      const signedSafeTx = await safe.signTransaction(unsignedSafeTx);
+      try {
+        const gasEstimate = await this.estimateExecutionGasLimit(safe, signedSafeTx);
+        const encodedSafeTx = await safe.getEncodedTransaction(signedSafeTx);
+
+        await retryWithBackoff(() => this.provider.call({
+          from: this.signerAddress,
+          to: this.safeAddress,
+          data: encodedSafeTx
+        }));
+
+        return {gasEstimate};
+      } catch (err) {
+        if (attempt < MAX_NONCE_RACE_RETRIES && isNonceRaceError(err)) {
+          continue;
         }
-      ]
-    });
-    const signedSafeTx = await safe.signTransaction(unsignedSafeTx);
-    const gasEstimate = await this.estimateExecutionGasLimit(safe, signedSafeTx);
-    const encodedSafeTx = await safe.getEncodedTransaction(signedSafeTx);
-
-    await retryWithBackoff(() => this.provider.call({
-      from: this.signerAddress,
-      to: this.safeAddress,
-      data: encodedSafeTx
-    }));
-
-    return {gasEstimate};
+        throw err;
+      }
+    }
+    // Unreachable — loop always breaks or throws
+    throw new Error("Nonce race retry loop exited unexpectedly");
   }
 
   private async estimateExecutionGasLimit(safe: Safe, safeTx: Awaited<ReturnType<Safe["createTransaction"]>>): Promise<bigint> {
