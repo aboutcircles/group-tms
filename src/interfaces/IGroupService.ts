@@ -11,4 +11,5 @@ export interface IGroupService {
     fetchGroupOwnerAndService(groupAddress: string): Promise<GroupOwnerAndServiceAddress>;
     simulateTrustBatchWithConditions?(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult>;
     simulateUntrustBatch?(groupAddress: string, trusteeAddresses: string[]): Promise<TransactionSimulationResult>;
+    validateSafeOwnership?(): Promise<void>;
 }

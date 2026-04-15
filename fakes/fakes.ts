@@ -414,6 +414,7 @@ export class FakeRouterService implements IRouterService {
 
 export class FakeRouterEnablementStore implements IRouterEnablementStore {
   private readonly enabled = new Set<string>();
+  readonly quarantined = new Set<string>();
 
   constructor(initial?: string[]) {
     if (initial) {
@@ -428,6 +429,16 @@ export class FakeRouterEnablementStore implements IRouterEnablementStore {
   async markEnabled(addresses: string[]): Promise<void> {
     for (const address of addresses) {
       this.enabled.add(address.toLowerCase());
+    }
+  }
+
+  async loadQuarantinedAddresses(): Promise<string[]> {
+    return Array.from(this.quarantined);
+  }
+
+  async markQuarantined(addresses: string[]): Promise<void> {
+    for (const address of addresses) {
+      this.quarantined.add(address.toLowerCase());
     }
   }
 }

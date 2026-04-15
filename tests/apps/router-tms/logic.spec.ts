@@ -708,8 +708,9 @@ describe("Safe-level error short-circuit in batch fallback", () => {
 
     // No addresses should be quarantined — GS026 is a Safe-level error
     expect(outcome.quarantinedAddresses).toHaveLength(0);
-    // Batch should be recorded as failed
+    // Batch should be recorded as failed with safe-level failureType
     expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.failedBatches[0].failureType).toBe("safe-level");
     expect(outcome.executedEnableCount).toBe(0);
     // No simulation calls — probing was skipped entirely
     expect(routerService.simulationCalls).toBe(0);
@@ -742,7 +743,7 @@ describe("Safe-level error short-circuit in batch fallback", () => {
     expect(routerService.simulationCalls).toBe(0);
   });
 
-  it("still quarantines on non-Safe-level errors (existing behavior)", async () => {
+  it("still quarantines on non-Safe-level errors (existing behavior) with address-specific failureType", async () => {
     const humanAlice = getAddress("0x2000000000000000000000000000000000000BC0");
     const humanBob = getAddress("0x2000000000000000000000000000000000000BC1");
 
@@ -756,15 +757,79 @@ describe("Safe-level error short-circuit in batch fallback", () => {
     routerService.simulationFailAddresses.add(humanAlice.toLowerCase());
     routerService.simulationFailAddresses.add(humanBob.toLowerCase());
 
-    const deps = makeDeps({circlesRpc, routerService});
+    const enablementStore = new FakeRouterEnablementStore();
+    const deps = makeDeps({circlesRpc, routerService, enablementStore});
     const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
 
     const outcome = await runOnce(deps, cfg);
 
     // Both addresses should be quarantined (non-Safe-level error, existing behavior)
     expect(outcome.quarantinedAddresses).toHaveLength(2);
+    // FailedBatch should have address-specific failureType
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.failedBatches[0].failureType).toBe("address-specific");
     // Probing DID happen
     expect(routerService.simulationCalls).toBe(2);
+    // Quarantine was persisted to the store
+    const persistedQuarantine = await enablementStore.loadQuarantinedAddresses();
+    expect(persistedQuarantine).toHaveLength(2);
+  });
+});
+
+describe("Quarantine persistence across runs", () => {
+  it("loads previously quarantined addresses and skips them in batch processing", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000BD0");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000BD1");
+    const humanCarol = getAddress("0x2000000000000000000000000000000000000BD2");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    const enablementStore = new FakeRouterEnablementStore();
+    // Pre-quarantine Alice from a previous run
+    await enablementStore.markQuarantined([humanAlice]);
+
+    const deps = makeDeps({circlesRpc, routerService, enablementStore});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // Alice was already quarantined, so only Bob and Carol should be enabled
+    expect(outcome.executedEnableCount).toBe(2);
+    // No NEW quarantine this run
+    expect(outcome.quarantinedAddresses).toHaveLength(0);
+  });
+
+  it("persists newly quarantined addresses for subsequent runs", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000BE0");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000BE1");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    // Alice causes the batch to fail (address-specific), Bob is fine
+    routerService.enableFailAddresses.add(humanAlice.toLowerCase());
+    routerService.simulationFailAddresses.add(humanAlice.toLowerCase());
+
+    const enablementStore = new FakeRouterEnablementStore();
+    const deps = makeDeps({circlesRpc, routerService, enablementStore});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // Alice quarantined from simulation probe, Bob succeeded via retry
+    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
+    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
+    expect(outcome.executedEnableCount).toBe(1); // Only Bob executed
+
+    // Alice should be persisted in quarantine store
+    const quarantined = await enablementStore.loadQuarantinedAddresses();
+    expect(quarantined.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
+    expect(quarantined.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
   });
 });
 

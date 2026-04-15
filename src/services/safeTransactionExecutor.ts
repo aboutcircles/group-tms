@@ -29,7 +29,7 @@ const GAS_LIMIT_BUFFER_DENOMINATOR = 100n;
 const MAX_NONCE_RACE_RETRIES = 3;
 const GS026_PATTERN = /GS026/;
 
-function isNonceRaceError(err: unknown): boolean {
+export function isNonceRaceError(err: unknown): boolean {
   if (err == null) return false;
   const msg = String((err as any)?.message ?? "");
   const reason = String((err as any)?.reason ?? "");

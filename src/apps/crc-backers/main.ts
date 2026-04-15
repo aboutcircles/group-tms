@@ -99,7 +99,9 @@ process.on('uncaughtException', async (err) => {
   rootLogger.error("Uncaught exception:", formatErrorWithCauses(err instanceof Error ? err : new Error(String(err))));
   try {
     await slackService.notifySlackStartOrCrash(`💥 *crc-backers* Uncaught exception: ${err?.message || err}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   process.exit(1);
 });
 
@@ -108,7 +110,9 @@ process.on('unhandledRejection', async (reason) => {
   rootLogger.error("Unhandled rejection:", formatErrorWithCauses(error));
   try {
     await slackService.notifySlackStartOrCrash(`💥 *crc-backers* Unhandled rejection: ${error.message}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   process.exit(1);
 });
 
@@ -214,7 +218,7 @@ async function loop(leaderElection: LeaderElection | null) {
         void slackService.notifySlackStartOrCrash(
           `🚨 *crc-backers* crashing after ${consecutiveErrors} consecutive failures.\nLast error: ${baseError.message}`,
           SlackSeverity.CRITICAL
-        ).catch(() => {});
+        ).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }
@@ -247,6 +251,24 @@ async function refreshBlacklist(): Promise<void> {
 
 async function main() {
   startMetricsServer("crc-backers");
+  if (groupService?.validateSafeOwnership) {
+    try {
+      await groupService.validateSafeOwnership();
+      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      rootLogger.error(`Safe ownership validation FAILED: ${errorMessage}`);
+      try {
+        await slackService.notifySlackStartOrCrash(
+          `🚨 *crc-backers Safe ownership check failed*\n\n${errorMessage}`,
+          SlackSeverity.CRITICAL
+        );
+      } catch (slackErr) {
+        rootLogger.warn("Failed to send Slack ownership failure notification:", slackErr);
+      }
+      process.exit(1);
+    }
+  }
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,

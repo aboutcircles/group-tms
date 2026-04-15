@@ -17,6 +17,10 @@ export class SafeGroupService implements IGroupService {
     this.executor = new SafeTransactionExecutor(txRpcUrl, signerPrivateKey, safeAddress);
   }
 
+  async validateSafeOwnership(): Promise<void> {
+    return this.executor.validateOwnership();
+  }
+
   async trustBatchWithConditions(groupAddress: string, trusteeAddresses: string[]): Promise<string> {
     const data = GROUP_INTERFACE.encodeFunctionData("trustBatchWithConditions", [
       trusteeAddresses,
