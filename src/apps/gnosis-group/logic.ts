@@ -4,17 +4,19 @@ import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {IGroupService} from "../../interfaces/IGroupService";
 
-type RelativeTrustScoreEntry = {
+type GnosisTrustScoreEntry = {
   address?: string;
-  relative_score?: number;
-  targets_reached?: number;
-  total_targets?: number;
-  penetration_rate?: number;
+  gnosis_trust_score?: number | string;
 };
 
-type RelativeTrustScoreResponse = {
+type LegacyRelativeTrustScoreEntry = {
+  address?: string;
+  relative_score?: number | string;
+};
+
+type LegacyRelativeTrustScoreResponse = {
   status?: string;
-  batches?: Record<string, RelativeTrustScoreEntry[]>;
+  batches?: Record<string, LegacyRelativeTrustScoreEntry[]>;
 };
 
 export type RunConfig = {
@@ -88,7 +90,7 @@ export class ScoreCache {
 
 export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
 export const DEFAULT_SCORE_BATCH_SIZE = 20;
-export const DEFAULT_SCORE_THRESHOLD = 100;
+export const DEFAULT_SCORE_THRESHOLD = 80;
 export const DEFAULT_GROUP_BATCH_SIZE = 10;
 export const DEFAULT_BACKERS_GROUP_ADDRESS = "0x1aca75e38263c79d9d4f10df0635cc6fcfe6f026";
 export const DEFAULT_GP_CRC_GROUP_ADDRESS = "0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef";
@@ -285,18 +287,28 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
 
     const cachedAvatars: string[] = [];
     const uncachedAvatars: string[] = [];
+    const seenForScoring = new Set<string>();
 
     for (const avatar of allowedAvatars) {
-      const cachedScore = scoreCache?.getValidScore(avatar, cacheTtlMs);
+      const normalized = normalizeAddress(avatar);
+      if (!normalized) {
+        loggerScores.warn(`Skipping scoring for invalid avatar address: ${avatar}`);
+        continue;
+      }
+
+      const lower = normalized.toLowerCase();
+      if (seenForScoring.has(lower)) {
+        continue;
+      }
+      seenForScoring.add(lower);
+
+      const cachedScore = scoreCache?.getValidScore(normalized, cacheTtlMs);
       if (cachedScore !== undefined) {
-        cachedAvatars.push(avatar);
-        const normalized = normalizeAddress(avatar);
-        if (normalized) {
-          scores[normalized] = cachedScore;
-          totalScored += 1;
-        }
+        cachedAvatars.push(normalized);
+        scores[normalized] = cachedScore;
+        totalScored += 1;
       } else {
-        uncachedAvatars.push(avatar);
+        uncachedAvatars.push(normalized);
       }
     }
 
@@ -313,7 +325,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
         loggerScores.info("Dry-run mode enabled; no avatars to score.");
       } else {
         loggerScores.info(
-          `Dry-run mode enabled; requesting ${scoreBatches.length} relative trust score batch request(s) for ${uncachedAvatars.length} avatar(s).`
+          `Dry-run mode enabled; requesting ${scoreBatches.length} gnosis trust score batch request(s) for ${uncachedAvatars.length} avatar(s).`
         );
       }
     }
@@ -324,7 +336,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
           `Dry-run score batch ${batchIndex + 1}/${scoreBatches.length}: ${batch.length} avatar(s) -> ${batch.join(", ")}.`
         );
       } else {
-        loggerScores.debug(`Requesting relative trust scores for batch ${batchIndex + 1}.`);
+        loggerScores.debug(`Requesting gnosis trust scores for batch ${batchIndex + 1}.`);
       }
 
       const batchScores = await fetchRelativeTrustScoresWithRetry(
@@ -344,14 +356,14 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
 
     if (totalScored === 0) {
       if (dryRun) {
-        logger.info("Dry-run mode enabled; relative trust score service returned no scores.");
+        logger.info("Dry-run mode enabled; gnosis trust score service returned no scores.");
       } else {
-        logger.warn("Relative trust score service returned no scores.");
+        logger.warn("Gnosis trust score service returned no scores.");
       }
     } else {
       const message = dryRun
-        ? `Dry-run mode enabled; received relative scores for ${totalScored} avatar(s).`
-        : `Received relative scores for ${totalScored} avatars.`;
+        ? `Dry-run mode enabled; received gnosis trust scores for ${totalScored} avatar(s).`
+        : `Received gnosis trust scores for ${totalScored} avatars.`;
       logger.info(message);
     }
   } else {
@@ -376,7 +388,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     }
   }
 
-  logger.info(`Addresses with relative score > ${scoreThreshold}: ${aboveThresholdCount}.`);
+  logger.info(`Addresses with gnosis trust score > ${scoreThreshold}: ${aboveThresholdCount}.`);
 
   const targetGroupTrusteesLowercase = new Set(targetGroupTrustees.map((addr) => addr.toLowerCase()));
 
@@ -799,21 +811,22 @@ async function fetchRelativeTrustScoresWithRetry(
       }
 
       logger.warn(
-        `Relative trust score request attempt ${attempt} failed (${formatErrorMessage(error)}). Retrying in ${SCORE_FETCH_RETRY_DELAY_MS} ms.`
+        `Gnosis trust score request attempt ${attempt} failed (${formatErrorMessage(error)}). Retrying in ${SCORE_FETCH_RETRY_DELAY_MS} ms.`
       );
       await wait(SCORE_FETCH_RETRY_DELAY_MS);
     }
   }
 
   /* istanbul ignore next */
-  throw new Error("Failed to fetch relative trust scores after retries.");
+  throw new Error("Failed to fetch gnosis trust scores after retries.");
 }
 
 async function fetchRelativeTrustScores(
   scoringUrl: string,
   avatars: string[],
-  trustedTargets: string[]
+  _trustedTargets: string[]
 ): Promise<Map<string, number>> {
+  const normalizedAvatars = uniqueNormalizedAddresses(avatars);
   const response = await timedFetch(
     scoringUrl,
     {
@@ -823,27 +836,79 @@ async function fetchRelativeTrustScores(
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        avatar_batches: [avatars],
-        target_sets: [trustedTargets]
+        trustees: normalizedAvatars
       })
     },
     SCORE_FETCH_TIMEOUT_MS
   );
 
   if (!response.ok) {
-    throw new Error(`Relative trust score request failed: HTTP ${response.status} ${response.statusText}`);
+    throw new Error(`Gnosis trust score request failed: HTTP ${response.status} ${response.statusText}`);
   }
 
-  const payload = (await response.json()) as RelativeTrustScoreResponse;
-  if (!payload || typeof payload !== "object" || payload.status !== "success" || !payload.batches) {
-    throw new Error("Relative trust score response malformed: missing success status or batches.");
+  const payload = await response.json();
+  const results = parseTrustScorePayload(payload);
+  if (!results) {
+    throw new Error("Gnosis trust score response malformed: expected an array response.");
+  }
+
+  return results;
+}
+
+function parseTrustScorePayload(payload: unknown): Map<string, number> | null {
+  const gnosisScores = parseGnosisTrustScores(payload);
+  if (gnosisScores) {
+    return gnosisScores;
+  }
+
+  return parseLegacyRelativeTrustScores(payload);
+}
+
+function parseGnosisTrustScores(payload: unknown): Map<string, number> | null {
+  if (!Array.isArray(payload)) {
+    return null;
   }
 
   const results = new Map<string, number>();
-  const batches = payload.batches;
 
-  for (const batchKey of Object.keys(batches)) {
-    const entries = batches[batchKey];
+  for (const candidate of payload) {
+    const entry = candidate as GnosisTrustScoreEntry | null;
+    if (!entry || typeof entry !== "object" || typeof entry.address !== "string") {
+      continue;
+    }
+
+    const normalized = normalizeAddress(entry.address);
+    if (!normalized) {
+      continue;
+    }
+
+    const rawScore = typeof entry.gnosis_trust_score === "number"
+      ? entry.gnosis_trust_score
+      : Number(entry.gnosis_trust_score);
+
+    if (!Number.isFinite(rawScore)) {
+      continue;
+    }
+
+    results.set(normalized, rawScore);
+  }
+
+  return results;
+}
+
+function parseLegacyRelativeTrustScores(payload: unknown): Map<string, number> | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const legacyPayload = payload as LegacyRelativeTrustScoreResponse;
+  if (legacyPayload.status !== "success" || !legacyPayload.batches || typeof legacyPayload.batches !== "object") {
+    return null;
+  }
+
+  const results = new Map<string, number>();
+
+  for (const entries of Object.values(legacyPayload.batches)) {
     if (!Array.isArray(entries)) {
       continue;
     }

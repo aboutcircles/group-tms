@@ -68,7 +68,7 @@ describe("gnosis-group helpers", () => {
     expect(resolveScoreThreshold(undefined, logger as any)).toBe(55);
 
     process.env.GNOSIS_GROUP_SCORE_THRESHOLD = "invalid";
-    expect(resolveScoreThreshold(undefined, logger as any)).toBe(100);
+    expect(resolveScoreThreshold(undefined, logger as any)).toBe(80);
     expect(logger.warn).toHaveBeenCalled();
   });
 
@@ -110,33 +110,27 @@ describe("gnosis-group helpers", () => {
     ]);
   });
 
-  it("parses relative trust score responses and skips malformed entries", async () => {
+  it("parses gnosis trust score responses and skips malformed entries", async () => {
     const valid = "0x4000000000000000000000000000000000000004";
     const fetchMock = global.fetch as jest.Mock;
     fetchMock.mockResolvedValue({
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        batches: {
-          "0": [
-            {address: valid, relative_score: 42},
-            {},
-            {address: "not-an-address", relative_score: 99},
-            {address: valid, relative_score: "44"},
-            {address: valid, relative_score: "oops"}
-          ],
-          "1": "invalid-batch"
-        }
-      })
+      json: async () => ([
+        {address: valid, gnosis_trust_score: 42},
+        {},
+        {address: "not-an-address", gnosis_trust_score: 99},
+        {address: valid, gnosis_trust_score: "44"},
+        {address: valid, gnosis_trust_score: "oops"}
+      ])
     });
 
     const results = await fetchRelativeTrustScores("https://scores.local", [valid], [valid]);
     expect(results.get("0x4000000000000000000000000000000000000004")).toBe(44);
   });
 
-  it("throws on non-200 or malformed relative trust score responses", async () => {
+  it("throws on non-200 or malformed gnosis trust score responses", async () => {
     const fetchMock = global.fetch as jest.Mock;
     fetchMock.mockResolvedValueOnce({
       ok: false,
