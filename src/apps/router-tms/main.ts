@@ -52,7 +52,8 @@ const blacklistTimeoutMs = (() => {
   return parsed;
 })();
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
-const enablementStore = new InMemoryRouterEnablementStore();
+const quarantineTtlHours = parseEnvInt("ROUTER_QUARANTINE_TTL_HOURS", 24);
+const enablementStore = new InMemoryRouterEnablementStore([], quarantineTtlHours * 60 * 60 * 1000);
 const errorsBeforeCrash = Math.max(1, parseEnvInt("ERRORS_BEFORE_CRASH", 5));
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
@@ -124,7 +125,9 @@ process.on("uncaughtException", async (error) => {
   rootLogger.error("Uncaught exception:", formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
   try {
     await slackService.notifySlackStartOrCrash(`💥 *router-tms* Uncaught exception: ${error?.message || error}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   process.exit(1);
 });
 
@@ -133,7 +136,9 @@ process.on("unhandledRejection", async (reason) => {
   rootLogger.error("Unhandled rejection:", formatErrorWithCauses(error));
   try {
     await slackService.notifySlackStartOrCrash(`💥 *router-tms* Unhandled rejection: ${error.message}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   process.exit(1);
 });
 
@@ -179,7 +184,7 @@ async function mainLoop(): Promise<void> {
         rootLogger.error(`All ${outcome.failedBatches.length} batch(es) failed — counting as error ${consecutiveErrors} of ${errorsBeforeCrash}`);
         if (errorTracker.shouldAlert()) {
           rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
-          void notifySlackRunError(new Error(`All batches failed: ${outcome.failedBatches.map(fb => fb.error).join("; ")}`), consecutiveErrors).catch(() => {});
+          void notifySlackRunError(new Error(`All batches failed: ${outcome.failedBatches.map(fb => fb.error).join("; ")}`), consecutiveErrors).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
           setTimeout(() => process.exit(1), 3000).unref();
           return;
         }
@@ -210,12 +215,12 @@ async function mainLoop(): Promise<void> {
           `Quarantined ${outcome.quarantinedAddresses.length} address(es) that cause on-chain reverts: ` +
           outcome.quarantinedAddresses.join(", ")
         );
-        void notifySlackQuarantine(outcome.quarantinedAddresses).catch(() => {});
+        void notifySlackQuarantine(outcome.quarantinedAddresses).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
       }
       if (outcome.failedBatches.length > 0) {
         for (const fb of outcome.failedBatches) {
           runLogger.warn(
-            `Failed batch ${fb.batchIndex} (${fb.batchSize} addresses) for base group ${fb.baseGroup}: ${fb.error}`
+            `Failed batch ${fb.batchIndex} (${fb.batchSize} addresses, ${fb.failureType}) for base group ${fb.baseGroup}: ${fb.error}`
           );
         }
       }
@@ -230,7 +235,7 @@ async function mainLoop(): Promise<void> {
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
         rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
-        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        void notifySlackRunError(error, consecutiveErrors).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }
@@ -242,6 +247,24 @@ async function mainLoop(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  if (routerService) {
+    try {
+      await routerService.validateSafeOwnership();
+      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      rootLogger.error(`Safe ownership validation FAILED: ${errorMessage}`);
+      try {
+        await slackService.notifySlackStartOrCrash(
+          `🚨 *Router-TMS Safe ownership check failed*\n\n${errorMessage}`,
+          SlackSeverity.CRITICAL
+        );
+      } catch (slackErr) {
+        rootLogger.warn("Failed to send Slack ownership failure notification:", slackErr);
+      }
+      process.exit(1);
+    }
+  }
   await mainLoop();
 }
 
@@ -321,6 +344,7 @@ function parseEnvInt(name: string, fallback: number): number {
 
   const value = Number.parseInt(raw, 10);
   if (Number.isNaN(value)) {
+    rootLogger.warn(`Invalid integer for ${name}='${raw}', using fallback ${fallback}.`);
     return fallback;
   }
   return value;

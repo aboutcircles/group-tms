@@ -23,12 +23,15 @@ export type Deps = {
   enablementStore: IRouterEnablementStore;
 };
 
+export type FailureType = "safe-level" | "address-specific" | "unknown";
+
 export type FailedBatch = {
   baseGroup: string;
   batchIndex: number;
   batchSize: number;
   addresses: string[];
   error: string;
+  failureType: FailureType;
 };
 
 export type RunOutcome = {
@@ -57,6 +60,22 @@ type BulkTrusteesStats = {
 type BulkTrusteesStatsProvider = {
   getLastBulkTrusteesForTrustersStats: () => BulkTrusteesStats;
 };
+
+/** Safe-level error codes that are NOT address-specific — they affect ALL transactions
+ *  regardless of the addresses in the batch payload.
+ *  - GS013: execTransaction failure when gasPrice=0 and safeTxGas=0
+ *  - GS020-GS026: checkNSignatures signature validation failures
+ *  These should NOT trigger per-address probing or quarantine since every address
+ *  would fail identically. */
+const SAFE_LEVEL_ERROR_CODES = ["GS013", "GS020", "GS021", "GS022", "GS023", "GS024", "GS025", "GS026"];
+const SAFE_LEVEL_PATTERN = new RegExp(SAFE_LEVEL_ERROR_CODES.join("|"));
+
+function isSafeLevelError(err: unknown): boolean {
+  if (err == null) return false;
+  const msg = String((err as any)?.message ?? "");
+  const reason = String((err as any)?.reason ?? "");
+  return SAFE_LEVEL_PATTERN.test(msg) || SAFE_LEVEL_PATTERN.test(reason);
+}
 
 export const DEFAULT_ENABLE_BATCH_SIZE = 10;
 export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
@@ -189,17 +208,23 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   const txHashes: string[] = [];
   let executedEnableCount = 0;
   const failedBatches: FailedBatch[] = [];
-  // Quarantine is per-run and global across base groups. This is safe because each avatar
-  // is assigned to exactly one base group (via buildAvatarBaseGroupAssignments) and cannot
-  // appear in multiple targets. If this invariant changes, quarantine should be keyed by
-  // (baseGroup, address) to avoid cross-group contamination.
-  const quarantined = new Set<string>();
+  // Quarantine is global across base groups. This is safe because each avatar is assigned
+  // to exactly one base group (via buildAvatarBaseGroupAssignments) and cannot appear in
+  // multiple targets. Persisted quarantine with TTL avoids re-probing permanently bad
+  // addresses every run cycle.
+  const persistedQuarantined = new Set(
+    (await enablementStore.loadQuarantinedAddresses()).map(a => a.toLowerCase())
+  );
+  const quarantined = new Set<string>(persistedQuarantined);
+  if (persistedQuarantined.size > 0) {
+    logger.info(`Loaded ${persistedQuarantined.size} previously quarantined address(es).`);
+  }
 
   for (const target of validTargets) {
     const batches = chunkArray(target.addresses, enableBatchSize);
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
       const rawBatch = batches[batchIndex];
-      const batch = rawBatch.filter((addr) => !quarantined.has(addr));
+      const batch = rawBatch.filter((addr) => !quarantined.has(addr.toLowerCase()));
       if (batch.length === 0) {
         logger.info(
           `Skipping batch ${batchIndex + 1}/${batches.length} for base group ${target.baseGroup} — all addresses quarantined.`
@@ -230,7 +255,8 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
               batchIndex: batchIndex + 1,
               batchSize: batch.length,
               addresses: batch,
-              error: errMsg
+              error: errMsg,
+              failureType: "unknown"
             });
           }
         } else {
@@ -248,12 +274,18 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
       txHashes.push(...result.txHashes);
       executedEnableCount += result.enabledCount;
       for (const addr of result.quarantinedInThisBatch) {
-        quarantined.add(addr);
+        quarantined.add(addr.toLowerCase());
       }
       if (result.failedBatchEntry) {
         failedBatches.push(result.failedBatchEntry);
       }
     }
+  }
+
+  // Persist newly quarantined addresses (don't reset TTL on previously known ones)
+  const newlyQuarantined = Array.from(quarantined).filter(a => !persistedQuarantined.has(a));
+  if (newlyQuarantined.length > 0) {
+    await enablementStore.markQuarantined(newlyQuarantined);
   }
 
   return {
@@ -265,7 +297,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     pendingEnableCount,
     executedEnableCount: dryRun ? 0 : executedEnableCount,
     failedBatches,
-    quarantinedAddresses: Array.from(quarantined),
+    quarantinedAddresses: newlyQuarantined,
     dryRun,
     txHashes
   };
@@ -305,6 +337,23 @@ async function executeBatchWithFallback(
       `enableCRCForRouting FAILED (${batchLabel}) for ${batch.length} avatar(s) in base group ${baseGroup}: ${errMsg}`
     );
 
+    // Safe-level errors (e.g. GS026 "Invalid owner") are NOT address-specific.
+    // Probing individual addresses would produce the same error and wrongly
+    // quarantine them all. Fail fast with a clear message instead.
+    if (isSafeLevelError(batchError)) {
+      logger.error(
+        `Safe-level error in ${batchLabel}: ${errMsg}. ` +
+        `This is NOT address-specific — skipping per-address probing. ` +
+        `Check Safe signer configuration (GS026 = signature validation failed, typically signer not an owner or chainId/nonce mismatch).`
+      );
+      return {
+        txHashes: [],
+        enabledCount: 0,
+        quarantinedInThisBatch: [],
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg, failureType: "safe-level"}
+      };
+    }
+
     // No simulation available — record as failed batch (existing behavior)
     if (!routerService.simulateEnableCRCForRouting) {
       logger.error(`Failed batch addresses: ${batch.join(", ")}`);
@@ -312,7 +361,7 @@ async function executeBatchWithFallback(
         txHashes: [],
         enabledCount: 0,
         quarantinedInThisBatch: [],
-        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg}
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg, failureType: "unknown"}
       };
     }
 
@@ -324,7 +373,7 @@ async function executeBatchWithFallback(
         txHashes: [],
         enabledCount: 0,
         quarantinedInThisBatch: newlyQuarantined,
-        failedBatchEntry: {baseGroup, batchIndex, batchSize: 1, addresses: batch, error: errMsg}
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: 1, addresses: batch, error: errMsg, failureType: "address-specific"}
       };
     }
 
@@ -363,7 +412,7 @@ async function executeBatchWithFallback(
         txHashes: [],
         enabledCount: 0,
         quarantinedInThisBatch: newlyQuarantined,
-        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg}
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg, failureType: "address-specific"}
       };
     }
 
@@ -384,7 +433,7 @@ async function executeBatchWithFallback(
         txHashes: [],
         enabledCount: 0,
         quarantinedInThisBatch: newlyQuarantined,
-        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: retryMsg}
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: good.length, addresses: good, error: retryMsg, failureType: "unknown"}
       };
     }
   }
@@ -721,6 +770,7 @@ export const __testables = {
   createIsHumanBatchChecker,
   filterHumanAvatars,
   isBlacklisted,
+  isSafeLevelError,
   normalizeAddress,
   normalizeAddressArray,
   validateEnableTargets

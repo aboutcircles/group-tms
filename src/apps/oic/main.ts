@@ -106,7 +106,9 @@ process.on('SIGINT', () => { void gracefulShutdown('SIGINT'); });
 process.on('uncaughtException', async (err) => {
   try {
     await slackService.notifySlackStartOrCrash(`💥 Uncaught exception: ${err?.message || err}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   rootLogger.error(err);
   process.exit(1);
 });
@@ -114,7 +116,9 @@ process.on('uncaughtException', async (err) => {
 process.on('unhandledRejection', async (reason: any) => {
   try {
     await slackService.notifySlackStartOrCrash(`💥 Unhandled rejection: ${reason?.message || String(reason)}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   rootLogger.error(reason);
   process.exit(1);
 });
@@ -234,7 +238,7 @@ async function loop() {
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
         rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
-        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        void notifySlackRunError(error, consecutiveErrors).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }

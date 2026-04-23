@@ -132,7 +132,9 @@ process.on("uncaughtException", async (error) => {
   rootLogger.error("Uncaught exception:", formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
   try {
     await slackService.notifySlackStartOrCrash(`💥 *gp-crc* Uncaught exception: ${error?.message || error}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   process.exit(1);
 });
 
@@ -141,7 +143,9 @@ process.on("unhandledRejection", async (reason) => {
   rootLogger.error("Unhandled rejection:", formatErrorWithCauses(error));
   try {
     await slackService.notifySlackStartOrCrash(`💥 *gp-crc* Unhandled rejection: ${error.message}`, SlackSeverity.CRITICAL);
-  } catch {}
+  } catch (slackErr) {
+    console.error("Failed to send Slack crash notification:", slackErr);
+  }
   process.exit(1);
 });
 
@@ -197,7 +201,7 @@ async function mainLoop(): Promise<void> {
       rootLogger.error(formatErrorWithCauses(error));
       if (errorTracker.shouldAlert()) {
         rootLogger.error("Consecutive error threshold reached. Exiting with code 1.");
-        void notifySlackRunError(error, consecutiveErrors).catch(() => {});
+        void notifySlackRunError(error, consecutiveErrors).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
         setTimeout(() => process.exit(1), 3000).unref();
         return;
       }
@@ -248,6 +252,24 @@ async function refreshBlacklist(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  if (groupService?.validateSafeOwnership) {
+    try {
+      await groupService.validateSafeOwnership();
+      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      rootLogger.error(`Safe ownership validation FAILED: ${errorMessage}`);
+      try {
+        await slackService.notifySlackStartOrCrash(
+          `🚨 *gp-crc Safe ownership check failed*\n\n${errorMessage}`,
+          SlackSeverity.CRITICAL
+        );
+      } catch (slackErr) {
+        rootLogger.warn("Failed to send Slack ownership failure notification:", slackErr);
+      }
+      process.exit(1);
+    }
+  }
   await mainLoop();
 }
 

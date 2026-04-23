@@ -5,7 +5,6 @@ import {IGroupService} from "../../interfaces/IGroupService";
 import {IAvatarSafeService} from "../../interfaces/IAvatarSafeService";
 import {IAvatarSafeMappingStore} from "../../interfaces/IAvatarSafeMappingStore";
 import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
-import {isTransientRpcError} from "../../services/retryWithBackoff";
 
 export type RunConfig = {
   rpcUrl: string;
@@ -568,11 +567,39 @@ function isRetryableFetchError(error: unknown): boolean {
   return false;
 }
 
-// Use the shared transient error classifier to avoid drift between retry layers.
-// The inner retryWithBackoff in GroupService/SafeTransactionExecutor handles
-// RPC-level transients; this outer retry catches errors that surface after
-// the inner retry is exhausted (e.g. confirmation timeouts).
-const isRetryableTrustError = isTransientRpcError;
+// Trust-layer retry classifier — broader than isTransientRpcError because trust
+// operations surface network-level errors (string codes, bare throws) that the
+// RPC-level classifier doesn't recognise.  CALL_EXCEPTION is explicitly excluded:
+// at this layer it means the tx would revert, not a transient RPC hiccup.
+function isRetryableTrustError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return true; // bare strings/numbers assumed transient
+  }
+
+  const anyError = error as { code?: unknown; message?: unknown };
+  const code = typeof anyError.code === "string" ? anyError.code.toUpperCase() : "";
+  const message = typeof anyError.message === "string" ? anyError.message.toLowerCase() : "";
+
+  if (code === "CALL_EXCEPTION") {
+    return false;
+  }
+
+  if (code.includes("TIMEOUT") || code.includes("NETWORK") || code.includes("SERVER")) {
+    return true;
+  }
+
+  if (
+    message.includes("timeout") ||
+    message.includes("network") ||
+    message.includes("econnreset") ||
+    message.includes("temporarily") ||
+    /\b429\b/.test(message)
+  ) {
+    return true;
+  }
+
+  return false;
+}
 
 function formatErrorMessage(error: unknown): string {
   if (error instanceof Error) {
