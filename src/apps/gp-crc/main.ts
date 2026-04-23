@@ -135,7 +135,6 @@ async function mainLoop(): Promise<void> {
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
     slackService,
     (isLeader) => setLeaderStatus("gp-crc", isLeader)
   );

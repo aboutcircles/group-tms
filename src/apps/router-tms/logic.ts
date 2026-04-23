@@ -35,22 +35,10 @@ export type RunOutcome = {
 };
 
 type EnableTarget = {baseGroup: string; addresses: string[]; source?: "base-group" | "fallback"};
-type HumanityChecker = {
-  isHuman: (address: string) => Promise<boolean>;
-  isHumanBatch: (addresses: string[]) => Promise<Map<string, boolean>>;
-};
-type BulkTrusteesStats = {
-  pagesFetched: number;
-  rowsScanned: number;
-};
-type BulkTrusteesStatsProvider = {
-  getLastBulkTrusteesForTrustersStats: () => BulkTrusteesStats;
-};
 
 export const DEFAULT_ENABLE_BATCH_SIZE = 10;
 export const DEFAULT_FETCH_PAGE_SIZE = 1_000;
 export const DEFAULT_BASE_GROUP_ADDRESS = "0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026";
-const BASE_GROUP_TRUST_QUERY_BATCH_SIZE = 100;
 const HUMANITY_CHECK_BATCH_SIZE = 50;
 
 export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
@@ -73,8 +61,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
 
   const enableBatchSize = Math.max(1, cfg.enableBatchSize ?? DEFAULT_ENABLE_BATCH_SIZE);
   const fetchPageSize = Math.max(1, cfg.fetchPageSize ?? DEFAULT_FETCH_PAGE_SIZE);
-  const humanityChecker = createHumanityChecker(circlesRpc);
-  const {isHuman, isHumanBatch} = humanityChecker;
+  const isHuman = createIsHumanChecker(circlesRpc);
 
   await assertBaseGroupIsGroupAvatar(baseGroupAddress, isHuman, logger);
 
@@ -151,7 +138,6 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   const {validTargets, nonHumanAvatars} = await validateEnableTargets(
     enableTargets,
     isHuman,
-    isHumanBatch,
     baseGroupAddress,
     logger
   );
@@ -313,20 +299,9 @@ function normalizeAddressArray(addresses: string[]): string[] {
   return Array.from(unique);
 }
 
-function getBulkTrusteesStats(circlesRpc: ICirclesRpc): BulkTrusteesStats | undefined {
-  if (
-    "getLastBulkTrusteesForTrustersStats" in circlesRpc &&
-    typeof circlesRpc.getLastBulkTrusteesForTrustersStats === "function"
-  ) {
-    return (circlesRpc as ICirclesRpc & BulkTrusteesStatsProvider).getLastBulkTrusteesForTrustersStats();
-  }
-  return undefined;
-}
-
-function createHumanityChecker(circlesRpc: ICirclesRpc): HumanityChecker {
+function createIsHumanChecker(circlesRpc: ICirclesRpc): (address: string) => Promise<boolean> {
   const cache = new Map<string, Promise<boolean>>();
-
-  const isHuman = async (address: string): Promise<boolean> => {
+  return async (address: string): Promise<boolean> => {
     const normalized = normalizeAddress(address);
     if (!normalized) {
       throw new Error(`Invalid address passed to isHuman check: '${address ?? ""}'`);
@@ -345,52 +320,11 @@ function createHumanityChecker(circlesRpc: ICirclesRpc): HumanityChecker {
     cache.set(normalized, lookup);
     return lookup;
   };
-
-  const isHumanBatch = async (addresses: string[]): Promise<Map<string, boolean>> => {
-    const normalizedAddresses = addresses.map((address) => {
-      const normalized = normalizeAddress(address);
-      if (!normalized) {
-        throw new Error(`Invalid address passed to isHuman check: '${address ?? ""}'`);
-      }
-      return normalized;
-    });
-
-    const missingAddresses = Array.from(
-      new Set(normalizedAddresses.filter((address) => !cache.has(address)))
-    );
-
-    if (missingAddresses.length > 0) {
-      const lookup = circlesRpc.isHumanBatch(missingAddresses);
-      for (const address of missingAddresses) {
-        const verdict = lookup.then((results) => results.get(address) === true).catch((error) => {
-          cache.delete(address);
-          throw error;
-        });
-        cache.set(address, verdict);
-      }
-    }
-
-    const result = new Map<string, boolean>();
-    for (const address of normalizedAddresses) {
-      result.set(address, await isHuman(address));
-    }
-    return result;
-  };
-
-  return {isHuman, isHumanBatch};
-}
-
-function createIsHumanChecker(circlesRpc: ICirclesRpc): (address: string) => Promise<boolean> {
-  return createHumanityChecker(circlesRpc).isHuman;
-}
-
-function createIsHumanBatchChecker(circlesRpc: ICirclesRpc): (addresses: string[]) => Promise<Map<string, boolean>> {
-  return createHumanityChecker(circlesRpc).isHumanBatch;
 }
 
 async function filterHumanAvatars(
   addresses: string[],
-  isHumanBatch: (addresses: string[]) => Promise<Map<string, boolean>>,
+  isHuman: (address: string) => Promise<boolean>,
   batchSize: number
 ): Promise<{humans: string[]; nonHumans: string[]}> {
   const humans: string[] = [];
@@ -398,10 +332,11 @@ async function filterHumanAvatars(
 
   for (let i = 0; i < addresses.length; i += batchSize) {
     const batch = addresses.slice(i, i + batchSize);
-    const verdicts = await isHumanBatch(batch);
+    const verdicts = await Promise.all(batch.map((address) => isHuman(address)));
 
-    for (const address of batch) {
-      if (verdicts.get(address.toLowerCase()) === true) {
+    for (let j = 0; j < batch.length; j += 1) {
+      const address = batch[j];
+      if (verdicts[j]) {
         humans.push(address);
       } else {
         nonHumans.push(address);
@@ -415,7 +350,6 @@ async function filterHumanAvatars(
 async function validateEnableTargets(
   enableTargets: EnableTarget[],
   isHuman: (address: string) => Promise<boolean>,
-  isHumanBatch: (addresses: string[]) => Promise<Map<string, boolean>>,
   defaultBaseGroup: string,
   logger: ILoggerService
 ): Promise<{validTargets: EnableTarget[]; nonHumanAvatars: Set<string>}> {
@@ -435,7 +369,7 @@ async function validateEnableTargets(
       continue;
     }
 
-    const {humans, nonHumans} = await filterHumanAvatars(target.addresses, isHumanBatch, HUMANITY_CHECK_BATCH_SIZE);
+    const {humans, nonHumans} = await filterHumanAvatars(target.addresses, isHuman, HUMANITY_CHECK_BATCH_SIZE);
     nonHumans.forEach((avatar) => nonHumanAvatars.add(avatar));
 
     if (nonHumans.length > 0) {
@@ -475,39 +409,9 @@ async function buildAvatarBaseGroupAssignments(
   const normalizedBaseGroups = normalizeAddressArray(baseGroups);
   logger.info(`Fetched ${normalizedBaseGroups.length} base group(s).`);
 
-  const baseGroupBatches = chunkArray(normalizedBaseGroups, BASE_GROUP_TRUST_QUERY_BATCH_SIZE);
-  logger.info(
-    `Fetching trustees for ${normalizedBaseGroups.length} base group(s) across ${baseGroupBatches.length} trust-query batch(es).`
-  );
-
-  const trusteesByBaseGroup = new Map<string, string[]>();
-  let totalPagesFetched = 0;
-  let totalRowsScanned = 0;
-
-  for (const batch of baseGroupBatches) {
-    const trusteesByTruster = await circlesRpc.fetchAllTrusteesForTrusters(batch);
-    const stats = getBulkTrusteesStats(circlesRpc);
-    totalPagesFetched += stats?.pagesFetched ?? 0;
-
-    if (stats) {
-      totalRowsScanned += stats.rowsScanned;
-    } else {
-      totalRowsScanned += Array.from(trusteesByTruster.values()).reduce((sum, trustees) => sum + trustees.length, 0);
-    }
-
-    for (const baseGroup of batch) {
-      trusteesByBaseGroup.set(baseGroup, trusteesByTruster.get(baseGroup) ?? []);
-    }
-  }
-
-  logger.info(
-    `Fetched trustee rows for base groups across ${baseGroupBatches.length} trust-query batch(es), ` +
-      `${totalPagesFetched} page(s), and ${totalRowsScanned} trustee row(s).`
-  );
-
   const assignment = new Map<string, string>();
   for (const baseGroup of normalizedBaseGroups) {
-    const trustees = trusteesByBaseGroup.get(baseGroup) ?? [];
+    const trustees = await circlesRpc.fetchAllTrustees(baseGroup);
     const normalizedTrustees = normalizeAddressArray(trustees);
     logger.info(`Base group ${baseGroup} has ${normalizedTrustees.length} trustee(s).`);
     for (const trustee of normalizedTrustees) {
@@ -553,17 +457,3 @@ function buildBaseGroupEnableTargets(
 
   return {targets, scheduledAvatars};
 }
-
-export const __testables = {
-  buildAvatarBaseGroupAssignments,
-  buildBaseGroupEnableTargets,
-  chunkArray,
-  createHumanityChecker,
-  createIsHumanChecker,
-  createIsHumanBatchChecker,
-  filterHumanAvatars,
-  isBlacklisted,
-  normalizeAddress,
-  normalizeAddressArray,
-  validateEnableTargets
-};

@@ -272,6 +272,16 @@ export async function runOnce(
     .map((lower) => currentTrusteesMap.get(lower))
     .filter((address): address is string => !!address);
 
+  const untrustLowerSet = new Set(avatarsToUntrust.map((a) => a.toLowerCase()));
+  for (const avatar of safeReassignmentUntrustedAvatars) {
+    const lower = avatar.toLowerCase();
+    if (currentTrustedLowerSet.has(lower) && !untrustLowerSet.has(lower)) {
+      const normalizedAddress = currentTrusteesMap.get(lower) || avatar;
+      avatarsToUntrust.push(normalizedAddress);
+      untrustLowerSet.add(lower);
+    }
+  }
+
   const alreadyTrustedFromEvents = allowedAvatars
     .filter((avatar) => eligibleLowerSet.has(avatar.toLowerCase()))
     .filter((avatar) => currentTrustedLowerSet.has(avatar.toLowerCase()));
@@ -472,7 +482,6 @@ async function trustBatchWithRetry(
     }
   }
 
-  /* istanbul ignore next */
   throw new Error("Failed to trust batch after retries");
 }
 
@@ -499,7 +508,6 @@ async function untrustBatchWithRetry(
     }
   }
 
-  /* istanbul ignore next */
   throw new Error("Failed to untrust batch after retries");
 }
 
@@ -522,7 +530,6 @@ async function fetchBlacklistVerdictsWithRetry(
     }
   }
 
-  /* istanbul ignore next */
   throw new Error("Failed to fetch blacklist verdicts after retries");
 }
 
@@ -630,15 +637,3 @@ function toComparableBigInt(value: string): bigint | null {
 
   return null;
 }
-
-export const __testables = {
-  compareTimestamp,
-  formatErrorMessage,
-  isBlacklisted,
-  isRetryableFetchError,
-  isRetryableTrustError,
-  normalizeAddress,
-  normalizeSwitchCount,
-  toComparableBigInt,
-  uniqueNormalizedAddresses
-};

@@ -14,8 +14,6 @@ import {
   DEFAULT_SCORE_THRESHOLD,
   DEFAULT_GROUP_BATCH_SIZE,
   FIXED_AUTO_TRUST_GROUP_ADDRESSES,
-  HISTORIC_AUTO_TRUST_GROUP_ADDRESS,
-  HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER,
   DEFAULT_SCORE_CACHE_TTL_MS,
   RunOutcome
 } from "./logic";
@@ -97,8 +95,6 @@ rootLogger.info(`  - scoreBatchSize=${scoreBatchSize}`);
 rootLogger.info(`  - scoreThreshold=${scoreThreshold}`);
 rootLogger.info(`  - groupBatchSize=${groupBatchSize}`);
 rootLogger.info(`  - fixedAutoTrustGroupAddresses=${FIXED_AUTO_TRUST_GROUP_ADDRESSES.join(",")}`);
-rootLogger.info(`  - historicAutoTrustGroupAddress=${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}`);
-rootLogger.info(`  - historicAutoTrustGroupBlockNumber=${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}`);
 rootLogger.info(`  - safeAddress=${safeAddress || "(not set)"}`);
 rootLogger.info(`  - safeSignerPrivateKeyConfigured=${safeSignerPrivateKey.trim().length > 0}`);
 rootLogger.info(`  - dryRun=${dryRun}`);
@@ -139,14 +135,12 @@ async function mainLoop(): Promise<void> {
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
     slackService,
     (isLeader) => setLeaderStatus("gnosis-group", isLeader)
   );
   const maxDelay = Math.min(runIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = runIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
-  let historicAutoTrustSnapshotMembers: string[] | null = null;
 
   while (true) {
     const runStartedAt = Date.now();
@@ -158,9 +152,6 @@ async function mainLoop(): Promise<void> {
         logger: rootLogger
       });
       if (!isHealthy) { await delay(currentDelay); continue; }
-      if (historicAutoTrustSnapshotMembers === null) {
-        historicAutoTrustSnapshotMembers = await loadHistoricAutoTrustSnapshotMembers();
-      }
       await refreshBlacklist();
       const outcome = await runOnce(
         {
@@ -170,11 +161,7 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           scoreCache
         },
-        {
-          ...config,
-          dryRun: effectiveDryRun,
-          historicAutoTrustSnapshotMembers
-        }
+        { ...config, dryRun: effectiveDryRun }
       );
 
       await stateStore?.save("gnosis-group", 0, { lastSuccessfulRunAt: new Date().toISOString() });
@@ -209,20 +196,6 @@ async function mainLoop(): Promise<void> {
       rootLogger.info("Run interval elapsed; starting next run immediately.");
     }
   }
-}
-
-async function loadHistoricAutoTrustSnapshotMembers(): Promise<string[]> {
-  runLogger.info(
-    `Loading historical auto-trust snapshot ${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}@${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}.`
-  );
-  const members = await circlesRpc.fetchActiveGroupMembersAtBlock(
-    HISTORIC_AUTO_TRUST_GROUP_ADDRESS,
-    HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER
-  );
-  runLogger.info(
-    `Loaded ${members.length} historical auto-trust snapshot member(s) from ${HISTORIC_AUTO_TRUST_GROUP_ADDRESS}@${HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER}.`
-  );
-  return members;
 }
 
 function delay(ms: number): Promise<void> {
