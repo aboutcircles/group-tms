@@ -220,6 +220,11 @@ async function loop() {
       await stateStore?.save("oic", state.lastSafeHeadScanned);
       recordRunSuccess("oic", Date.now() - runStartedAt);
       errorTracker.recordSuccess();
+      if (errorTracker.wasAlertingAndRecovered()) {
+        slackService.notifySlackResolved("OIC").catch((err) => {
+          rootLogger.warn("Failed to send Slack resolved notification:", err);
+        });
+      }
       currentDelay = pollIntervalMs;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
