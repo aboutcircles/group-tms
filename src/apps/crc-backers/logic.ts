@@ -487,7 +487,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunResult> {
           const reason = `OrderNotYetFilled for ${event.circlesBackingInstance} after our deadline calc; will re-check later.`;
           LOG.info(reason);
           await slackService.notifyBackingNotCompleted(event, reason);
-          break; // fall through to reset below
+          continue; // skip this instance — order expired unfilled, reset would be pointless
         }
         case "BackingAssetBalanceInsufficient": {
           const reason = "BackingAssetBalanceInsufficient - backing asset balance insufficient after filled order";

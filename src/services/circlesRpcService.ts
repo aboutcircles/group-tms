@@ -4,8 +4,26 @@ import {ICirclesRpc, BackingCompletedEvent, BackingInitiatedEvent} from "../inte
 import {ILoggerService} from "../interfaces/ILoggerService";
 import {primaryRpcUrl} from "./rpcProvider";
 
+const PAGE_DELAY_MS = Math.max(50, Number(process.env.CIRCLES_RPC_PAGE_DELAY_MS) || 100);
+const MAX_PAGES = 500;
+const PAGE_TIMEOUT_MS = 30_000;
 const CIRCLES_EVENTS_RESULT_LIMIT = 100;
 const DEFAULT_TRUST_QUERY_PAGE_SIZE = 1000;
+const MAX_EVENT_RECURSION_DEPTH = 10;
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`RPC page request timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
 
 export type BulkTrusteesForTrustersStats = {
   pagesFetched: number;
@@ -46,14 +64,20 @@ export class CirclesRpcService implements ICirclesRpc {
     const trusterLc = truster.toLowerCase();
     const query = this.rpc.trust.getTrustRelations(trusterLc, DEFAULT_TRUST_QUERY_PAGE_SIZE);
     const allTrustees: string[] = [];
+    let pages = 0;
 
-    while (await query.queryNextPage()) {
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
+      pages++;
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
         if (row.truster.toLowerCase() === trusterLc) {
           allTrustees.push(row.trustee.toLowerCase());
         }
       }
+      await delay(PAGE_DELAY_MS);
+    }
+    if (pages >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchAllTrustees for ${trusterLc}: hit ${MAX_PAGES}-page cap — result may be truncated`);
     }
 
     return allTrustees;
@@ -119,7 +143,7 @@ export class CirclesRpcService implements ICirclesRpc {
       limit: pageSize
     });
 
-    while (await query.queryNextPage()) {
+    while (this.lastBulkTrusteesForTrustersStats.pagesFetched < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
       this.lastBulkTrusteesForTrustersStats.pagesFetched += 1;
       const rows = query.currentPage?.results ?? [];
       this.lastBulkTrusteesForTrustersStats.rowsScanned += rows.length;
@@ -136,6 +160,10 @@ export class CirclesRpcService implements ICirclesRpc {
 
         trusteesByTruster.get(normalizedTruster)?.push(row.trustee.toLowerCase());
       }
+      await delay(PAGE_DELAY_MS);
+    }
+    if (this.lastBulkTrusteesForTrustersStats.pagesFetched >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchAllTrusteesForTrusters: hit ${MAX_PAGES}-page cap — result may be truncated (${normalizedTrusters.length} trusters)`);
     }
 
     return trusteesByTruster;
@@ -175,8 +203,10 @@ export class CirclesRpcService implements ICirclesRpc {
     const members: string[] = [];
     const seen = new Set<string>();
     const blockTimestampBigInt = BigInt(blockTimestamp);
+    let pages = 0;
 
-    while (await query.queryNextPage()) {
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
+      pages++;
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
         if (typeof row.member !== "string" || typeof row.expiryTime !== "string") {
@@ -204,6 +234,10 @@ export class CirclesRpcService implements ICirclesRpc {
         seen.add(normalizedMember);
         members.push(normalizedMember);
       }
+      await delay(PAGE_DELAY_MS);
+    }
+    if (pages >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchActiveGroupMembersAtBlock for ${normalizedGroupAddress} at block ${blockNumber}: hit ${MAX_PAGES}-page cap — result may be truncated`);
     }
 
     return members;
@@ -236,23 +270,28 @@ export class CirclesRpcService implements ICirclesRpc {
   }
 
   private mapEvents<T>(rawEvents: any[]): T[] {
-    return rawEvents.map((e: any) => ({
-      $event: e.event,
-      blockNumber: typeof e.values?.blockNumber === "string"
-        ? parseInt(e.values.blockNumber, 16) : e.values?.blockNumber,
-      timestamp: typeof e.values?.timestamp === "string"
-        ? parseInt(e.values.timestamp, 16) : e.values?.timestamp,
-      transactionIndex: typeof e.values?.transactionIndex === "string"
-        ? parseInt(e.values.transactionIndex, 16) : e.values?.transactionIndex,
-      logIndex: typeof e.values?.logIndex === "string"
-        ? parseInt(e.values.logIndex, 16) : e.values?.logIndex,
-      transactionHash: e.values?.transactionHash,
-      ...Object.fromEntries(
+    return rawEvents.map((e: any) => {
+      const extra = Object.fromEntries(
         Object.entries(e.values ?? {}).filter(
           ([k]) => !["blockNumber", "timestamp", "transactionIndex", "logIndex", "transactionHash"].includes(k)
         )
-      ),
-    })) as T[];
+      );
+      const parseHex = (val: unknown): number | undefined => {
+        if (typeof val === "number") return Number.isFinite(val) ? val : undefined;
+        if (typeof val !== "string") return undefined;
+        const parsed = parseInt(val, 16);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
+      return {
+        ...extra,
+        $event: e.event,
+        blockNumber: parseHex(e.values?.blockNumber),
+        timestamp: parseHex(e.values?.timestamp),
+        transactionIndex: parseHex(e.values?.transactionIndex),
+        logIndex: parseHex(e.values?.logIndex),
+        transactionHash: e.values?.transactionHash,
+      };
+    }) as T[];
   }
 
   private async fetchEventsRecursive<T>(
@@ -260,9 +299,17 @@ export class CirclesRpcService implements ICirclesRpc {
     fromBlock: number,
     toBlock: number,
     eventTypes: string[],
+    depth: number = 0,
   ): Promise<T[]> {
-    const rawEvents = await this.fetchEventsPage(emitterAddress, fromBlock, toBlock, eventTypes);
+    const rawEvents = await withTimeout(
+      this.fetchEventsPage(emitterAddress, fromBlock, toBlock, eventTypes),
+      PAGE_TIMEOUT_MS
+    );
     if (rawEvents.length < CIRCLES_EVENTS_RESULT_LIMIT || fromBlock >= toBlock) {
+      return this.mapEvents<T>(rawEvents);
+    }
+    if (depth >= MAX_EVENT_RECURSION_DEPTH) {
+      console.warn(`[CirclesRpc] fetchEventsRecursive: hit depth cap (${MAX_EVENT_RECURSION_DEPTH}) with ${rawEvents.length} events in range [${fromBlock}, ${toBlock}] — events beyond the first ${CIRCLES_EVENTS_RESULT_LIMIT} in this range are LOST`);
       return this.mapEvents<T>(rawEvents);
     }
 
@@ -271,10 +318,11 @@ export class CirclesRpcService implements ICirclesRpc {
       return this.mapEvents<T>(rawEvents);
     }
 
-    const [left, right] = await Promise.all([
-      this.fetchEventsRecursive<T>(emitterAddress, fromBlock, midpoint, eventTypes),
-      this.fetchEventsRecursive<T>(emitterAddress, midpoint + 1, toBlock, eventTypes),
-    ]);
+    // Sequential to avoid 429 amplification from geometric parallel expansion
+    await delay(PAGE_DELAY_MS);
+    const left = await this.fetchEventsRecursive<T>(emitterAddress, fromBlock, midpoint, eventTypes, depth + 1);
+    await delay(PAGE_DELAY_MS);
+    const right = await this.fetchEventsRecursive<T>(emitterAddress, midpoint + 1, toBlock, eventTypes, depth + 1);
 
     return [...left, ...right];
   }
@@ -352,13 +400,19 @@ export class CirclesRpcService implements ICirclesRpc {
     });
 
     const groups = new Set<string>();
-    while (await query.queryNextPage()) {
+    let pages = 0;
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
+      pages++;
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
         if (typeof row.group === "string" && row.group.length > 0) {
-          groups.add(row.group);
+          groups.add(row.group.toLowerCase());
         }
       }
+      await delay(PAGE_DELAY_MS);
+    }
+    if (pages >= MAX_PAGES) {
+      console.warn(`[CirclesRpc] fetchAllBaseGroups: hit ${MAX_PAGES}-page cap — result may be truncated`);
     }
 
     return Array.from(groups);
@@ -375,8 +429,9 @@ export class CirclesRpcService implements ICirclesRpc {
 
     const avatars: string[] = [];
     let pages = 0;
+    let skipped = 0;
 
-    while (await query.queryNextPage()) {
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
       pages++;
       const rows = query.currentPage?.results ?? [];
       for (const row of rows) {
@@ -384,12 +439,20 @@ export class CirclesRpcService implements ICirclesRpc {
           try {
             avatars.push(getAddress(row.avatar).toLowerCase());
           } catch {
-            // skip invalid addresses
+            skipped++;
           }
         }
       }
+      await delay(PAGE_DELAY_MS);
     }
 
+    if (pages >= MAX_PAGES) {
+      const msg = `fetchAllHumanAvatars: hit ${MAX_PAGES}-page cap — result may be truncated (${avatars.length} avatars so far)`;
+      logger?.warn(msg) ?? console.warn(`[CirclesRpc] ${msg}`);
+    }
+    if (skipped > 0) {
+      logger?.warn(`Skipped ${skipped} invalid avatar address(es) from RPC.`);
+    }
     logger?.info(`Fetched ${avatars.length} avatars from RegisterHuman table across ${pages} page(s).`);
     return avatars;
   }

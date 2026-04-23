@@ -507,6 +507,125 @@ describe("CirclesRpcService", () => {
   });
 
   // ────────────────────────────────────────────────────────────────────────
+  // Pagination guards: page cap, timeout, delay
+  // ────────────────────────────────────────────────────────────────────────
+  describe("pagination guards", () => {
+    it("fetchAllTrustees stops at MAX_PAGES (500) even if RPC keeps returning pages", async () => {
+      jest.useFakeTimers();
+
+      const truster = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      let callCount = 0;
+      const infiniteQuery = {
+        queryNextPage: jest.fn(async () => {
+          callCount++;
+          return true; // always has more pages
+        }),
+        get currentPage() {
+          return { results: [{ truster, trustee: `0x${callCount.toString().padStart(40, "0")}` }] };
+        },
+      };
+      mockGetTrustRelations.mockReturnValueOnce(infiniteQuery);
+
+      const svc = buildService();
+      const promise = svc.fetchAllTrustees("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+      await jest.runAllTimersAsync();
+      const trustees = await promise;
+
+      expect(infiniteQuery.queryNextPage).toHaveBeenCalledTimes(500);
+      expect(trustees).toHaveLength(500);
+
+      jest.useRealTimers();
+    });
+
+    it("fetchAllTrusteesForTrusters stops at MAX_PAGES", async () => {
+      jest.useFakeTimers();
+
+      let callCount = 0;
+      const truster = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+      nextPagedQueryMock = {
+        queryNextPage: jest.fn(async () => {
+          callCount++;
+          return true;
+        }),
+        get currentPage() {
+          return { results: [{ truster, trustee: `0x${callCount.toString().padStart(40, "0")}` }] };
+        },
+      } as any;
+
+      const svc = buildService();
+      const promise = svc.fetchAllTrusteesForTrusters([truster]);
+      await jest.runAllTimersAsync();
+      const result = await promise;
+
+      expect(result.get(truster)!.length).toBe(500);
+      expect(svc.getLastBulkTrusteesForTrustersStats().pagesFetched).toBe(500);
+
+      jest.useRealTimers();
+    });
+
+    it("fetchAllBaseGroups normalizes group addresses to lowercase", async () => {
+      mockGetGroups.mockReturnValueOnce(
+        makeMockPagedQuery([
+          [{ group: "0xAbCdEf1234567890AbCdEf1234567890AbCdEf12" }],
+        ]),
+      );
+
+      const svc = buildService();
+      const groups = await svc.fetchAllBaseGroups();
+      expect(groups).toEqual(["0xabcdef1234567890abcdef1234567890abcdef12"]);
+    });
+
+    it("fetchAllHumanAvatars warns about skipped invalid addresses via logger", async () => {
+      nextPagedQueryMock = makeMockPagedQuery([
+        [
+          { avatar: "0x1111111111111111111111111111111111111111" },
+          { avatar: "invalid-addr" },
+          { avatar: "also-bad" },
+        ],
+      ]);
+      const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+
+      const svc = buildService();
+      await svc.fetchAllHumanAvatars(1000, mockLogger as any);
+      expect(mockLogger.warn).toHaveBeenCalledWith("Skipped 2 invalid avatar address(es) from RPC.");
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
+  // mapEvents spread order: core fields override extras
+  // ────────────────────────────────────────────────────────────────────────
+  describe("mapEvents spread order", () => {
+    it("core fields (blockNumber, timestamp, etc.) are not overridden by extras with same name", async () => {
+      mockClientCall.mockResolvedValueOnce({
+        events: [
+          {
+            event: "CrcV2_CirclesBackingCompleted",
+            values: {
+              blockNumber: "0xa",
+              timestamp: "0xb",
+              transactionIndex: "0xc",
+              logIndex: "0xd",
+              transactionHash: "0xtxhash",
+              backer: "0xbacker",
+              circlesBackingInstance: "0xinst",
+              lbp: "0xlbp",
+              emitter: "0xemitter",
+            },
+          },
+        ],
+      });
+
+      const svc = buildService();
+      const events = await svc.fetchBackingCompletedEvents(FACTORY, 1, 999);
+      // Core fields should be parsed numbers, not the raw hex strings
+      expect(events[0].blockNumber).toBe(10);
+      expect(events[0].timestamp).toBe(11);
+      expect(events[0].transactionIndex).toBe(12);
+      expect(events[0].logIndex).toBe(13);
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────────
   // Edge cases: multiple events in single response
   // ────────────────────────────────────────────────────────────────────────
   describe("backing events — multiple events in response", () => {
