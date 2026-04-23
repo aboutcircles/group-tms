@@ -10,6 +10,7 @@ const PAGE_TIMEOUT_MS = 30_000;
 const CIRCLES_EVENTS_RESULT_LIMIT = 100;
 const DEFAULT_TRUST_QUERY_PAGE_SIZE = 1000;
 const MAX_EVENT_RECURSION_DEPTH = 10;
+const WARNING_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -32,13 +33,24 @@ export type BulkTrusteesForTrustersStats = {
 
 export class CirclesRpcService implements ICirclesRpc {
   private readonly rpc: CirclesRpc;
+  private readonly onWarning: (msg: string) => void;
   private lastBulkTrusteesForTrustersStats: BulkTrusteesForTrustersStats = {
     pagesFetched: 0,
     rowsScanned: 0
   };
 
-  constructor(rpcUrl: string) {
+  constructor(rpcUrl: string, onWarning?: (msg: string) => void) {
     this.rpc = new CirclesRpc(primaryRpcUrl(rpcUrl));
+    const rawWarning = onWarning ?? ((msg) => console.warn(`[CirclesRpc] ${msg}`));
+    const lastWarningAt = new Map<string, number>();
+    this.onWarning = (msg) => {
+      const key = msg.split(":")[0]; // dedupe by method name prefix
+      const now = Date.now();
+      const last = lastWarningAt.get(key) ?? 0;
+      if (now - last < WARNING_COOLDOWN_MS) return;
+      lastWarningAt.set(key, now);
+      rawWarning(msg);
+    };
   }
 
   async isHuman(address: string): Promise<boolean> {
@@ -77,7 +89,7 @@ export class CirclesRpcService implements ICirclesRpc {
       await delay(PAGE_DELAY_MS);
     }
     if (pages >= MAX_PAGES) {
-      console.warn(`[CirclesRpc] fetchAllTrustees for ${trusterLc}: hit ${MAX_PAGES}-page cap — result may be truncated`);
+      this.onWarning(`fetchAllTrustees for ${trusterLc}: hit ${MAX_PAGES}-page cap — result may be truncated`);
     }
 
     return allTrustees;
@@ -163,7 +175,7 @@ export class CirclesRpcService implements ICirclesRpc {
       await delay(PAGE_DELAY_MS);
     }
     if (this.lastBulkTrusteesForTrustersStats.pagesFetched >= MAX_PAGES) {
-      console.warn(`[CirclesRpc] fetchAllTrusteesForTrusters: hit ${MAX_PAGES}-page cap — result may be truncated (${normalizedTrusters.length} trusters)`);
+      this.onWarning(`fetchAllTrusteesForTrusters: hit ${MAX_PAGES}-page cap — result may be truncated (${normalizedTrusters.length} trusters)`);
     }
 
     return trusteesByTruster;
@@ -237,7 +249,7 @@ export class CirclesRpcService implements ICirclesRpc {
       await delay(PAGE_DELAY_MS);
     }
     if (pages >= MAX_PAGES) {
-      console.warn(`[CirclesRpc] fetchActiveGroupMembersAtBlock for ${normalizedGroupAddress} at block ${blockNumber}: hit ${MAX_PAGES}-page cap — result may be truncated`);
+      this.onWarning(`fetchActiveGroupMembersAtBlock for ${normalizedGroupAddress} at block ${blockNumber}: hit ${MAX_PAGES}-page cap — result may be truncated`);
     }
 
     return members;
@@ -309,7 +321,7 @@ export class CirclesRpcService implements ICirclesRpc {
       return this.mapEvents<T>(rawEvents);
     }
     if (depth >= MAX_EVENT_RECURSION_DEPTH) {
-      console.warn(`[CirclesRpc] fetchEventsRecursive: hit depth cap (${MAX_EVENT_RECURSION_DEPTH}) with ${rawEvents.length} events in range [${fromBlock}, ${toBlock}] — events beyond the first ${CIRCLES_EVENTS_RESULT_LIMIT} in this range are LOST`);
+      this.onWarning(`fetchEventsRecursive: hit depth cap (${MAX_EVENT_RECURSION_DEPTH}) with ${rawEvents.length} events in range [${fromBlock}, ${toBlock}] — events beyond the first ${CIRCLES_EVENTS_RESULT_LIMIT} in this range are LOST`);
       return this.mapEvents<T>(rawEvents);
     }
 
@@ -412,7 +424,7 @@ export class CirclesRpcService implements ICirclesRpc {
       await delay(PAGE_DELAY_MS);
     }
     if (pages >= MAX_PAGES) {
-      console.warn(`[CirclesRpc] fetchAllBaseGroups: hit ${MAX_PAGES}-page cap — result may be truncated`);
+      this.onWarning(`fetchAllBaseGroups: hit ${MAX_PAGES}-page cap — result may be truncated`);
     }
 
     return Array.from(groups);
@@ -448,7 +460,7 @@ export class CirclesRpcService implements ICirclesRpc {
 
     if (pages >= MAX_PAGES) {
       const msg = `fetchAllHumanAvatars: hit ${MAX_PAGES}-page cap — result may be truncated (${avatars.length} avatars so far)`;
-      logger?.warn(msg) ?? console.warn(`[CirclesRpc] ${msg}`);
+      this.onWarning(msg);
     }
     if (skipped > 0) {
       logger?.warn(`Skipped ${skipped} invalid avatar address(es) from RPC.`);

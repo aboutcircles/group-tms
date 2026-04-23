@@ -49,10 +49,13 @@ if (!dryRun) {
 }
 
 // Concrete services
-const circlesRpc = new CirclesRpcService(rpcUrl);
+const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
+const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
+  console.warn(`[CirclesRpc] ${msg}`);
+  void slackService.notifySlackStartOrCrash(`⚠️ *crc-backers* pagination cap: ${msg}`, SlackSeverity.WARNING).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
+});
 const chainRpc = new ChainRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
-const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const groupService = (!dryRun || canSimulateTransactions)
   ? new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress, txRpcUrl)
   : undefined;

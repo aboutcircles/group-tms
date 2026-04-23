@@ -56,6 +56,8 @@ export async function retryWithBackoff<T>(
         throw err;
       }
       const delayMs = baseDelayMs * Math.pow(2, attempt);
+      const errMsg = (err as any)?.message ?? String(err);
+      console.warn(`[RPC_RETRY] attempt ${attempt + 1}/${maxRetries}, waiting ${delayMs}ms — ${errMsg}`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
