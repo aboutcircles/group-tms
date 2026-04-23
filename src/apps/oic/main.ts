@@ -146,6 +146,7 @@ async function loop() {
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
+    rootLogger.child("leader-election"),
     slackService,
     (isLeader) => setLeaderStatus("oic", isLeader)
   );

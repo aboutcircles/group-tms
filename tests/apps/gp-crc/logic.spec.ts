@@ -1,5 +1,5 @@
 import {getAddress} from "ethers";
-import {runOnce, type Deps, type RunConfig} from "../../../src/apps/gp-crc/logic";
+import {runOnce, type Deps, type RunConfig, __testables} from "../../../src/apps/gp-crc/logic";
 import {
   FakeAvatarSafeService,
   FakeAvatarSafeMappingStore,
@@ -8,6 +8,18 @@ import {
   FakeGroupService,
   FakeLogger
 } from "../../../fakes/fakes";
+
+const {
+  compareTimestamp,
+  formatErrorMessage,
+  isBlacklisted,
+  isRetryableFetchError,
+  isRetryableTrustError,
+  normalizeAddress,
+  normalizeSwitchCount,
+  toComparableBigInt,
+  uniqueNormalizedAddresses
+} = __testables;
 
 const RPC_URL = "https://rpc.stub";
 const GROUP_ADDRESS = "0x1000000000000000000000000000000000000000";
@@ -401,5 +413,468 @@ describe("gp-crc runOnce (query-based)", () => {
       trustedTimestamp: "300",
       switchCount: 2
     });
+  });
+
+  it("returns early when neither human avatars nor trustees produce evaluation candidates", async () => {
+    const circlesRpc = new FakeCirclesRpc();
+    const outcome = await runOnce(makeDeps({circlesRpc}), makeConfig({dryRun: true, fetchPageSize: 0, groupBatchSize: 0}));
+
+    expect(outcome.uniqueAvatarCount).toBe(0);
+    expect(outcome.allowedAvatars).toEqual([]);
+    expect(outcome.trustedAvatars).toEqual([]);
+  });
+
+  it("uses default fetch and batch sizes when config leaves them undefined", async () => {
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = ["0x6767000000000000000000000000000000000000"];
+
+    const outcome = await runOnce(
+      makeDeps({circlesRpc}),
+      makeConfig({dryRun: true, fetchPageSize: undefined, groupBatchSize: undefined})
+    );
+
+    expect(outcome.uniqueAvatarCount).toBe(1);
+  });
+
+  it("ignores invalid trustee addresses returned from the group service", async () => {
+    const validAvatar = "0x6666000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [validAvatar];
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = ["bad-address"];
+
+    const outcome = await runOnce(makeDeps({circlesRpc}), makeConfig({dryRun: true}));
+
+    expect(outcome.allowedAvatars).toEqual([getAddress(validAvatar)]);
+  });
+
+  it("updates safe state when the same avatar remains selected for a safe", async () => {
+    const avatarInput = "0x7777000000000000000000000000000000000000";
+    const sharedSafe = "0xSAFE000000000000000000000000000000000777";
+    const avatar = getAddress(avatarInput);
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+    const avatarSafeService = new FakeAvatarSafeService({
+      [avatarInput]: {safe: sharedSafe, timestamp: "2025-03-01T00:00:00.000Z"}
+    });
+    const mappingStore = new FakeAvatarSafeMappingStore(
+      {[avatarInput]: sharedSafe},
+      {
+        [sharedSafe]: {
+          trustedAvatar: avatar,
+          trustedTimestamp: "2025-02-01T00:00:00.000Z",
+          switchCount: Number.NaN
+        }
+      }
+    );
+
+    await runOnce(
+      makeDeps({circlesRpc, avatarSafeService, avatarSafeMappingStore: mappingStore}),
+      makeConfig({dryRun: true})
+    );
+
+    expect(mappingStore.getSavedSafeTrustState().get(sharedSafe)).toEqual({
+      trustedAvatar: avatar,
+      trustedTimestamp: "2025-03-01T00:00:00.000Z",
+      switchCount: 0
+    });
+  });
+
+  it("keeps the previous trusted timestamp when the same avatar is selected with an older timestamp", async () => {
+    const avatarInput = "0x7878000000000000000000000000000000000001";
+    const sharedSafe = "0xSAFE000000000000000000000000000000000781";
+    const avatar = getAddress(avatarInput);
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+    const avatarSafeService = new FakeAvatarSafeService({
+      [avatarInput]: {safe: sharedSafe, timestamp: "100"}
+    });
+    const mappingStore = new FakeAvatarSafeMappingStore(
+      {[avatarInput]: sharedSafe},
+      {
+        [sharedSafe]: {
+          trustedAvatar: avatar,
+          trustedTimestamp: "200",
+          switchCount: 1
+        }
+      }
+    );
+
+    await runOnce(
+      makeDeps({circlesRpc, avatarSafeService, avatarSafeMappingStore: mappingStore}),
+      makeConfig({dryRun: true})
+    );
+
+    expect(mappingStore.getSavedSafeTrustState().get(sharedSafe)).toEqual({
+      trustedAvatar: avatar,
+      trustedTimestamp: "200",
+      switchCount: 1
+    });
+  });
+
+  it("preserves the existing switch count when the same avatar stays trusted without a prior timestamp", async () => {
+    const avatarInput = "0x7979000000000000000000000000000000000000";
+    const sharedSafe = "0xSAFE000000000000000000000000000000000779";
+    const avatar = getAddress(avatarInput);
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+    const avatarSafeService = new FakeAvatarSafeService({
+      [avatarInput]: {safe: sharedSafe, timestamp: "250"}
+    });
+    const mappingStore = new FakeAvatarSafeMappingStore(
+      {[avatarInput]: sharedSafe},
+      {
+        [sharedSafe]: {
+          trustedAvatar: avatar,
+          trustedTimestamp: "" as any,
+          switchCount: 1
+        }
+      }
+    );
+
+    await runOnce(
+      makeDeps({circlesRpc, avatarSafeService, avatarSafeMappingStore: mappingStore}),
+      makeConfig({dryRun: true})
+    );
+
+    expect(mappingStore.getSavedSafeTrustState().get(sharedSafe)).toEqual({
+      trustedAvatar: avatar,
+      trustedTimestamp: "250",
+      switchCount: 1
+    });
+  });
+
+  it("keeps the selected avatar and timestamp when a stored mapping exists without prior safe state", async () => {
+    const avatarInput = "0x7878000000000000000000000000000000000000";
+    const sharedSafe = "0xSAFE000000000000000000000000000000000778";
+    const avatar = getAddress(avatarInput);
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+    const avatarSafeService = new FakeAvatarSafeService({
+      [avatarInput]: {safe: sharedSafe, timestamp: "200"}
+    });
+    const mappingStore = new FakeAvatarSafeMappingStore({[avatarInput]: sharedSafe});
+
+    await runOnce(
+      makeDeps({circlesRpc, avatarSafeService, avatarSafeMappingStore: mappingStore}),
+      makeConfig({dryRun: true})
+    );
+
+    expect(mappingStore.getSavedSafeTrustState().get(sharedSafe)).toEqual({
+      trustedAvatar: avatar,
+      trustedTimestamp: "200",
+      switchCount: 0
+    });
+  });
+
+  it("keeps the mapped owner when there is no prior safe trust timestamp to compare against", async () => {
+    const oldAvatarInput = "0x7A7A000000000000000000000000000000000000";
+    const newAvatarInput = "0x7B7B000000000000000000000000000000000000";
+    const sharedSafe = "0xSAFE00000000000000000000000000000000077A";
+    const oldAvatar = getAddress(oldAvatarInput);
+    const newAvatar = getAddress(newAvatarInput);
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [newAvatarInput];
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [oldAvatarInput];
+    const avatarSafeService = new FakeAvatarSafeService({
+      [newAvatarInput]: {safe: sharedSafe, timestamp: "300"}
+    });
+    const mappingStore = new FakeAvatarSafeMappingStore({[oldAvatarInput]: sharedSafe});
+
+    const outcome = await runOnce(
+      makeDeps({circlesRpc, avatarSafeService, avatarSafeMappingStore: mappingStore}),
+      makeConfig({dryRun: true})
+    );
+
+    expect(outcome.safeReassignmentUntrustedAvatars).toEqual([]);
+    expect(mappingStore.getSavedSafeTrustState().get(sharedSafe)).toEqual({
+      trustedAvatar: oldAvatar,
+      trustedTimestamp: "300",
+      switchCount: 0
+    });
+  });
+
+  it("treats missing blacklist verdicts as allowed", async () => {
+    const avatarInput = "0x8888000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+
+    const blacklistingService = {
+      loadBlacklist: async () => undefined,
+      getBlacklistCount: () => 0,
+      checkBlacklist: async () => []
+    };
+
+    const outcome = await runOnce(
+      makeDeps({circlesRpc, blacklistingService: blacklistingService as any}),
+      makeConfig({dryRun: true})
+    );
+
+    expect(outcome.allowedAvatars).toEqual([getAddress(avatarInput)]);
+  });
+
+  it("persists a first-time safe owner when no previous mapping exists", async () => {
+    const avatarInput = "0x8989000000000000000000000000000000000000";
+    const sharedSafe = "0xSAFE000000000000000000000000000000000898";
+    const avatar = getAddress(avatarInput);
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+    const avatarSafeService = new FakeAvatarSafeService({
+      [avatarInput]: {safe: sharedSafe, timestamp: "123"}
+    });
+    const mappingStore = new FakeAvatarSafeMappingStore();
+
+    await runOnce(
+      makeDeps({circlesRpc, avatarSafeService, avatarSafeMappingStore: mappingStore}),
+      makeConfig({dryRun: true})
+    );
+
+    expect(mappingStore.getSavedSafeTrustState().get(sharedSafe)).toEqual({
+      trustedAvatar: avatar,
+      trustedTimestamp: "123",
+      switchCount: 0
+    });
+  });
+
+  it("logs dry-run untrust batches when trusted avatars are no longer eligible", async () => {
+    const avatarInput = "0xA0A0000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarInput];
+    const groupService = new FakeGroupService();
+
+    const outcome = await runOnce(
+      makeDeps({
+        circlesRpc,
+        avatarSafeService: new FakeAvatarSafeService({}),
+        groupService
+      }),
+      makeConfig({dryRun: true})
+    );
+
+    expect(outcome.untrustedAvatars).toEqual([getAddress(avatarInput)]);
+    expect(groupService.calls).toHaveLength(0);
+  });
+
+  it("surfaces non-retryable trust failures immediately", async () => {
+    const avatarInput = "0x9999000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+
+    class FatalTrustGroupService extends FakeGroupService {
+      override async trustBatchWithConditions(): Promise<string> {
+        const error = new Error("insufficient funds");
+        (error as any).code = "INSUFFICIENT_FUNDS";
+        throw error;
+      }
+    }
+
+    await expect(
+      runOnce(
+        makeDeps({circlesRpc, groupService: new FatalTrustGroupService()}),
+        makeConfig()
+      )
+    ).rejects.toThrow("insufficient funds");
+  });
+
+  it("wraps string trust failures in an Error", async () => {
+    const avatarInput = "0x9A9A000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [avatarInput];
+
+    class StringTrustGroupService extends FakeGroupService {
+      override async trustBatchWithConditions(): Promise<string> {
+        throw "boom";
+      }
+    }
+
+    await expect(
+      runOnce(
+        makeDeps({circlesRpc, groupService: new StringTrustGroupService()}),
+        makeConfig()
+      )
+    ).rejects.toThrow("boom");
+  });
+
+  it("surfaces non-retryable untrust failures immediately", async () => {
+    const avatarInput = "0xAAAA000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarInput];
+
+    class FatalUntrustGroupService extends FakeGroupService {
+      override async untrustBatch(): Promise<string> {
+        const error = new Error("fatal");
+        (error as any).code = "CALL_EXCEPTION";
+        throw error;
+      }
+    }
+
+    await expect(
+      runOnce(
+        makeDeps({
+          circlesRpc,
+          avatarSafeService: new FakeAvatarSafeService({}),
+          groupService: new FatalUntrustGroupService()
+        }),
+        makeConfig()
+      )
+    ).rejects.toThrow("fatal");
+  });
+
+  it("wraps string untrust failures in an Error", async () => {
+    const avatarInput = "0xABAB000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarInput];
+
+    class StringUntrustGroupService extends FakeGroupService {
+      override async untrustBatch(): Promise<string> {
+        throw "boom";
+      }
+    }
+
+    await expect(
+      runOnce(
+        makeDeps({
+          circlesRpc,
+          avatarSafeService: new FakeAvatarSafeService({}),
+          groupService: new StringUntrustGroupService()
+        }),
+        makeConfig()
+      )
+    ).rejects.toThrow("boom");
+  });
+
+  it("surfaces non-retryable blacklist failures", async () => {
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = ["0xBBBB000000000000000000000000000000000000"];
+
+    const blacklistingService = {
+      loadBlacklist: async () => undefined,
+      getBlacklistCount: () => 0,
+      checkBlacklist: async () => {
+        throw new Error("permanent");
+      }
+    };
+
+    await expect(
+      runOnce(
+        makeDeps({circlesRpc, blacklistingService: blacklistingService as any}),
+        makeConfig({dryRun: true})
+      )
+    ).rejects.toThrow("permanent");
+  });
+
+  it("wraps string blacklist failures in an Error", async () => {
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = ["0xBCBC000000000000000000000000000000000000"];
+
+    const blacklistingService = {
+      loadBlacklist: async () => undefined,
+      getBlacklistCount: () => 0,
+      checkBlacklist: async () => {
+        throw "boom";
+      }
+    };
+
+    await expect(
+      runOnce(
+        makeDeps({circlesRpc, blacklistingService: blacklistingService as any}),
+        makeConfig({dryRun: true})
+      )
+    ).rejects.toThrow("boom");
+  });
+
+  it("retries untrust batches on retryable errors before succeeding", async () => {
+    const avatarInput = "0xACAC000000000000000000000000000000000000";
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.trusteesByTruster[GROUP_ADDRESS.toLowerCase()] = [avatarInput];
+
+    class FlakyUntrustGroupService extends FakeGroupService {
+      attempts = 0;
+      override async untrustBatch(groupAddress: string, trusteeAddresses: string[]): Promise<string> {
+        this.attempts += 1;
+        if (this.attempts === 1) {
+          const error = new Error("temporary network issue");
+          (error as any).code = "NETWORK_ERROR";
+          throw error;
+        }
+        return super.untrustBatch(groupAddress, trusteeAddresses);
+      }
+    }
+
+    const groupService = new FlakyUntrustGroupService();
+    const outcome = await runOnce(
+      makeDeps({
+        circlesRpc,
+        avatarSafeService: new FakeAvatarSafeService({}),
+        groupService
+      }),
+      makeConfig()
+    );
+
+    expect(groupService.attempts).toBe(2);
+    expect(outcome.untrustTxHashes).toEqual(["0xuntrust_1"]);
+  });
+});
+
+describe("gp-crc helpers", () => {
+  it("normalizes, deduplicates, and skips invalid addresses", () => {
+    const first = getAddress("0x1000000000000000000000000000000000000100");
+    const second = getAddress("0x1000000000000000000000000000000000000101");
+
+    expect(normalizeAddress("")).toBeNull();
+    expect(normalizeAddress("not-an-address")).toBeNull();
+    expect(uniqueNormalizedAddresses([first, first.toLowerCase(), "bad-address", second])).toEqual([
+      first,
+      second
+    ]);
+  });
+
+  it("classifies retryable fetch errors", () => {
+    expect(isRetryableFetchError("temporary")).toBe(true);
+    expect(isRetryableFetchError({name: "AbortError"})).toBe(true);
+    expect(isRetryableFetchError({code: "NETWORK_ERROR"})).toBe(true);
+    expect(isRetryableFetchError({message: "network timeout"})).toBe(true);
+    expect(isRetryableFetchError({message: "fatal"})).toBe(false);
+  });
+
+  it("classifies retryable trust errors", () => {
+    expect(isRetryableTrustError("temporary")).toBe(true);
+    expect(isRetryableTrustError({code: "NETWORK_ERROR"})).toBe(true);
+    expect(isRetryableTrustError({message: "temporary network timeout"})).toBe(true);
+    expect(isRetryableTrustError({message: "nonce too low"})).toBe(false);
+    expect(isRetryableTrustError({code: "CALL_EXCEPTION"})).toBe(false);
+    expect(isRetryableTrustError({message: "fatal"})).toBe(false);
+  });
+
+  it("formats errors and compares timestamps across numeric, date, and string values", () => {
+    const circular: any = {};
+    circular.self = circular;
+
+    expect(formatErrorMessage(new Error("boom"))).toBe("boom");
+    expect(formatErrorMessage("plain")).toBe("plain");
+    expect(formatErrorMessage(circular)).toBe("[object Object]");
+
+    expect(normalizeSwitchCount(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(normalizeSwitchCount(2.9)).toBe(2);
+
+    expect(compareTimestamp("10", "10")).toBe(0);
+    expect(compareTimestamp("11", "10")).toBe(1);
+    expect(compareTimestamp("2025-03-01T00:00:00.000Z", "2025-02-01T00:00:00.000Z")).toBe(1);
+    expect(compareTimestamp("beta", "alpha")).toBe(1);
+
+    expect(toComparableBigInt("42")).toBe(42n);
+    expect(toComparableBigInt("2025-03-01T00:00:00.000Z")).not.toBeNull();
+    expect(toComparableBigInt("not-a-date")).toBeNull();
+  });
+
+  it("classifies blacklist verdicts consistently", () => {
+    expect(isBlacklisted({address: "0x1", is_bot: true} as any)).toBe(true);
+    expect(isBlacklisted({address: "0x1", is_bot: false, category: "flagged"} as any)).toBe(true);
+    expect(isBlacklisted({address: "0x1", is_bot: false} as any)).toBe(false);
   });
 });
