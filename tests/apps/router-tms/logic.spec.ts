@@ -1,6 +1,7 @@
 import {getAddress} from "ethers";
 import {
   runOnce,
+  runForHumanAvatars,
   type Deps,
   type RunConfig,
   DEFAULT_BASE_GROUP_ADDRESS,
@@ -143,6 +144,30 @@ describe("router-tms runOnce", () => {
     expect(outcome.txHashes).toEqual([]);
     expect(routerService.calls).toHaveLength(0);
     expect(routerService.simulationCalls).toBe(2);
+  });
+
+  it("logs avatar addresses for dry-run enablement batches", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000013");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000014");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+    const logger = new FakeLogger(true);
+
+    await runOnce(
+      makeDeps({circlesRpc, logger}),
+      makeConfig({dryRun: true, enableBatchSize: 2})
+    );
+
+    const dryRunMessages = logger.logs
+      .filter((entry) => entry.level === "info")
+      .map((entry) => entry.args.join(" "));
+
+    expect(dryRunMessages).toEqual(expect.arrayContaining([
+      expect.stringContaining(humanAlice.toLowerCase()),
+      expect.stringContaining(humanBob.toLowerCase())
+    ]));
   });
 
   it("uses default config values when optional settings are omitted", async () => {
@@ -299,6 +324,77 @@ describe("router-tms runOnce", () => {
     expect(routerService.calls).toHaveLength(1);
   });
 
+  it("allows one later base-group enablement after a prior fallback enablement", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000220");
+    const assignedBaseGroup = getAddress("0xA000000000000000000000000000000000000220");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const enablementStore = new FakeRouterEnablementStore();
+    const routerService = new FakeRouterService(["0xtx_fallback", "0xtx_group"]);
+
+    const deps = makeDeps({
+      circlesRpc,
+      routerService,
+      enablementStore
+    });
+
+    const cfg = makeConfig({dryRun: false});
+
+    const firstOutcome = await runOnce(deps, cfg);
+    expect(firstOutcome.executedEnableCount).toBe(1);
+    expect(routerService.calls).toEqual([
+      {baseGroup: DEFAULT_BASE_GROUP_ADDRESS.toLowerCase(), crcAddresses: [humanAlice.toLowerCase()]}
+    ]);
+
+    circlesRpc.baseGroups = [assignedBaseGroup];
+    circlesRpc.trusteesByTruster[assignedBaseGroup.toLowerCase()] = [humanAlice];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [humanAlice];
+
+    const secondOutcome = await runOnce(deps, cfg);
+    expect(secondOutcome.pendingEnableCount).toBe(1);
+    expect(secondOutcome.executedEnableCount).toBe(1);
+    expect(routerService.calls).toEqual([
+      {baseGroup: DEFAULT_BASE_GROUP_ADDRESS.toLowerCase(), crcAddresses: [humanAlice.toLowerCase()]},
+      {baseGroup: assignedBaseGroup.toLowerCase(), crcAddresses: [humanAlice.toLowerCase()]}
+    ]);
+
+    const thirdOutcome = await runOnce(deps, cfg);
+    expect(thirdOutcome.pendingEnableCount).toBe(0);
+    expect(thirdOutcome.executedEnableCount).toBe(0);
+    expect(routerService.calls).toHaveLength(2);
+  });
+
+  it("can process a realtime subset of newly registered humans without re-scanning the full table", async () => {
+    const existingHuman = getAddress("0x2000000000000000000000000000000000000210");
+    const newHuman = getAddress("0x2000000000000000000000000000000000000211");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [existingHuman, newHuman];
+
+    const routerService = new FakeRouterService(["0xtx_realtime"]);
+    const deps = makeDeps({
+      circlesRpc,
+      routerService
+    });
+
+    const outcome = await runForHumanAvatars(
+      deps,
+      makeConfig({dryRun: false}),
+      [newHuman]
+    );
+
+    expect(outcome.totalAvatarEntries).toBe(1);
+    expect(outcome.uniqueHumanCount).toBe(1);
+    expect(outcome.pendingEnableCount).toBe(1);
+    expect(outcome.executedEnableCount).toBe(1);
+    expect(routerService.calls).toEqual([
+      {baseGroup: DEFAULT_BASE_GROUP_ADDRESS.toLowerCase(), crcAddresses: [newHuman.toLowerCase()]}
+    ]);
+  });
+
   it("returns no pending enablement when every candidate is already trusted or blacklisted", async () => {
     const humanTrusted = getAddress("0x2000000000000000000000000000000000000700");
     const humanBlocked = getAddress("0x2000000000000000000000000000000000000701");
@@ -404,7 +500,7 @@ describe("router-tms runOnce", () => {
     expect(outcome.failedBatches[0].error).toContain("gas estimation CALL_EXCEPTION");
 
     // Failed batch addresses were NOT marked as enabled
-    const enabled = await enablementStore.loadEnabledAddresses();
+    const enabled = await enablementStore.loadEnablementStatuses().then(s => s.map(e => e.avatar));
     expect(enabled.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
     expect(enabled.map(a => a.toLowerCase())).toContain(humanBob.toLowerCase());
     expect(enabled.map(a => a.toLowerCase())).not.toContain(humanCarol.toLowerCase());
@@ -486,7 +582,7 @@ describe("router-tms runOnce", () => {
     expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
 
     // Enablement store should contain Alice and Carol, not Bob
-    const enabled = await enablementStore.loadEnabledAddresses();
+    const enabled = await enablementStore.loadEnablementStatuses().then(s => s.map(e => e.avatar));
     expect(enabled.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
     expect(enabled.map(a => a.toLowerCase())).toContain(humanCarol.toLowerCase());
     expect(enabled.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
@@ -647,7 +743,7 @@ describe("router-tms runOnce", () => {
     expect(outcome.failedBatches).toHaveLength(0);
 
     // Carol should be enabled (not quarantined)
-    const enabled = await enablementStore.loadEnabledAddresses();
+    const enabled = await enablementStore.loadEnablementStatuses().then(s => s.map(e => e.avatar));
     expect(enabled.map(a => a.toLowerCase())).toContain(humanCarol.toLowerCase());
     expect(enabled.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
   });

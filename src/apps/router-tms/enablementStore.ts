@@ -1,6 +1,10 @@
 import {getAddress} from "ethers";
 
-import {IRouterEnablementStore} from "../../interfaces/IRouterEnablementStore";
+import {
+  IRouterEnablementStore,
+  RouterEnablementSource,
+  RouterEnablementStatus
+} from "../../interfaces/IRouterEnablementStore";
 
 const DEFAULT_QUARANTINE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -9,21 +13,21 @@ function normalize(address: string): string {
 }
 
 export class InMemoryRouterEnablementStore implements IRouterEnablementStore {
-  private readonly enabled = new Set<string>();
+  private readonly enabled = new Map<string, RouterEnablementStatus>();
   private readonly quarantined = new Map<string, number>();
   private readonly quarantineTtlMs: number;
 
   constructor(initialAddresses: string[] = [], quarantineTtlMs: number = DEFAULT_QUARANTINE_TTL_MS) {
     this.quarantineTtlMs = quarantineTtlMs;
-    this.addAddresses(initialAddresses);
+    this.addAddresses(initialAddresses, "base-group");
   }
 
-  async loadEnabledAddresses(): Promise<string[]> {
-    return Array.from(this.enabled);
+  async loadEnablementStatuses(): Promise<RouterEnablementStatus[]> {
+    return Array.from(this.enabled.values()).map((status) => ({...status}));
   }
 
-  async markEnabled(addresses: string[]): Promise<void> {
-    this.addAddresses(addresses);
+  async markEnabled(addresses: string[], source: RouterEnablementSource): Promise<void> {
+    this.addAddresses(addresses, source);
   }
 
   async loadQuarantinedAddresses(): Promise<string[]> {
@@ -51,10 +55,23 @@ export class InMemoryRouterEnablementStore implements IRouterEnablementStore {
     }
   }
 
-  private addAddresses(addresses: string[]): void {
+  private addAddresses(addresses: string[], source: RouterEnablementSource): void {
     for (const address of addresses) {
       try {
-        this.enabled.add(normalize(address));
+        const normalized = normalize(address);
+        const existing = this.enabled.get(normalized) ?? {
+          avatar: normalized,
+          fallbackEnabled: false,
+          baseGroupEnabled: false
+        };
+
+        if (source === "fallback") {
+          existing.fallbackEnabled = true;
+        } else {
+          existing.baseGroupEnabled = true;
+        }
+
+        this.enabled.set(normalized, existing);
       } catch {
         // Ignore invalid addresses provided by callers.
       }

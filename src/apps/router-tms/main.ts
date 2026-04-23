@@ -6,11 +6,17 @@ import {RouterService} from "../../services/routerService";
 import {BlacklistingService} from "../../services/blacklistingService";
 import {
   runOnce,
+  runForHumanAvatars,
   RunConfig,
   DEFAULT_ENABLE_BATCH_SIZE,
   DEFAULT_FETCH_PAGE_SIZE,
   DEFAULT_BASE_GROUP_ADDRESS
 } from "./logic";
+import {
+  deriveRegisterHumanWsUrl,
+  startRegisterHumanListener,
+  type RegisterHumanListenerHandle
+} from "./realtime";
 import {formatErrorWithCauses} from "../../formatError";
 import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
@@ -29,6 +35,7 @@ const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const pollIntervalMs = parseEnvInt("ROUTER_POLL_INTERVAL_MS", 30 * 60 * 1000);
 const enableBatchSize = parseEnvInt("ROUTER_ENABLE_BATCH_SIZE", DEFAULT_ENABLE_BATCH_SIZE);
 const fetchPageSize = parseEnvInt("ROUTER_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
+const registerHumanWsUrl = process.env.ROUTER_WSS_URL || deriveRegisterHumanWsUrl(rpcUrl);
 const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
@@ -57,6 +64,8 @@ const enablementStore = new InMemoryRouterEnablementStore([], quarantineTtlHours
 const errorsBeforeCrash = Math.max(1, parseEnvInt("ERRORS_BEFORE_CRASH", 5));
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
+let registerHumanListener: RegisterHumanListenerHandle | null = null;
+let executionQueue: Promise<void> = Promise.resolve();
 
 async function refreshBlacklist(): Promise<void> {
   try {
@@ -75,6 +84,35 @@ async function refreshBlacklist(): Promise<void> {
     }
     runLogger.error("Failed to refresh blacklist on initial load:", error);
     throw error;
+  }
+}
+
+function startRealtimeRegisterHumanListener(): void {
+  if (registerHumanListener) {
+    return;
+  }
+
+  rootLogger.info("Starting RegisterHuman realtime listener between scheduled runs.");
+  registerHumanListener = startRegisterHumanListener({
+    httpRpcUrl: rpcUrl,
+    wsUrl: registerHumanWsUrl,
+    logger: rootLogger.child("register-human"),
+    onHumansRegistered: handleRealtimeHumanRegistrations
+  });
+}
+
+function stopRealtimeRegisterHumanListener(reason: string): void {
+  if (!registerHumanListener) {
+    return;
+  }
+
+  rootLogger.info(`Stopping RegisterHuman realtime listener: ${reason}.`);
+  try {
+    registerHumanListener.stop();
+  } catch (error) {
+    rootLogger.warn("Failed to stop RegisterHuman listener:", error);
+  } finally {
+    registerHumanListener = null;
   }
 }
 
@@ -103,6 +141,7 @@ const runLogger = rootLogger.child("run");
 void notifySlackStartup();
 
 async function gracefulShutdown(signal: string) {
+  stopRealtimeRegisterHumanListener(`graceful shutdown (${signal})`);
   try {
     await leaderElection?.stop();
   } catch (err) {
@@ -157,25 +196,36 @@ async function mainLoop(): Promise<void> {
 
   while (true) {
     const runStartedAt = Date.now();
-    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+    stopRealtimeRegisterHumanListener("starting scheduled router-tms run");
     try {
-      const isHealthy = await ensureRpcHealthyOrNotify({
-        appName: "router-tms",
-        rpcUrl,
-        logger: rootLogger
+      const outcome = await enqueueExclusive(async () => {
+        const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+        const isHealthy = await ensureRpcHealthyOrNotify({
+          appName: "router-tms",
+          rpcUrl,
+          logger: rootLogger
+        });
+        if (!isHealthy) {
+          return null;
+        }
+
+        await refreshBlacklist();
+        return runOnce(
+          {
+            circlesRpc,
+            blacklistingService,
+            routerService,
+            logger: runLogger,
+            enablementStore
+          },
+          {...config, dryRun: effectiveDryRun}
+        );
       });
-      if (!isHealthy) { await delay(currentDelay); continue; }
-      await refreshBlacklist();
-      const outcome = await runOnce(
-        {
-          circlesRpc,
-          blacklistingService,
-          routerService,
-          logger: runLogger,
-          enablementStore
-        },
-        { ...config, dryRun: effectiveDryRun }
-      );
+      if (!outcome) {
+        startRealtimeRegisterHumanListener();
+        await delay(currentDelay);
+        continue;
+      }
       const allPendingFailed = outcome.pendingEnableCount > 0 && outcome.executedEnableCount === 0 && outcome.failedBatches.length > 0;
       if (allPendingFailed) {
         // All batches failed — treat as a run error for crash threshold
@@ -227,6 +277,7 @@ async function mainLoop(): Promise<void> {
       if (outcome.pendingEnableCount === 0 && outcome.failedBatches.length === 0) {
         runLogger.info("Router already trusts every allowed human avatar.");
       }
+      startRealtimeRegisterHumanListener();
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
@@ -240,6 +291,7 @@ async function mainLoop(): Promise<void> {
         return;
       }
       currentDelay = Math.min(currentDelay * 2, maxDelay);
+      startRealtimeRegisterHumanListener();
     }
 
     await delay(currentDelay);
@@ -268,6 +320,65 @@ async function start(): Promise<void> {
   await mainLoop();
 }
 
+async function handleRealtimeHumanRegistrations(avatars: string[]): Promise<void> {
+  if (avatars.length === 0) {
+    return;
+  }
+
+  const startedAt = Date.now();
+  const realtimeLogger = runLogger.child("realtime");
+  realtimeLogger.info(
+    `Processing realtime RegisterHuman avatar(s): ${avatars.join(", ")}`
+  );
+
+  try {
+    const outcome = await enqueueExclusive(async () => {
+      const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+      const isHealthy = await ensureRpcHealthyOrNotify({
+        appName: "router-tms",
+        rpcUrl,
+        logger: rootLogger
+      });
+      if (!isHealthy) {
+        return null;
+      }
+
+      await refreshBlacklist();
+      return runForHumanAvatars(
+        {
+          circlesRpc,
+          blacklistingService,
+          routerService,
+          logger: realtimeLogger,
+          enablementStore
+        },
+        {...config, dryRun: effectiveDryRun},
+        avatars
+      );
+    });
+
+    if (!outcome) {
+      realtimeLogger.warn("Skipping realtime routing enablement because the RPC health check failed.");
+      return;
+    }
+
+    recordRunSuccess("router-tms", Date.now() - startedAt);
+    realtimeLogger.info(
+      "router-tms realtime batch completed: " +
+        `uniqueHumans=${outcome.uniqueHumanCount} ` +
+        `allowed=${outcome.allowedHumanCount} ` +
+        `blacklisted=${outcome.blacklistedHumanCount} ` +
+        `pending=${outcome.pendingEnableCount} ` +
+        `executed=${outcome.executedEnableCount}`
+    );
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    recordRunError("router-tms");
+    realtimeLogger.error("Realtime routing enablement failed:");
+    realtimeLogger.error(formatErrorWithCauses(error));
+  }
+}
+
 start().catch((cause) => {
   const error = cause instanceof Error ? cause : new Error(String(cause));
   rootLogger.error("Router-TMS service crashed:");
@@ -284,6 +395,7 @@ async function notifySlackStartup(): Promise<void> {
   const pollIntervalMinutes = formatMinutes(pollIntervalMs);
   const message = `✅ *Router-TMS Service started*\n\n` +
     `Enabling routing only for non-blacklisted v2 human avatars.\n` +
+    `- RegisterHuman WSS: ${registerHumanWsUrl}\n` +
     `- RPC: ${rpcUrl}\n` +
     `- TX RPC: ${txRpcUrl}\n` +
     `- Router: ${routerAddress}\n` +
@@ -334,6 +446,12 @@ function formatMinutes(ms: number): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function enqueueExclusive<T>(task: () => Promise<T>): Promise<T> {
+  const next = executionQueue.then(task, task);
+  executionQueue = next.then(() => undefined, () => undefined);
+  return next;
 }
 
 function parseEnvInt(name: string, fallback: number): number {

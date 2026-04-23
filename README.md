@@ -202,6 +202,7 @@ VERBOSE_LOGGING=1
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
 TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
+ROUTER_WSS_URL=wss://rpc.aboutcircles.com/ws/chain 
 ROUTER_ADDRESS=0xdc287474114cc0551a81ddc2eb51783fbf34802f
 ROUTER_BASE_GROUP_ADDRESS=0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026
 
@@ -239,20 +240,19 @@ GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY=     # Private key of a 1/n Safe signer
 
 # External services
 BLACKLISTING_SERVICE_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist
-GNOSIS_GROUP_SCORING_URL=https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore
-GNOSIS_GROUP_SCORING_TARGET_SET_NAME=all_backers  # Server-side named target set for scoring
+GNOSIS_GROUP_SCORING_URL=https://safe-watch-api-prod.ai.gnosisdev.com/validate-trustees
 
 # Scan window / timing
 GNOSIS_GROUP_RUN_INTERVAL_MINUTES=30      # Run interval in minutes
 GNOSIS_GROUP_FETCH_PAGE_SIZE=             # Fetch page size
-GNOSIS_GROUP_SCORE_BATCH_SIZE=            # Score batch size (default 20)
-GNOSIS_GROUP_SCORE_THRESHOLD=             # Score threshold for membership
+GNOSIS_GROUP_SCORE_BATCH_SIZE=            # Score batch size
+GNOSIS_GROUP_SCORE_THRESHOLD=             # Gnosis trust-score threshold for membership (default: 80, strictly greater than threshold)
 GNOSIS_GROUP_BATCH_SIZE=                  # Transaction batch size
 GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES=240  # Score cache TTL in minutes
 GNOSIS_GROUP_SCORE_FETCH_TIMEOUT_MS=      # Timeout per scoring request (default 90000)
 
 # Operation mode
-DRY_RUN=0                              # Set to "1" to skip blacklist & scoring requests
+DRY_RUN=0                              # Set to "1" to skip on-chain trust/untrust transactions
 
 # Notifications
 GNOSIS_GROUP_SLACK_WEBHOOK_URL=        # Optional override; falls back to SLACK_WEBHOOK_URL
@@ -340,9 +340,9 @@ VERBOSE_LOGGING=1
 
 ### Gnosis Group App
 * Fetches registered human avatars and filters out blacklisted addresses
-* Calls a relative trust scoring service to rank avatars by configured targets
+* Calls the Safe Watch trustee validation API and uses `gnosis_trust_score` for membership decisions
 * Uses a Safe for execution; set `GNOSIS_GROUP_SAFE_ADDRESS` plus `GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY` for a 1/n Safe owner
-* `DRY_RUN=1` skips blacklist and scoring service calls while logging the batches that would be requested
+* `DRY_RUN=1` skips on-chain trust/untrust transactions while still evaluating blacklist and trust scores
 
 ### Router TMS
 * `ROUTER_SAFE_ADDRESS` must control the router's executor role; signer key must belong to that Safe

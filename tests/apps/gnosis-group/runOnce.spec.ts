@@ -73,7 +73,7 @@ describe("gnosis-group runOnce", () => {
   const gpCrcGroup = getAddress(DEFAULT_GP_CRC_GROUP_ADDRESS);
   const historicAutoTrustGroup = getAddress(HISTORIC_AUTO_TRUST_GROUP_ADDRESS);
 
-  it("fetches relative trust scores when running in dry-run mode", async () => {
+  it("fetches gnosis trust scores when running in dry-run mode", async () => {
     const highScoreRaw = "0x4000000000000000000000000000000000000004";
     const lowScoreRaw = "0x5000000000000000000000000000000000000005";
     const highScoreAddress = getAddress(highScoreRaw);
@@ -105,13 +105,10 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [
-          {address: highScoreAddress, relative_score: 75},
-          {address: lowScoreAddress, relative_score: 10}
-        ]
-      })
+      json: async () => ([
+        {address: highScoreAddress, gnosis_trust_score: 75},
+        {address: lowScoreAddress, gnosis_trust_score: 10}
+      ])
     });
 
     jest.useFakeTimers();
@@ -131,8 +128,7 @@ describe("gnosis-group runOnce", () => {
     const [fetchUrl, fetchInit] = fetchMock.mock.calls[0] ?? [];
     expect(fetchUrl).toBe("https://scores.local");
     const requestBody = JSON.parse((fetchInit?.body ?? "{}") as string);
-    expect(requestBody.target_set_name).toBe("all_backers");
-    expect(requestBody.avatars).toEqual([highScoreAddress, lowScoreAddress]);
+    expect(requestBody.trustees).toEqual([highScoreAddress, lowScoreAddress]);
   });
 
   it("uses env-defined score threshold when config omits the value", async () => {
@@ -164,10 +160,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: trustedTarget, relative_score: 50}]
-      })
+      json: async () => ([{address: trustedTarget, gnosis_trust_score: 50}])
     });
 
     try {
@@ -224,10 +217,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: allowedAddress, relative_score: 50}]
-      })
+      json: async () => ([{address: allowedAddress, gnosis_trust_score: 50}])
     });
 
     const outcome = await runOnce(deps, cfg);
@@ -278,13 +268,10 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [
-          {address: alreadyTrusted, relative_score: 75},
-          {address: eligible, relative_score: 80}
-        ]
-      })
+      json: async () => ([
+          {address: alreadyTrusted, gnosis_trust_score: 75},
+          {address: eligible, gnosis_trust_score: 80}
+        ])
     });
 
     const outcome = await runOnce(deps, cfg);
@@ -337,14 +324,11 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [
-          {address: first, relative_score: 100},
-          {address: second, relative_score: 100},
-          {address: third, relative_score: 100}
-        ]
-      })
+      json: async () => ([
+          {address: first, gnosis_trust_score: 100},
+          {address: second, gnosis_trust_score: 100},
+          {address: third, gnosis_trust_score: 100}
+        ])
     });
 
     jest.useFakeTimers();
@@ -398,13 +382,10 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [
-          {address: failing, relative_score: 100},
-          {address: succeeding, relative_score: 100}
-        ]
-      })
+      json: async () => ([
+          {address: failing, gnosis_trust_score: 100},
+          {address: succeeding, gnosis_trust_score: 100}
+        ])
     });
 
     jest.useFakeTimers();
@@ -459,10 +440,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: active, relative_score: 60}]
-      })
+      json: async () => ([{address: active, gnosis_trust_score: 60}])
     });
 
     const outcome = await runOnce(deps, cfg);
@@ -506,10 +484,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: active, relative_score: 80}]
-      })
+      json: async () => ([{address: active, gnosis_trust_score: 80}])
     });
 
     const outcome = await runOnce(deps, cfg);
@@ -532,10 +507,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: eligible, relative_score: 75}]
-      })
+      json: async () => ([{address: eligible, gnosis_trust_score: 75}])
     });
 
     const outcome = await runOnce({
@@ -590,10 +562,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: active, relative_score: 90}]
-      })
+      json: async () => ([{address: active, gnosis_trust_score: 90}])
     });
 
     jest.useFakeTimers();
@@ -712,10 +681,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: autoTrusted, relative_score: 25}]
-      })
+      json: async () => ([{address: autoTrusted, gnosis_trust_score: 25}])
     });
 
     const outcome = await runOnce(deps, cfg);
@@ -729,7 +695,7 @@ describe("gnosis-group runOnce", () => {
     expect(outcome.trustTxHashes).toEqual(["0xtrust_1"]);
     const [, fetchInit] = fetchMock.mock.calls[0] ?? [];
     const requestBody = JSON.parse((fetchInit?.body ?? "{}") as string);
-    expect(requestBody.target_set_name).toBe("all_backers");
+    expect(requestBody.trustees).toEqual([autoTrusted]);
     expect(outcome.untrustTxHashes).toEqual([]);
   });
 
@@ -766,10 +732,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: autoTrusted, relative_score: 25}]
-      })
+      json: async () => ([{address: autoTrusted, gnosis_trust_score: 25}])
     });
 
     const outcome = await runOnce(deps, cfg);
@@ -907,7 +870,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({status: "success", results: []})
+      json: async () => ([])
     });
 
     const outcome = await runOnce({
@@ -941,7 +904,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({status: "success", results: []})
+      json: async () => ([])
     });
 
     const outcome = await runOnce({
@@ -1007,10 +970,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: allowed, relative_score: 75}]
-      })
+      json: async () => ([{address: allowed, gnosis_trust_score: 75}])
     });
 
     const outcome = await runOnce(deps, {
@@ -1034,7 +994,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({status: "success", results: []})
+      json: async () => ([])
     });
 
     const outcome = await runOnce({
@@ -1079,10 +1039,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: eligible, relative_score: 75}]
-      })
+      json: async () => ([{address: eligible, gnosis_trust_score: 75}])
     });
 
     jest.useFakeTimers();
@@ -1128,10 +1085,7 @@ describe("gnosis-group runOnce", () => {
       ok: true,
       status: 200,
       statusText: "OK",
-      json: async () => ({
-        status: "success",
-        results: [{address: candidate, relative_score: 75}]
-      })
+      json: async () => ([{address: candidate, gnosis_trust_score: 75}])
     });
 
     const blacklistingService = new FlakyBlacklist();
@@ -1149,7 +1103,7 @@ describe("gnosis-group runOnce", () => {
     expect(blacklistingService.attempts).toBe(3);
   });
 
-  it("retries relative trust score fetches before succeeding", async () => {
+  it("retries gnosis trust score fetches before succeeding", async () => {
     const candidate = getAddress("0x1818000000000000000000000000000000000018");
     const circlesRpc = new FakeCirclesRpc();
     circlesRpc.humanAvatars = [candidate];
@@ -1164,10 +1118,7 @@ describe("gnosis-group runOnce", () => {
         ok: true,
         status: 200,
         statusText: "OK",
-        json: async () => ({
-          status: "success",
-          results: [{address: candidate, relative_score: 75}]
-        })
+        json: async () => ([{address: candidate, gnosis_trust_score: 75}])
       });
 
     jest.useFakeTimers();

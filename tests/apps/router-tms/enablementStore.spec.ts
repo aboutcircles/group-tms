@@ -16,9 +16,9 @@ describe("InMemoryRouterEnablementStore", () => {
 
   it("stores and retrieves enabled addresses", async () => {
     const store = new InMemoryRouterEnablementStore();
-    await store.markEnabled(["0x1000000000000000000000000000000000000001"]);
+    await store.markEnabled(["0x1000000000000000000000000000000000000001"], "base-group");
 
-    const enabled = await store.loadEnabledAddresses();
+    const enabled = await store.loadEnablementStatuses();
     expect(enabled).toHaveLength(1);
   });
 
@@ -28,7 +28,7 @@ describe("InMemoryRouterEnablementStore", () => {
       "0x1000000000000000000000000000000000000002"
     ]);
 
-    const enabled = await store.loadEnabledAddresses();
+    const enabled = await store.loadEnablementStatuses();
     expect(enabled).toHaveLength(2);
   });
 
@@ -101,10 +101,10 @@ describe("InMemoryRouterEnablementStore", () => {
   it("keeps enabled and quarantined sets independent", async () => {
     const store = new InMemoryRouterEnablementStore();
     const addr = "0x2000000000000000000000000000000000000007";
-    await store.markEnabled([addr]);
+    await store.markEnabled([addr], "base-group");
     await store.markQuarantined([addr]);
 
-    const enabled = await store.loadEnabledAddresses();
+    const enabled = await store.loadEnablementStatuses();
     const quarantined = await store.loadQuarantinedAddresses();
 
     expect(enabled).toHaveLength(1);
