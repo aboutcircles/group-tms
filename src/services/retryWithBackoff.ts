@@ -11,9 +11,14 @@ const TRANSIENT_MESSAGES = [
   "ECONNREFUSED",
   "socket hang up",
   "Too Many Requests",
+  "evm timeout",
 ];
 
-const TRANSIENT_CODES = new Set<number>([-32016, 429]);
+const TRANSIENT_CODES = new Set<number>([
+  -32016, // Nethermind internal timeout/overload
+  -32009, // Gnosis RPC "evm timeout" during gas estimation
+  429,    // HTTP 429 Too Many Requests (rate limit)
+]);
 
 /** Match "429" only as a standalone token, not inside larger numbers like "42900001". */
 const RATE_LIMIT_PATTERN = /\b429\b/;
@@ -27,6 +32,16 @@ export function isTransientRpcError(err: unknown): boolean {
   if (code !== undefined && TRANSIENT_CODES.has(code)) return true;
   if (status !== undefined && TRANSIENT_CODES.has(status)) return true;
   if (RATE_LIMIT_PATTERN.test(msg)) return true;
+
+  // ethers CALL_EXCEPTION with data strictly null/undefined = RPC failed to simulate
+  // (returned no revert payload at all). data="0x" means a real bare revert() — not transient.
+  // Caveat: some RPCs omit revert data even for genuine reverts. This is a best-effort heuristic.
+  const ethersCode = (err as any)?.code as string | undefined;
+  if (ethersCode === "CALL_EXCEPTION") {
+    const d = (err as any)?.data;
+    if (d === null || d === undefined) return true;
+  }
+
   return TRANSIENT_MESSAGES.some((t) => msg.includes(t));
 }
 
@@ -36,7 +51,7 @@ export interface RetryOptions {
 }
 
 /**
- * Execute `fn` with exponential backoff on transient RPC errors.
+ * Execute `fn` with exponential backoff + jitter on transient RPC errors.
  * Non-transient errors are thrown immediately.
  */
 export async function retryWithBackoff<T>(
@@ -55,7 +70,9 @@ export async function retryWithBackoff<T>(
       if (!isTransientRpcError(err) || attempt >= maxRetries) {
         throw err;
       }
-      const delayMs = baseDelayMs * Math.pow(2, attempt);
+      // Jitter: 50-100% of base delay to avoid thundering herd across workers
+      const jitter = 0.5 + Math.random() * 0.5;
+      const delayMs = Math.round(baseDelayMs * Math.pow(2, attempt) * jitter);
       const errMsg = (err as any)?.message ?? String(err);
       console.warn(`[RPC_RETRY] attempt ${attempt + 1}/${maxRetries}, waiting ${delayMs}ms — ${errMsg}`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
