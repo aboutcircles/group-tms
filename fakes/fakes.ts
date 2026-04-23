@@ -160,6 +160,10 @@ export class FakeBlacklist implements IBlacklistingService {
     return this.blocked.size + this.flagged.size;
   }
 
+  isLoaded(): boolean {
+    return this.loaded;
+  }
+
   async checkBlacklist(addresses: string[]): Promise<IBlacklistServiceVerdict[]> {
     return addresses.map(a => {
       const lc = a.toLowerCase();
@@ -332,6 +336,10 @@ export class FakeSlack implements ISlackService {
   async notifySlackStartOrCrash(message: string, severity: SlackSeverity = SlackSeverity.CRITICAL): Promise<void> {
     this.generalNotifications.push({message, severity});
   }
+
+  async notifySlackResolved(_appName: string): Promise<void> {
+    // no-op in tests
+  }
 }
 
 export class FakeAffiliateGroupEvents implements IAffiliateGroupEventsService {
@@ -359,6 +367,10 @@ export class FakeRouterService implements IRouterService {
   simulationCalls = 0;
   private readonly responseQueue: string[];
   failWith?: Error;
+  /** If set, only fail on the Nth call (1-indexed). Other calls succeed. */
+  failOnCallIndex?: number;
+  /** If set, only fail on the Nth simulation (1-indexed). Other simulations succeed. */
+  failOnSimulationIndex?: number;
 
   constructor(txHashResponses: string[] = []) {
     this.responseQueue = [...txHashResponses];
@@ -366,7 +378,7 @@ export class FakeRouterService implements IRouterService {
 
   async enableCRCForRouting(baseGroup: string, crcAddresses: string[]): Promise<string> {
     this.calls.push({baseGroup, crcAddresses: [...crcAddresses]});
-    if (this.failWith) {
+    if (this.failWith && (this.failOnCallIndex === undefined || this.failOnCallIndex === this.calls.length)) {
       throw this.failWith;
     }
 
@@ -380,7 +392,7 @@ export class FakeRouterService implements IRouterService {
   async simulateEnableCRCForRouting(baseGroup: string, crcAddresses: string[]): Promise<TransactionSimulationResult> {
     this.simulationCalls += 1;
     this.simulations.push({baseGroup, crcAddresses: [...crcAddresses]});
-    if (this.failWith) {
+    if (this.failWith && (this.failOnSimulationIndex === undefined || this.failOnSimulationIndex === this.simulationCalls)) {
       throw this.failWith;
     }
 

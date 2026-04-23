@@ -22,6 +22,14 @@ export type Deps = {
   enablementStore: IRouterEnablementStore;
 };
 
+export type FailedBatch = {
+  baseGroup: string;
+  batchIndex: number;
+  batchSize: number;
+  addresses: string[];
+  error: string;
+};
+
 export type RunOutcome = {
   totalAvatarEntries: number;
   uniqueHumanCount: number;
@@ -30,6 +38,7 @@ export type RunOutcome = {
   alreadyTrustedCount: number;
   pendingEnableCount: number;
   executedEnableCount: number;
+  failedBatches: FailedBatch[];
   dryRun: boolean;
   txHashes: string[];
 };
@@ -152,6 +161,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
       alreadyTrustedCount: alreadyTrusted.length,
       pendingEnableCount: 0,
       executedEnableCount: 0,
+      failedBatches: [],
       dryRun,
       txHashes: []
     };
@@ -175,6 +185,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
 
   const txHashes: string[] = [];
   let executedEnableCount = 0;
+  const failedBatches: FailedBatch[] = [];
 
   for (const target of validTargets) {
     const batches = chunkArray(target.addresses, enableBatchSize);
@@ -186,10 +197,25 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
             `(batch ${batchIndex + 1}/${batches.length}) for base group ${target.baseGroup}.`
         );
         if (routerService?.simulateEnableCRCForRouting) {
-          const simulation = await routerService.simulateEnableCRCForRouting(target.baseGroup, batch);
-          logger.info(
-            `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
-          );
+          try {
+            const simulation = await routerService.simulateEnableCRCForRouting(target.baseGroup, batch);
+            logger.info(
+              `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
+            );
+          } catch (simError) {
+            const errMsg = simError instanceof Error ? simError.message : String(simError);
+            logger.warn(
+              `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length} FAILED ` +
+              `for ${batch.length} avatar(s) in base group ${target.baseGroup}: ${errMsg}`
+            );
+            failedBatches.push({
+              baseGroup: target.baseGroup,
+              batchIndex: batchIndex + 1,
+              batchSize: batch.length,
+              addresses: batch,
+              error: errMsg
+            });
+          }
         } else {
           logger.info(
             `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length}: skipped (no signer-backed simulator configured).`
@@ -198,14 +224,30 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
         continue;
       }
 
-      const txHash = await routerService.enableCRCForRouting(target.baseGroup, batch);
-      txHashes.push(txHash);
-      executedEnableCount += batch.length;
-      await enablementStore.markEnabled(batch);
-      batch.forEach((address) => routerTrustSet.add(address));
-      logger.info(
-        `enableCRCForRouting tx=${txHash} (batch ${batchIndex + 1}/${batches.length}) for ${batch.length} avatar(s) in base group ${target.baseGroup}.`
-      );
+      try {
+        const txHash = await routerService.enableCRCForRouting(target.baseGroup, batch);
+        txHashes.push(txHash);
+        executedEnableCount += batch.length;
+        await enablementStore.markEnabled(batch);
+        batch.forEach((address) => routerTrustSet.add(address));
+        logger.info(
+          `enableCRCForRouting tx=${txHash} (batch ${batchIndex + 1}/${batches.length}) for ${batch.length} avatar(s) in base group ${target.baseGroup}.`
+        );
+      } catch (batchError) {
+        const errMsg = batchError instanceof Error ? batchError.message : String(batchError);
+        logger.error(
+          `enableCRCForRouting FAILED (batch ${batchIndex + 1}/${batches.length}) ` +
+          `for ${batch.length} avatar(s) in base group ${target.baseGroup}: ${errMsg}`
+        );
+        logger.error(`Failed batch addresses: ${batch.join(", ")}`);
+        failedBatches.push({
+          baseGroup: target.baseGroup,
+          batchIndex: batchIndex + 1,
+          batchSize: batch.length,
+          addresses: batch,
+          error: errMsg
+        });
+      }
     }
   }
 
@@ -217,6 +259,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     alreadyTrustedCount: alreadyTrusted.length,
     pendingEnableCount,
     executedEnableCount: dryRun ? 0 : executedEnableCount,
+    failedBatches,
     dryRun,
     txHashes
   };

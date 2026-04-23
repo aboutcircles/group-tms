@@ -22,6 +22,11 @@ export interface IBlacklistingService {
      * @return The number of blacklisted addresses.
      */
     getBlacklistCount(): number;
+
+    /**
+     * Returns true if at least one successful loadBlacklist() call has completed.
+     */
+    isLoaded(): boolean;
 }
 
 /**
