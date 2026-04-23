@@ -119,20 +119,17 @@ describe("gnosis-group helpers", () => {
       statusText: "OK",
       json: async () => ({
         status: "success",
-        batches: {
-          "0": [
-            {address: valid, relative_score: 42},
-            {},
-            {address: "not-an-address", relative_score: 99},
-            {address: valid, relative_score: "44"},
-            {address: valid, relative_score: "oops"}
-          ],
-          "1": "invalid-batch"
-        }
+        results: [
+          {address: valid, relative_score: 42},
+          {},
+          {address: "not-an-address", relative_score: 99},
+          {address: valid, relative_score: "44"},
+          {address: valid, relative_score: "oops"}
+        ]
       })
     });
 
-    const results = await fetchRelativeTrustScores("https://scores.local", [valid], [valid], 30_000);
+    const results = await fetchRelativeTrustScores("https://scores.local", [valid], "all_backers", 30_000);
     expect(results.get("0x4000000000000000000000000000000000000004")).toBe(44);
   });
 
@@ -141,12 +138,26 @@ describe("gnosis-group helpers", () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 503,
-      statusText: "Unavailable"
+      statusText: "Unavailable",
+      body: { cancel: jest.fn() }
     });
 
-    await expect(
-      fetchRelativeTrustScores("https://scores.local", [], [], 30_000)
-    ).rejects.toThrow("HTTP 503 Unavailable");
+    const err503 = await fetchRelativeTrustScores("https://scores.local", [], "all_backers", 30_000).catch((e: any) => e);
+    expect(err503.message).toMatch("HTTP 503 Unavailable");
+    expect(err503.code).toBe("SERVER_ERROR");
+    expect(isRetryableFetchError(err503)).toBe(true);
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      body: { cancel: jest.fn() }
+    });
+
+    const err400 = await fetchRelativeTrustScores("https://scores.local", [], "all_backers", 30_000).catch((e: any) => e);
+    expect(err400.message).toMatch("HTTP 400 Bad Request");
+    expect(err400.code).toBeUndefined();
+    expect(isRetryableFetchError(err400)).toBe(false);
 
     fetchMock.mockResolvedValueOnce({
       ok: true,
@@ -156,7 +167,7 @@ describe("gnosis-group helpers", () => {
     });
 
     await expect(
-      fetchRelativeTrustScores("https://scores.local", [], [], 30_000)
+      fetchRelativeTrustScores("https://scores.local", [], "all_backers", 30_000)
     ).rejects.toThrow("response malformed");
   });
 });

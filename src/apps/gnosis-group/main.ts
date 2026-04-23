@@ -18,6 +18,7 @@ import {
   HISTORIC_AUTO_TRUST_GROUP_ADDRESS,
   HISTORIC_AUTO_TRUST_GROUP_BLOCK_NUMBER,
   DEFAULT_SCORE_CACHE_TTL_MS,
+  DEFAULT_SCORING_TARGET_SET_NAME,
   RunOutcome
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
@@ -34,7 +35,7 @@ const rootLogger = new LoggerService(verboseLogging, "gnosis-group");
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
-const scoringServiceUrl = process.env.GNOSIS_GROUP_SCORING_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore/batch";
+const scoringServiceUrl = process.env.GNOSIS_GROUP_SCORING_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/scoring/relative_trustscore";
 const targetGroupAddress = process.env.GNOSIS_GROUP_ADDRESS || "0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c";
 const safeAddress = process.env.GNOSIS_GROUP_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.GNOSIS_GROUP_SAFE_SIGNER_PRIVATE_KEY || "";
@@ -55,6 +56,7 @@ const scoreFetchTimeoutMs = Math.max(1000, parseEnvInt("GNOSIS_GROUP_SCORE_FETCH
 const scoreThreshold = parseEnvNumber("GNOSIS_GROUP_SCORE_THRESHOLD", DEFAULT_SCORE_THRESHOLD);
 const groupBatchSize = parseEnvInt("GNOSIS_GROUP_BATCH_SIZE", DEFAULT_GROUP_BATCH_SIZE);
 const scoreCacheTtlMs = parseEnvInt("GNOSIS_GROUP_SCORE_CACHE_TTL_MINUTES", DEFAULT_SCORE_CACHE_TTL_MS / 60_000) * 60_000;
+const scoringTargetSetName = process.env.GNOSIS_GROUP_SCORING_TARGET_SET_NAME || DEFAULT_SCORING_TARGET_SET_NAME;
 
 const blacklistTimeoutMs = (() => {
   const raw = process.env.BLACKLIST_TIMEOUT_MS;
@@ -94,6 +96,7 @@ if (!dryRun || canSimulateTransactions) {
 const config: RunConfig = {
   rpcUrl,
   scoringServiceUrl,
+  scoringTargetSetName,
   targetGroupAddress,
   fetchPageSize,
   scoreBatchSize,
@@ -108,6 +111,7 @@ rootLogger.info("Starting gnosis-group run with config:");
 rootLogger.info(`  - rpcUrl=${rpcUrl}`);
 rootLogger.info(`  - txRpcUrl=${txRpcUrl}`);
 rootLogger.info(`  - scoringServiceUrl=${scoringServiceUrl}`);
+rootLogger.info(`  - scoringTargetSetName=${scoringTargetSetName}`);
 rootLogger.info(`  - targetGroupAddress=${targetGroupAddress}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
 rootLogger.info(`  - scoreBatchSize=${scoreBatchSize}`);
