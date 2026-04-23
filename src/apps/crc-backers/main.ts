@@ -13,8 +13,10 @@ import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
+import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
+const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL || "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
 const backersGroupAddress = process.env.BACKERS_GROUP_ADDRESS || "0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026";
 const backingFactoryAddress = process.env.BACKING_FACTORY_ADDRESS || "0xeced91232c609a42f6016860e8223b8aecaa7bd0";
@@ -28,6 +30,7 @@ const confirmationBlocks = Number.parseInt(process.env.CONFIRMATION_BLOCKS || "2
 const safeAddress = process.env.CRC_BACKERS_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.CRC_BACKERS_SAFE_SIGNER_PRIVATE_KEY || "";
 const dryRun = process.env.DRY_RUN === "1";
+const canSimulateTransactions = safeSignerPrivateKey.trim().length > 0 && safeAddress.trim().length > 0;
 const errorsBeforeCrash = 3;
 
 const rootLogger = new LoggerService(verboseLogging);
@@ -50,14 +53,17 @@ const circlesRpc = new CirclesRpcService(rpcUrl);
 const chainRpc = new ChainRpcService(rpcUrl);
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
-const groupService = dryRun ? undefined : new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress);
+const groupService = (!dryRun || canSimulateTransactions)
+  ? new SafeGroupService(rpcUrl, safeSignerPrivateKey, safeAddress, txRpcUrl)
+  : undefined;
 // In dry-run mode, skip passing signer keys so BackingInstanceService doesn't
 // eagerly initialise Safe Protocol Kit (which calls eth_chainId via viem).
 // simulate* methods only use the ethers provider; execute methods throw if needed.
 const cowSwapService = new BackingInstanceService(
   rpcUrl,
-  dryRun ? undefined : safeSignerPrivateKey,
-  dryRun ? undefined : safeAddress
+  !dryRun || canSimulateTransactions ? safeSignerPrivateKey : undefined,
+  !dryRun || canSimulateTransactions ? safeAddress : undefined,
+  txRpcUrl
 );
 // Track the next block to scan purely in memory between loop iterations.
 let nextFromBlock = deployedAtBlock;
@@ -100,6 +106,7 @@ async function sendStartupNotification(): Promise<void> {
   const startupMessage = `✅ *Backers Group TMS Service Started*\n\n` +
     `Service is now running and monitoring for new backers.\n` +
     `- RPC: ${rpcUrl}\n` +
+    `- TX RPC: ${txRpcUrl}\n` +
     `- Group: ${backersGroupAddress}\n` +
     `- Factory: ${backingFactoryAddress}\n` +
     `- Safe: ${safeAddress || "(not set)"}\n` +
@@ -220,6 +227,7 @@ async function main() {
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
+    rootLogger.child("leader-election"),
     slackService,
     (isLeader) => setLeaderStatus("crc-backers", isLeader)
   );

@@ -13,13 +13,16 @@ import {formatErrorWithCauses} from "../../formatError";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
+import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {Wallet} from "ethers";
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
+const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const oicGroupAddress = (process.env.OIC_GROUP_ADDRESS || "0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5").toLowerCase();
 const metaOrgAddress = (process.env.OIC_META_ORG_ADDRESS || "").toLowerCase();
 const affiliateRegistryAddress = (process.env.AFFILIATE_REGISTRY_ADDRESS || "0xca8222e780d046707083f51377b5fd85e2866014").toLowerCase();
 const servicePrivateKey = process.env.OIC_SERVICE_PRIVATE_KEY || process.env.OIC_SAFE_SIGNER_PRIVATE_KEY || "";
+const canSimulateTransactions = servicePrivateKey.trim().length > 0;
 const configuredServiceEoa = (process.env.OIC_SERVICE_EOA || "").toLowerCase();
 const deployedAtBlock = 41_734_312;
 const confirmationBlocks = Number.parseInt(process.env.CONFIRMATION_BLOCKS || "10");
@@ -46,9 +49,12 @@ let leaderElection: LeaderElection | null = null;
 validateConfig();
 
 if (dryRun) {
-  groupService = createDryRunGroupService();
+  const simulationService = canSimulateTransactions
+    ? new GroupService(rpcUrl, servicePrivateKey, txRpcUrl)
+    : undefined;
+  groupService = createDryRunGroupService(simulationService);
 } else {
-  groupService = new GroupService(rpcUrl, servicePrivateKey);
+  groupService = new GroupService(rpcUrl, servicePrivateKey, txRpcUrl);
 }
 
 function validateConfig() {
@@ -65,14 +71,16 @@ function validateConfig() {
   }
 }
 
-function createDryRunGroupService(): IGroupService {
+function createDryRunGroupService(simulationService?: IGroupService): IGroupService {
   const notAvailable = async () => {
     throw new Error("Group service is not available in dry-run mode");
   };
   return {
     trustBatchWithConditions: notAvailable,
     untrustBatch: notAvailable,
-    fetchGroupOwnerAndService: notAvailable
+    fetchGroupOwnerAndService: notAvailable,
+    simulateTrustBatchWithConditions: simulationService?.simulateTrustBatchWithConditions?.bind(simulationService),
+    simulateUntrustBatch: simulationService?.simulateUntrustBatch?.bind(simulationService)
   };
 }
 
@@ -116,6 +124,7 @@ process.on('unhandledRejection', async (reason: any) => {
     const startupMessage = `✅ *OIC Service Started*\n\n` +
       `Service is now running and monitoring + reconciling trust.\n` +
       `- RPC: ${rpcUrl}\n` +
+      `- TX RPC: ${txRpcUrl}\n` +
       `- Group: ${oicGroupAddress}\n` +
       `- MetaOrg: ${metaOrgAddress}\n` +
       `- AffiliateRegistry: ${affiliateRegistryAddress}\n` +
@@ -146,6 +155,7 @@ async function loop() {
   leaderElection = await LeaderElection.create(
     process.env.LEADER_DB_URL,
     process.env.INSTANCE_ID,
+    rootLogger.child("leader-election"),
     slackService,
     (isLeader) => setLeaderStatus("oic", isLeader)
   );
@@ -183,6 +193,7 @@ async function loop() {
       if (!printedStartupLogs) {
         LOG.info("OIC app starting (monitor + reconcile trust)...");
         LOG.debug(`RPC: ${rpcUrl}`);
+        LOG.debug(`TX RPC: ${txRpcUrl}`);
         LOG.debug(`Group: ${oicGroupAddress}`);
         LOG.debug(`MetaOrg: ${metaOrgAddress}`);
         LOG.debug(`AffiliateRegistry: ${affiliateRegistryAddress}`);
