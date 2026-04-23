@@ -453,6 +453,202 @@ describe("router-tms runOnce", () => {
     expect(outcome.executedEnableCount).toBe(0);
     expect(outcome.failedBatches).toHaveLength(1);
     expect(outcome.txHashes).toEqual([]);
+    // Single-address batch quarantines the address directly
+    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
+  });
+
+  it("falls back to individual simulation when batch fails, retries with valid addresses", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000B40");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000B41");
+    const humanCarol = getAddress("0x2000000000000000000000000000000000000B42");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    // Bob causes enableCRCForRouting to fail when present in the batch
+    routerService.enableFailAddresses.add(humanBob.toLowerCase());
+    // Bob also causes simulation to fail (he's the bad address)
+    routerService.simulationFailAddresses.add(humanBob.toLowerCase());
+
+    const enablementStore = new FakeRouterEnablementStore();
+    const deps = makeDeps({circlesRpc, routerService, enablementStore});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // Alice and Carol should succeed via retry batch (after Bob is quarantined)
+    expect(outcome.executedEnableCount).toBe(2);
+    expect(outcome.txHashes).toHaveLength(1);
+    expect(outcome.failedBatches).toHaveLength(0);
+    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
+
+    // Enablement store should contain Alice and Carol, not Bob
+    const enabled = await enablementStore.loadEnabledAddresses();
+    expect(enabled.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
+    expect(enabled.map(a => a.toLowerCase())).toContain(humanCarol.toLowerCase());
+    expect(enabled.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
+  });
+
+  it("all addresses bad — records failed batch, no retry", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000B50");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000B51");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    routerService.enableFailAddresses.add(humanAlice.toLowerCase());
+    routerService.enableFailAddresses.add(humanBob.toLowerCase());
+    routerService.simulationFailAddresses.add(humanAlice.toLowerCase());
+    routerService.simulationFailAddresses.add(humanBob.toLowerCase());
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    expect(outcome.executedEnableCount).toBe(0);
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.quarantinedAddresses).toHaveLength(2);
+    expect(outcome.txHashes).toEqual([]);
+  });
+
+  it("fallback skipped when simulateEnableCRCForRouting unavailable", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000B60");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000B61");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    // Router service without simulateEnableCRCForRouting
+    const routerService: any = {
+      enableCRCForRouting: async () => { throw new Error("batch revert"); }
+    };
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // No fallback → addresses are NOT quarantined, batch recorded as failed
+    expect(outcome.executedEnableCount).toBe(0);
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.quarantinedAddresses).toHaveLength(0);
+  });
+
+  it("retry batch after fallback also fails — still records quarantined addresses", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000B70");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000B71");
+    const humanCarol = getAddress("0x2000000000000000000000000000000000000B72");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    // Custom router: all enableCRCForRouting calls fail, but simulations
+    // only fail for Bob (so Alice and Carol are identified as "good")
+    const routerService = {
+      enableCRCForRouting: async (): Promise<string> => { throw new Error("nonce too low"); },
+      simulateEnableCRCForRouting: async (_bg: string, addrs: string[]) => {
+        if (addrs.some(a => a.toLowerCase() === humanBob.toLowerCase())) {
+          throw new Error("CALL_EXCEPTION for Bob");
+        }
+        return {gasEstimate: BigInt(150_000)};
+      }
+    };
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // Bob should still be quarantined even though retry also failed
+    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
+    // The retry batch (Alice, Carol) still failed
+    expect(outcome.failedBatches).toHaveLength(1);
+    expect(outcome.executedEnableCount).toBe(0);
+  });
+
+  it("single-address batch quarantines directly without probe phase", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000B80");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    const routerService = new FakeRouterService();
+    routerService.enableFailAddresses.add(humanAlice.toLowerCase());
+
+    const deps = makeDeps({circlesRpc, routerService});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 1});
+
+    const outcome = await runOnce(deps, cfg);
+
+    expect(outcome.executedEnableCount).toBe(0);
+    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanAlice.toLowerCase()]);
+    expect(outcome.failedBatches).toHaveLength(1);
+    // No simulation calls were made (skipped probe phase for single-address batch)
+    expect(routerService.simulationCalls).toBe(0);
+  });
+
+  it("transient RPC errors during probing keep address in retry batch instead of quarantining", async () => {
+    const humanAlice = getAddress("0x2000000000000000000000000000000000000B90");
+    const humanBob = getAddress("0x2000000000000000000000000000000000000B91");
+    const humanCarol = getAddress("0x2000000000000000000000000000000000000B92");
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.humanAvatars = [humanAlice, humanBob, humanCarol];
+    circlesRpc.trusteesByTruster[ROUTER_ADDRESS.toLowerCase()] = [];
+
+    // Custom router: first enable call fails (batch with bad addr), retry succeeds.
+    // Bob causes a genuine revert in simulation (quarantined).
+    // Carol causes a transient RPC error in simulation (kept in retry batch).
+    let enableCallCount = 0;
+    const routerService = {
+      enableCRCForRouting: async (_bg: string, addrs: string[]): Promise<string> => {
+        enableCallCount++;
+        // First call (full batch with Bob) fails
+        if (enableCallCount === 1) throw new Error("batch revert");
+        // Retry (Alice + Carol, Bob quarantined) succeeds
+        return `0xtx_retry_${enableCallCount}`;
+      },
+      simulateEnableCRCForRouting: async (_bg: string, addrs: string[]) => {
+        const addr = addrs[0];
+        if (addr.toLowerCase() === humanBob.toLowerCase()) {
+          // Genuine revert — NOT transient
+          throw new Error("execution reverted");
+        }
+        if (addr.toLowerCase() === humanCarol.toLowerCase()) {
+          // Transient RPC error — should NOT quarantine
+          const err = new Error("evm timeout");
+          (err as any).code = -32009;
+          throw err;
+        }
+        return {gasEstimate: BigInt(100_000)};
+      }
+    };
+
+    const enablementStore = new FakeRouterEnablementStore();
+    const deps = makeDeps({circlesRpc, routerService, enablementStore});
+    const cfg = makeConfig({dryRun: false, enableBatchSize: 10});
+
+    const outcome = await runOnce(deps, cfg);
+
+    // Bob is quarantined (genuine revert), Carol is NOT (transient error)
+    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
+    // Alice + Carol succeed in the retry (Carol kept in good list despite transient error)
+    expect(outcome.executedEnableCount).toBe(2);
+    expect(outcome.txHashes).toHaveLength(1);
+    expect(outcome.failedBatches).toHaveLength(0);
+
+    // Carol should be enabled (not quarantined)
+    const enabled = await enablementStore.loadEnabledAddresses();
+    expect(enabled.map(a => a.toLowerCase())).toContain(humanCarol.toLowerCase());
+    expect(enabled.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
   });
 });
 

@@ -4,6 +4,7 @@ import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {IRouterService} from "../../interfaces/IRouterService";
 import {IRouterEnablementStore} from "../../interfaces/IRouterEnablementStore";
+import {isTransientRpcError} from "../../services/retryWithBackoff";
 
 export type RunConfig = {
   rpcUrl: string;
@@ -39,6 +40,7 @@ export type RunOutcome = {
   pendingEnableCount: number;
   executedEnableCount: number;
   failedBatches: FailedBatch[];
+  quarantinedAddresses: string[];
   dryRun: boolean;
   txHashes: string[];
 };
@@ -162,6 +164,7 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
       pendingEnableCount: 0,
       executedEnableCount: 0,
       failedBatches: [],
+      quarantinedAddresses: [],
       dryRun,
       txHashes: []
     };
@@ -186,26 +189,40 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
   const txHashes: string[] = [];
   let executedEnableCount = 0;
   const failedBatches: FailedBatch[] = [];
+  // Quarantine is per-run and global across base groups. This is safe because each avatar
+  // is assigned to exactly one base group (via buildAvatarBaseGroupAssignments) and cannot
+  // appear in multiple targets. If this invariant changes, quarantine should be keyed by
+  // (baseGroup, address) to avoid cross-group contamination.
+  const quarantined = new Set<string>();
 
   for (const target of validTargets) {
     const batches = chunkArray(target.addresses, enableBatchSize);
     for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-      const batch = batches[batchIndex];
+      const rawBatch = batches[batchIndex];
+      const batch = rawBatch.filter((addr) => !quarantined.has(addr));
+      if (batch.length === 0) {
+        logger.info(
+          `Skipping batch ${batchIndex + 1}/${batches.length} for base group ${target.baseGroup} — all addresses quarantined.`
+        );
+        continue;
+      }
+
+      const batchLabel = `batch ${batchIndex + 1}/${batches.length}`;
       if (dryRun || !routerService) {
         logger.info(
           `[DRY-RUN] Would call enableCRCForRouting with ${batch.length} avatar(s) ` +
-            `(batch ${batchIndex + 1}/${batches.length}) for base group ${target.baseGroup}.`
+            `(${batchLabel}) for base group ${target.baseGroup}.`
         );
         if (routerService?.simulateEnableCRCForRouting) {
           try {
             const simulation = await routerService.simulateEnableCRCForRouting(target.baseGroup, batch);
             logger.info(
-              `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
+              `[DRY-RUN] enableCRCForRouting simulation ${batchLabel}: ok, gasEstimate=${simulation.gasEstimate.toString()}.`
             );
           } catch (simError) {
             const errMsg = simError instanceof Error ? simError.message : String(simError);
             logger.warn(
-              `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length} FAILED ` +
+              `[DRY-RUN] enableCRCForRouting simulation ${batchLabel} FAILED ` +
               `for ${batch.length} avatar(s) in base group ${target.baseGroup}: ${errMsg}`
             );
             failedBatches.push({
@@ -218,35 +235,23 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
           }
         } else {
           logger.info(
-            `[DRY-RUN] enableCRCForRouting simulation ${batchIndex + 1}/${batches.length}: skipped (no signer-backed simulator configured).`
+            `[DRY-RUN] enableCRCForRouting simulation ${batchLabel}: skipped (no signer-backed simulator configured).`
           );
         }
         continue;
       }
 
-      try {
-        const txHash = await routerService.enableCRCForRouting(target.baseGroup, batch);
-        txHashes.push(txHash);
-        executedEnableCount += batch.length;
-        await enablementStore.markEnabled(batch);
-        batch.forEach((address) => routerTrustSet.add(address));
-        logger.info(
-          `enableCRCForRouting tx=${txHash} (batch ${batchIndex + 1}/${batches.length}) for ${batch.length} avatar(s) in base group ${target.baseGroup}.`
-        );
-      } catch (batchError) {
-        const errMsg = batchError instanceof Error ? batchError.message : String(batchError);
-        logger.error(
-          `enableCRCForRouting FAILED (batch ${batchIndex + 1}/${batches.length}) ` +
-          `for ${batch.length} avatar(s) in base group ${target.baseGroup}: ${errMsg}`
-        );
-        logger.error(`Failed batch addresses: ${batch.join(", ")}`);
-        failedBatches.push({
-          baseGroup: target.baseGroup,
-          batchIndex: batchIndex + 1,
-          batchSize: batch.length,
-          addresses: batch,
-          error: errMsg
-        });
+      const result = await executeBatchWithFallback(
+        routerService, enablementStore, logger,
+        target.baseGroup, batch, batchLabel, batchIndex + 1, routerTrustSet
+      );
+      txHashes.push(...result.txHashes);
+      executedEnableCount += result.enabledCount;
+      for (const addr of result.quarantinedInThisBatch) {
+        quarantined.add(addr);
+      }
+      if (result.failedBatchEntry) {
+        failedBatches.push(result.failedBatchEntry);
       }
     }
   }
@@ -260,9 +265,129 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<RunOutcome> {
     pendingEnableCount,
     executedEnableCount: dryRun ? 0 : executedEnableCount,
     failedBatches,
+    quarantinedAddresses: Array.from(quarantined),
     dryRun,
     txHashes
   };
+}
+
+type BatchFallbackResult = {
+  txHashes: string[];
+  enabledCount: number;
+  quarantinedInThisBatch: string[];
+  failedBatchEntry?: FailedBatch;
+};
+
+async function executeBatchWithFallback(
+  routerService: IRouterService,
+  enablementStore: IRouterEnablementStore,
+  logger: ILoggerService,
+  baseGroup: string,
+  batch: string[],
+  batchLabel: string,
+  batchIndex: number,
+  routerTrustSet: Set<string>
+): Promise<BatchFallbackResult> {
+  const newlyQuarantined: string[] = [];
+
+  // Phase 1: try the full batch
+  try {
+    const txHash = await routerService.enableCRCForRouting(baseGroup, batch);
+    await enablementStore.markEnabled(batch);
+    batch.forEach((address) => routerTrustSet.add(address));
+    logger.info(
+      `enableCRCForRouting tx=${txHash} (${batchLabel}) for ${batch.length} avatar(s) in base group ${baseGroup}.`
+    );
+    return {txHashes: [txHash], enabledCount: batch.length, quarantinedInThisBatch: []};
+  } catch (batchError) {
+    const errMsg = batchError instanceof Error ? batchError.message : String(batchError);
+    logger.warn(
+      `enableCRCForRouting FAILED (${batchLabel}) for ${batch.length} avatar(s) in base group ${baseGroup}: ${errMsg}`
+    );
+
+    // No simulation available — record as failed batch (existing behavior)
+    if (!routerService.simulateEnableCRCForRouting) {
+      logger.error(`Failed batch addresses: ${batch.join(", ")}`);
+      return {
+        txHashes: [],
+        enabledCount: 0,
+        quarantinedInThisBatch: [],
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg}
+      };
+    }
+
+    // Single-address batch — no need to probe, just quarantine it
+    if (batch.length === 1) {
+      newlyQuarantined.push(batch[0]);
+      logger.warn(`Quarantined address ${batch[0]} — failed in base group ${baseGroup}: ${errMsg}`);
+      return {
+        txHashes: [],
+        enabledCount: 0,
+        quarantinedInThisBatch: newlyQuarantined,
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: 1, addresses: batch, error: errMsg}
+      };
+    }
+
+    // Phase 2: probe each address individually via simulation
+    logger.info(`Probing ${batch.length} address(es) individually to identify revert-causing address(es)...`);
+    const good: string[] = [];
+    const bad: string[] = [];
+
+    for (const addr of batch) {
+      try {
+        await routerService.simulateEnableCRCForRouting(baseGroup, [addr]);
+        good.push(addr);
+      } catch (probeErr) {
+        // Transient RPC errors (timeouts, rate limits) are not proof the address is bad —
+        // keep it in the retry batch rather than quarantining it.
+        if (isTransientRpcError(probeErr)) {
+          good.push(addr);
+          const probeMsg = probeErr instanceof Error ? probeErr.message : String(probeErr);
+          logger.warn(`Probe for ${addr} hit transient RPC error — keeping in retry batch: ${probeMsg}`);
+        } else {
+          bad.push(addr);
+          newlyQuarantined.push(addr);
+          const probeMsg = probeErr instanceof Error ? probeErr.message : String(probeErr);
+          logger.warn(`Quarantined address ${addr} — simulation revert: ${probeMsg}`);
+        }
+      }
+    }
+
+    if (bad.length > 0) {
+      logger.warn(`Identified ${bad.length} revert-causing address(es): ${bad.join(", ")}`);
+    }
+
+    if (good.length === 0) {
+      logger.error(`All ${batch.length} address(es) in ${batchLabel} cause reverts. No retry possible.`);
+      return {
+        txHashes: [],
+        enabledCount: 0,
+        quarantinedInThisBatch: newlyQuarantined,
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: errMsg}
+      };
+    }
+
+    // Phase 3: retry with only the valid addresses
+    logger.info(`Retrying ${batchLabel} with ${good.length} valid address(es) (${bad.length} quarantined).`);
+    try {
+      const txHash = await routerService.enableCRCForRouting(baseGroup, good);
+      await enablementStore.markEnabled(good);
+      good.forEach((address) => routerTrustSet.add(address));
+      logger.info(
+        `enableCRCForRouting retry tx=${txHash} (${batchLabel}) for ${good.length} avatar(s) in base group ${baseGroup}.`
+      );
+      return {txHashes: [txHash], enabledCount: good.length, quarantinedInThisBatch: newlyQuarantined};
+    } catch (retryError) {
+      const retryMsg = retryError instanceof Error ? retryError.message : String(retryError);
+      logger.error(`enableCRCForRouting retry FAILED (${batchLabel}): ${retryMsg}`);
+      return {
+        txHashes: [],
+        enabledCount: 0,
+        quarantinedInThisBatch: newlyQuarantined,
+        failedBatchEntry: {baseGroup, batchIndex, batchSize: batch.length, addresses: batch, error: retryMsg}
+      };
+    }
+  }
 }
 
 async function partitionBlacklistedAddresses(

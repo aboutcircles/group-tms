@@ -371,6 +371,10 @@ export class FakeRouterService implements IRouterService {
   failOnCallIndex?: number;
   /** If set, only fail on the Nth simulation (1-indexed). Other simulations succeed. */
   failOnSimulationIndex?: number;
+  /** Addresses whose presence in a batch causes enableCRCForRouting to throw */
+  enableFailAddresses = new Set<string>();
+  /** Addresses whose presence in a batch causes simulateEnableCRCForRouting to throw */
+  simulationFailAddresses = new Set<string>();
 
   constructor(txHashResponses: string[] = []) {
     this.responseQueue = [...txHashResponses];
@@ -378,6 +382,10 @@ export class FakeRouterService implements IRouterService {
 
   async enableCRCForRouting(baseGroup: string, crcAddresses: string[]): Promise<string> {
     this.calls.push({baseGroup, crcAddresses: [...crcAddresses]});
+    const failAddr = crcAddresses.find(a => this.enableFailAddresses.has(a.toLowerCase()));
+    if (failAddr) {
+      throw new Error(`CALL_EXCEPTION for ${failAddr}`);
+    }
     if (this.failWith && (this.failOnCallIndex === undefined || this.failOnCallIndex === this.calls.length)) {
       throw this.failWith;
     }
@@ -392,6 +400,10 @@ export class FakeRouterService implements IRouterService {
   async simulateEnableCRCForRouting(baseGroup: string, crcAddresses: string[]): Promise<TransactionSimulationResult> {
     this.simulationCalls += 1;
     this.simulations.push({baseGroup, crcAddresses: [...crcAddresses]});
+    const failAddr = crcAddresses.find(a => this.simulationFailAddresses.has(a.toLowerCase()));
+    if (failAddr) {
+      throw new Error(`CALL_EXCEPTION for ${failAddr}`);
+    }
     if (this.failWith && (this.failOnSimulationIndex === undefined || this.failOnSimulationIndex === this.simulationCalls)) {
       throw this.failWith;
     }
