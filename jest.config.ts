@@ -15,6 +15,7 @@ module.exports = {
     "<rootDir>/src/apps/oic/logic.ts",
     "<rootDir>/src/apps/gp-crc/logic.ts",
     "<rootDir>/src/apps/router-tms/logic.ts",
+    "<rootDir>/src/apps/group-affiliates/logic.ts",
     "!<rootDir>/src/main.ts",
     "!**/*.d.ts",
     "!**/__tests__/**",

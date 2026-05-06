@@ -32,6 +32,13 @@ Specialized services for Circles protocol trust management:
 * Incremental scanning with configurable refresh intervals
 * Batch processing for efficient trust operations
 
+## Group Affiliates App
+* Monitors `AffiliateGroupChanged` events from the Circles affiliate registry over WSS
+* Trusts humans into one of five managed groups when they set that group as their affiliate
+* Untrusts humans from a managed group when they switch away from it
+* Replays historical logs from a persisted cursor on startup before listening live
+* Supports dry-run mode with optional Safe transaction simulation
+
 ## Requirements
 
 * Node.js **≥ 24**
@@ -60,6 +67,7 @@ npm run start:gp-crc
 npm run start:dublin-tms
 npm run start:oic
 npm run start:all
+npm run start:group-affiliates
 ```
 
 ## Configuration (.env)
@@ -226,6 +234,38 @@ SLACK_WEBHOOK_URL_INFO=                    # Secondary webhook for informational
 VERBOSE_LOGGING=1
 ```
 
+### Group Affiliates App Configuration
+
+```dotenv
+# RPC & affiliate registry
+RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
+GROUP_AFFILIATES_WSS_URL=wss://rpc.aboutcircles.com/ws/chain
+GROUP_AFFILIATES_REGISTRY_ADDRESS=0xca8222e780d046707083f51377b5fd85e2866014
+
+# Safe execution (required unless dry run)
+GROUP_AFFILIATES_SAFE_ADDRESS=               # Safe that can execute trust/untrust for all managed groups
+GROUP_AFFILIATES_SAFE_SIGNER_PRIVATE_KEY=    # Private key for one Safe signer
+GROUP_AFFILIATES_SIGNER_ADDRESS=             # Optional expected signer address for key validation
+
+# Scan window / batching
+GROUP_AFFILIATES_START_BLOCK=41734312
+GROUP_AFFILIATES_BATCH_SIZE=20
+CONFIRMATION_BLOCKS=2
+
+# Operation mode
+DRY_RUN=0                                    # Set to "1" to log actions without sending Safe transactions
+
+# Notifications / coordination
+SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=
+LEADER_DB_URL=                               # Optional: enables leader election and cursor persistence
+INSTANCE_ID=                                 # Required when LEADER_DB_URL is set
+
+# Logging
+VERBOSE_LOGGING=1
+```
+
 ### Gnosis Group App Configuration
 
 ```dotenv
@@ -330,6 +370,12 @@ VERBOSE_LOGGING=1
 * OIC start block is hardcoded to `41734312`
 * `OIC_META_ORG_ADDRESS` is required - this is the MetaOrg whose trustees will be monitored
 * Use `DRY_RUN=1` for testing without making actual blockchain transactions
+
+### Group Affiliates App
+* Uses one Safe for all five managed group contracts; set `GROUP_AFFILIATES_SAFE_ADDRESS` plus `GROUP_AFFILIATES_SAFE_SIGNER_PRIVATE_KEY` unless `DRY_RUN=1`
+* `GROUP_AFFILIATES_WSS_URL` defaults to the `/ws/chain` variant derived from `RPC_URL`
+* Cursor persistence uses `LEADER_DB_URL` and app name `group-affiliates`
+* `DRY_RUN=1` logs planned trust/untrust batches and simulates them when Safe credentials are configured
 * Service maintains incremental state to avoid re-processing old events
 
 ### Dublin TMS App
