@@ -16,9 +16,12 @@ import {CirclesRpcService} from "../../services/circlesRpcService";
 import {
   DEFAULT_GROUP_AFFILIATES_BATCH_SIZE,
   DEFAULT_MANAGED_GROUP_ADDRESSES,
+  DEFAULT_REPUTATION_SCORE_THRESHOLD,
+  runReputationReconciliation,
   runForAffiliateEvents,
   type RunConfig
 } from "./logic";
+import {ReputationService} from "./reputationService";
 import {
   AffiliateGroupChangedListenerHandle,
   AffiliateGroupChangedWithCursor,
@@ -34,6 +37,7 @@ import {
 
 const APP_NAME = "group-affiliates";
 const DEFAULT_AFFILIATE_REGISTRY_ADDRESS = "0xca8222e780d046707083f51377b5fd85e2866014";
+const DEFAULT_REPUTATION_BASE_URL = "https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars";
 const DEFAULT_START_BLOCK = 41_734_312;
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
@@ -43,6 +47,10 @@ const wsUrl = process.env.GROUP_AFFILIATES_WSS_URL || deriveGroupAffiliatesWsUrl
 const startBlock = parseEnvInt("GROUP_AFFILIATES_START_BLOCK", DEFAULT_START_BLOCK);
 const confirmationBlocks = parseEnvInt("CONFIRMATION_BLOCKS", 2);
 const batchSize = parseEnvInt("GROUP_AFFILIATES_BATCH_SIZE", DEFAULT_GROUP_AFFILIATES_BATCH_SIZE);
+const reputationScoreThreshold = parseEnvNumber("GROUP_AFFILIATES_REPUTATION_SCORE_THRESHOLD", DEFAULT_REPUTATION_SCORE_THRESHOLD);
+const reputationBaseUrl = process.env.GROUP_AFFILIATES_REPUTATION_BASE_URL || DEFAULT_REPUTATION_BASE_URL;
+const reputationTimeoutMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_TIMEOUT_MS", 30_000);
+const reputationRefreshMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_REFRESH_MS", 30 * 60 * 1000);
 const dryRun = process.env.DRY_RUN === "1";
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const safeAddress = process.env.GROUP_AFFILIATES_SAFE_ADDRESS || "";
@@ -66,15 +74,18 @@ const circlesRpc = new CirclesRpcService(rpcUrl, (message) => {
     SlackSeverity.WARNING
   ).catch((error) => console.warn("[SlackAlert] failed:", (error as Error).message));
 });
+const reputationService = new ReputationService(reputationBaseUrl, reputationTimeoutMs);
 
 let leaderElection: LeaderElection | null = null;
 let listener: AffiliateGroupChangedListenerHandle | null = null;
 let groupService: IGroupService;
 let executionQueue: Promise<void> = Promise.resolve();
+let reputationRefreshTimer: NodeJS.Timeout | null = null;
 
 const config: RunConfig = {
   managedGroupAddresses: DEFAULT_MANAGED_GROUP_ADDRESSES,
   batchSize,
+  reputationScoreThreshold,
   dryRun
 };
 
@@ -143,6 +154,7 @@ async function start(): Promise<void> {
   try {
     cursor = await runStartupReplay(stateStore, cursor);
     startRealtimeListener(stateStore, cursor);
+    startReputationReconciliationLoop();
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
     recordRunError(APP_NAME);
@@ -238,7 +250,7 @@ async function processEvents(
   const startedAt = Date.now();
   try {
     const outcome = await runForAffiliateEvents(
-      {circlesRpc, groupService, logger: runLogger},
+      {circlesRpc, groupService, reputationService, logger: runLogger},
       {...config, dryRun: effectiveDryRun},
       events
     );
@@ -253,9 +265,55 @@ async function processEvents(
     runLogger.info(
       `group-affiliates batch completed: events=${outcome.processedEvents} ` +
       `ignored=${outcome.ignoredEvents} trustTxs=${outcome.trustTxHashes.length} ` +
-      `untrustTxs=${outcome.untrustTxHashes.length} dryRun=${effectiveDryRun}`
+      `untrustTxs=${outcome.untrustTxHashes.length} ` +
+      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
     );
     return !effectiveDryRun;
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    const consecutiveErrors = errorTracker.recordError();
+    recordRunError(APP_NAME);
+    rootLogger.error(`Consecutive error ${consecutiveErrors} of ${errorsBeforeCrash}`);
+    rootLogger.error(formatErrorWithCauses(error));
+    if (errorTracker.shouldAlert()) {
+      await notifySlackRunError(error, consecutiveErrors);
+      setTimeout(() => process.exit(1), 3000).unref();
+    }
+    throw error;
+  }
+}
+
+function startReputationReconciliationLoop(): void {
+  if (reputationRefreshMs <= 0 || reputationRefreshTimer) {
+    return;
+  }
+
+  rootLogger.info(`Starting reputation reconciliation loop every ${reputationRefreshMs}ms.`);
+  reputationRefreshTimer = setInterval(() => {
+    void enqueueExclusive(async () => {
+      const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
+      await processReputationReconciliation(effectiveDryRun);
+    }).catch((error) => {
+      rootLogger.error("Reputation reconciliation failed:");
+      rootLogger.error(formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
+    });
+  }, reputationRefreshMs);
+}
+
+async function processReputationReconciliation(effectiveDryRun: boolean): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    const outcome = await runReputationReconciliation(
+      {circlesRpc, groupService, reputationService, logger: runLogger.child("reputation")},
+      {...config, dryRun: effectiveDryRun}
+    );
+    recordRunSuccess(APP_NAME, Date.now() - startedAt);
+    errorTracker.recordSuccess();
+    runLogger.info(
+      `group-affiliates reputation reconciliation completed: ` +
+      `untrustTxs=${outcome.untrustTxHashes.length} ` +
+      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
+    );
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
     const consecutiveErrors = errorTracker.recordError();
@@ -326,6 +384,10 @@ async function gracefulShutdown(signal: string): Promise<void> {
       listener = null;
     }
   }
+  if (reputationRefreshTimer) {
+    clearInterval(reputationRefreshTimer);
+    reputationRefreshTimer = null;
+  }
 
   try {
     await leaderElection?.stop();
@@ -354,6 +416,9 @@ async function notifySlackStartup(): Promise<void> {
     `- Start Block: ${startBlock}\n` +
     `- Confirmations: ${confirmationBlocks}\n` +
     `- Batch Size: ${batchSize}\n` +
+    `- Reputation URL: ${reputationBaseUrl}\n` +
+    `- Reputation Threshold: > ${reputationScoreThreshold}\n` +
+    `- Reputation Refresh (ms): ${reputationRefreshMs}\n` +
     `- Safe: ${safeAddress || "(not set)"}\n` +
     `- Safe signer configured: ${safeSignerPrivateKey.trim().length > 0}\n` +
     `- Dry Run: ${dryRun}\n` +
@@ -413,6 +478,20 @@ function parseEnvInt(name: string, fallback: number): number {
   const value = Number.parseInt(raw, 10);
   if (Number.isNaN(value)) {
     rootLogger.warn(`Invalid integer for ${name}='${raw}', using fallback ${fallback}.`);
+    return fallback;
+  }
+  return value;
+}
+
+function parseEnvNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  if (!Number.isFinite(value)) {
+    rootLogger.warn(`Invalid number for ${name}='${raw}', using fallback ${fallback}.`);
     return fallback;
   }
   return value;

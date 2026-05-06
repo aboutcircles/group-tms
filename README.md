@@ -253,6 +253,12 @@ GROUP_AFFILIATES_START_BLOCK=41734312
 GROUP_AFFILIATES_BATCH_SIZE=20
 CONFIRMATION_BLOCKS=2
 
+# Reputation gate
+GROUP_AFFILIATES_REPUTATION_BASE_URL=https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars
+GROUP_AFFILIATES_REPUTATION_SCORE_THRESHOLD=40
+GROUP_AFFILIATES_REPUTATION_TIMEOUT_MS=30000
+GROUP_AFFILIATES_REPUTATION_REFRESH_MS=1800000
+
 # Operation mode
 DRY_RUN=0                                    # Set to "1" to log actions without sending Safe transactions
 
@@ -374,6 +380,8 @@ VERBOSE_LOGGING=1
 ### Group Affiliates App
 * Uses one Safe for all five managed group contracts; set `GROUP_AFFILIATES_SAFE_ADDRESS` plus `GROUP_AFFILIATES_SAFE_SIGNER_PRIVATE_KEY` unless `DRY_RUN=1`
 * `GROUP_AFFILIATES_WSS_URL` defaults to the `/ws/chain` variant derived from `RPC_URL`
+* Only trusts affiliates whose reputation endpoint returns `reputation_score > GROUP_AFFILIATES_REPUTATION_SCORE_THRESHOLD`
+* Periodically rechecks current trustees and untrusts addresses whose reputation score falls to the threshold or below
 * Cursor persistence uses `LEADER_DB_URL` and app name `group-affiliates`
 * `DRY_RUN=1` logs planned trust/untrust batches and simulates them when Safe credentials are configured
 * Service maintains incremental state to avoid re-processing old events

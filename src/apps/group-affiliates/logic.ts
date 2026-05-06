@@ -4,8 +4,10 @@ import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
 import {IGroupService} from "../../interfaces/IGroupService";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {AffiliateGroupChangedWithCursor, EventCursor, compareEventCursor} from "./realtime";
+import {IReputationService} from "./reputationService";
 
 export const DEFAULT_GROUP_AFFILIATES_BATCH_SIZE = 20;
+export const DEFAULT_REPUTATION_SCORE_THRESHOLD = 40;
 
 export const DEFAULT_MANAGED_GROUP_ADDRESSES = [
   "0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026",
@@ -18,12 +20,14 @@ export const DEFAULT_MANAGED_GROUP_ADDRESSES = [
 export type RunConfig = {
   managedGroupAddresses: readonly string[];
   batchSize: number;
+  reputationScoreThreshold: number;
   dryRun?: boolean;
 };
 
 export type Deps = {
   circlesRpc: ICirclesRpc;
   groupService: IGroupService;
+  reputationService: IReputationService;
   logger: ILoggerService;
 };
 
@@ -35,6 +39,7 @@ export type GroupAffiliateOutcome = {
   untrustedByGroup: Record<string, string[]>;
   trustTxHashes: string[];
   untrustTxHashes: string[];
+  ineligibleByReputation: string[];
   latestCursor: EventCursor | null;
 };
 
@@ -45,7 +50,7 @@ export async function runForAffiliateEvents(
   cfg: RunConfig,
   events: AffiliateGroupChangedWithCursor[]
 ): Promise<GroupAffiliateOutcome> {
-  const {circlesRpc, groupService, logger} = deps;
+  const {circlesRpc, groupService, reputationService, logger} = deps;
   const managedGroups = normalizeManagedGroups(cfg.managedGroupAddresses);
   const sortedEvents = dedupeAndSortEvents(events);
   const latestCursor = sortedEvents.length > 0
@@ -82,18 +87,33 @@ export async function runForAffiliateEvents(
   }
 
   const affectedGroups = Array.from(touchedHumansByGroup.keys()).sort();
+  const touchedHumans = uniqueHumansFromPlans(touchedHumansByGroup);
+  const reputationVerdicts = await reputationService.check(touchedHumans, cfg.reputationScoreThreshold);
+  const ineligibleByReputation = touchedHumans
+    .filter((human) => !reputationVerdicts.get(human)?.eligible)
+    .sort();
+  if (ineligibleByReputation.length > 0) {
+    logger.info(
+      `Reputation gate: ${ineligibleByReputation.length} touched affiliate(s) are not eligible ` +
+      `(required reputation_score > ${cfg.reputationScoreThreshold}).`
+    );
+  }
+
   const trustedByGroup: Record<string, string[]> = {};
   const untrustedByGroup: Record<string, string[]> = {};
 
   for (const group of affectedGroups) {
     const touchedHumans = touchedHumansByGroup.get(group) ?? new Set<string>();
-    const desiredTrusted = desiredTrustedByGroup.get(group) ?? new Set<string>();
+    const desiredTrusted = new Set(
+      Array.from(desiredTrustedByGroup.get(group) ?? new Set<string>())
+        .filter((human) => reputationVerdicts.get(human)?.eligible === true)
+    );
     const currentTrustees = new Set(
       (await circlesRpc.fetchAllTrustees(group)).map((address) => normalizeAddress(address)).filter(Boolean) as string[]
     );
 
     const toUntrust = Array.from(touchedHumans)
-      .filter((human) => !desiredTrusted.has(human) && currentTrustees.has(human))
+      .filter((human) => currentTrustees.has(human) && (!desiredTrusted.has(human) || reputationVerdicts.get(human)?.eligible !== true))
       .sort();
     const toTrust = Array.from(desiredTrusted)
       .filter((human) => !currentTrustees.has(human))
@@ -120,6 +140,7 @@ export async function runForAffiliateEvents(
       untrustedByGroup,
       trustTxHashes: [],
       untrustTxHashes: [],
+      ineligibleByReputation,
       latestCursor
     };
   }
@@ -140,7 +161,87 @@ export async function runForAffiliateEvents(
     untrustedByGroup,
     trustTxHashes,
     untrustTxHashes,
+    ineligibleByReputation,
     latestCursor
+  };
+}
+
+export async function runReputationReconciliation(
+  deps: Deps,
+  cfg: RunConfig
+): Promise<GroupAffiliateOutcome> {
+  const {circlesRpc, groupService, reputationService, logger} = deps;
+  const managedGroups = Array.from(normalizeManagedGroups(cfg.managedGroupAddresses)).sort();
+  const trustedByGroup: Record<string, string[]> = {};
+  const untrustedByGroup: Record<string, string[]> = {};
+  const allTrustees = new Set<string>();
+
+  for (const group of managedGroups) {
+    const trustees = (await circlesRpc.fetchAllTrustees(group))
+      .map((address) => normalizeAddress(address))
+      .filter(Boolean) as string[];
+    trustedByGroup[group] = [];
+    untrustedByGroup[group] = [];
+    for (const trustee of trustees) {
+      allTrustees.add(trustee);
+    }
+  }
+
+  const reputationVerdicts = await reputationService.check(Array.from(allTrustees), cfg.reputationScoreThreshold);
+  const ineligibleByReputation = Array.from(allTrustees)
+    .filter((trustee) => !reputationVerdicts.get(trustee)?.eligible)
+    .sort();
+
+  if (ineligibleByReputation.length === 0) {
+    logger.info(`Reputation reconciliation: all ${allTrustees.size} currently trusted affiliate(s) are eligible.`);
+  } else {
+    logger.info(
+      `Reputation reconciliation: ${ineligibleByReputation.length}/${allTrustees.size} currently trusted affiliate(s) ` +
+      `are not eligible (required reputation_score > ${cfg.reputationScoreThreshold}).`
+    );
+  }
+
+  const ineligibleSet = new Set(ineligibleByReputation);
+  for (const group of managedGroups) {
+    const trustees = (await circlesRpc.fetchAllTrustees(group))
+      .map((address) => normalizeAddress(address))
+      .filter(Boolean) as string[];
+    untrustedByGroup[group] = trustees.filter((trustee) => ineligibleSet.has(trustee)).sort();
+  }
+
+  if (cfg.dryRun) {
+    await simulatePlannedOperations(groupService, cfg.batchSize, untrustedByGroup, trustedByGroup, logger);
+    return {
+      processedEvents: 0,
+      ignoredEvents: 0,
+      affectedGroups: managedGroups,
+      trustedByGroup,
+      untrustedByGroup,
+      trustTxHashes: [],
+      untrustTxHashes: [],
+      ineligibleByReputation,
+      latestCursor: null
+    };
+  }
+
+  const {trustTxHashes, untrustTxHashes} = await executePlannedOperations(
+    groupService,
+    cfg.batchSize,
+    untrustedByGroup,
+    trustedByGroup,
+    logger
+  );
+
+  return {
+    processedEvents: 0,
+    ignoredEvents: 0,
+    affectedGroups: managedGroups,
+    trustedByGroup,
+    untrustedByGroup,
+    trustTxHashes,
+    untrustTxHashes,
+    ineligibleByReputation,
+    latestCursor: null
   };
 }
 
@@ -200,6 +301,16 @@ function deleteFromSetMap(map: GroupPlans, key: string, value: string): void {
     return;
   }
   map.set(key, new Set<string>());
+}
+
+function uniqueHumansFromPlans(plans: GroupPlans): string[] {
+  const humans = new Set<string>();
+  for (const values of plans.values()) {
+    for (const value of values) {
+      humans.add(value);
+    }
+  }
+  return Array.from(humans).sort();
 }
 
 async function executePlannedOperations(
