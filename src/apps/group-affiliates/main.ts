@@ -51,6 +51,7 @@ const reputationScoreThreshold = parseEnvNumber("GROUP_AFFILIATES_REPUTATION_SCO
 const reputationBaseUrl = process.env.GROUP_AFFILIATES_REPUTATION_BASE_URL || DEFAULT_REPUTATION_BASE_URL;
 const reputationTimeoutMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_TIMEOUT_MS", 30_000);
 const reputationRefreshMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_REFRESH_MS", 30 * 60 * 1000);
+const reputationConcurrency = parseEnvInt("GROUP_AFFILIATES_REPUTATION_CONCURRENCY", 8);
 const dryRun = process.env.DRY_RUN === "1";
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const safeAddress = process.env.GROUP_AFFILIATES_SAFE_ADDRESS || "";
@@ -74,7 +75,7 @@ const circlesRpc = new CirclesRpcService(rpcUrl, (message) => {
     SlackSeverity.WARNING
   ).catch((error) => console.warn("[SlackAlert] failed:", (error as Error).message));
 });
-const reputationService = new ReputationService(reputationBaseUrl, reputationTimeoutMs);
+const reputationService = new ReputationService(reputationBaseUrl, reputationTimeoutMs, reputationConcurrency);
 
 let leaderElection: LeaderElection | null = null;
 let listener: AffiliateGroupChangedListenerHandle | null = null;

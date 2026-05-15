@@ -18,14 +18,32 @@ type ReputationResponse = {
 export class ReputationService implements IReputationService {
   constructor(
     private readonly baseUrl: string,
-    private readonly timeoutMs: number = 30_000
+    private readonly timeoutMs: number = 30_000,
+    private readonly concurrency: number = 8
   ) {
   }
 
   async check(addresses: string[], threshold: number): Promise<Map<string, ReputationVerdict>> {
     const unique = Array.from(new Set(addresses.map((address) => getAddress(address).toLowerCase())));
-    const entries = await Promise.all(unique.map((address) => this.fetchVerdict(address, threshold)));
-    return new Map(entries.map((entry) => [entry.address, entry]));
+    // Rolling-window concurrency: at most `concurrency` fetches in flight at
+    // any time. Prevents the startup-replay path from firing hundreds of
+    // simultaneous requests, which overwhelms both the local TCP stack
+    // (undici ConnectTimeoutError on the connect queue) and the upstream
+    // rep_score service (2-worker gunicorn → queue blow-up).
+    const results = new Array<ReputationVerdict>(unique.length);
+    let nextIndex = 0;
+    const worker = async (): Promise<void> => {
+      while (true) {
+        const i = nextIndex++;
+        if (i >= unique.length) {
+          return;
+        }
+        results[i] = await this.fetchVerdict(unique[i], threshold);
+      }
+    };
+    const workerCount = Math.max(1, Math.min(this.concurrency, unique.length));
+    await Promise.all(Array.from({length: workerCount}, worker));
+    return new Map(results.map((entry) => [entry.address, entry]));
   }
 
   private async fetchVerdict(address: string, threshold: number): Promise<ReputationVerdict> {
