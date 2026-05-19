@@ -11,8 +11,7 @@ import {recordRunError, recordRunSuccess, setLeaderStatus, startMetricsServer} f
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {SafeGroupService} from "../../services/safeGroupService";
 import {SlackService} from "../../services/slackService";
-import {CursorStateStore, StateStore} from "../../services/stateStore";
-import {FileStateStore} from "../../services/fileStateStore";
+import {StateStore} from "../../services/stateStore";
 import {CirclesRpcService} from "../../services/circlesRpcService";
 import {
   DEFAULT_GROUP_AFFILIATES_BATCH_SIZE,
@@ -169,19 +168,7 @@ async function start(): Promise<void> {
 
   await notifySlackStartup();
 
-  // Cursor persistence: prefer the leader DB when present; otherwise
-  // fall back to a file (group-affiliates has no LEADER_DB_URL — without
-  // either, every restart full-replays from the start block).
-  const stateFilePath = process.env.GROUP_AFFILIATES_STATE_FILE;
-  let stateStore: CursorStateStore | null = null;
-  if (process.env.LEADER_DB_URL) {
-    stateStore = new StateStore(process.env.LEADER_DB_URL);
-  } else if (stateFilePath && stateFilePath.trim().length > 0) {
-    stateStore = new FileStateStore(stateFilePath);
-    rootLogger.info(`[state-store] Using file-backed cursor at ${stateFilePath}`);
-  } else {
-    rootLogger.warn("[state-store] No LEADER_DB_URL or GROUP_AFFILIATES_STATE_FILE — cursor will NOT persist; every restart full-replays.");
-  }
+  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
   let cursor = await loadCursor(stateStore);
 
   try {
@@ -201,7 +188,7 @@ async function start(): Promise<void> {
 }
 
 async function runStartupReplay(
-  stateStore: CursorStateStore | null,
+  stateStore: StateStore | null,
   cursor: EventCursor
 ): Promise<EventCursor> {
   const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
@@ -244,7 +231,7 @@ async function runStartupReplay(
   return cursor;
 }
 
-function startRealtimeListener(stateStore: CursorStateStore | null, cursor: EventCursor): void {
+function startRealtimeListener(stateStore: StateStore | null, cursor: EventCursor): void {
   if (listener) {
     return;
   }
@@ -369,7 +356,7 @@ async function processReputationReconciliation(effectiveDryRun: boolean): Promis
   }
 }
 
-async function loadCursor(stateStore: CursorStateStore | null): Promise<EventCursor> {
+async function loadCursor(stateStore: StateStore | null): Promise<EventCursor> {
   if (!stateStore) {
     return makeInclusiveBlockCursor(startBlock);
   }
@@ -390,7 +377,7 @@ async function loadCursor(stateStore: CursorStateStore | null): Promise<EventCur
   return makeInclusiveBlockCursor(startBlock);
 }
 
-async function saveCursor(stateStore: CursorStateStore | null, cursor: EventCursor): Promise<void> {
+async function saveCursor(stateStore: StateStore | null, cursor: EventCursor): Promise<void> {
   if (!stateStore) {
     return;
   }

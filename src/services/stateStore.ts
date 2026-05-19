@@ -21,19 +21,7 @@ export interface PersistedState {
   data?: Record<string, unknown>;
 }
 
-/**
- * Common contract for scan-cursor persistence. Implemented by the
- * PostgreSQL-backed StateStore (used when LEADER_DB_URL is set) and the
- * file-backed FileStateStore (used by workers with no leader DB, e.g.
- * group-affiliates) so a restart resumes instead of full-replaying.
- */
-export interface CursorStateStore {
-  load(appName: string): Promise<PersistedState | null>;
-  save(appName: string, lastScannedBlock: number, data?: Record<string, unknown>): Promise<void>;
-  close(): Promise<void>;
-}
-
-export class StateStore implements CursorStateStore {
+export class StateStore {
   private pool: pg.Pool;
   private ready: Promise<void>;
 
