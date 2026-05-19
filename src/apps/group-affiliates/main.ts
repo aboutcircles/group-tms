@@ -270,6 +270,14 @@ function startRealtimeListener(stateStore: CursorStateStore | null, cursor: Even
   });
 }
 
+// Returns true when the batch was processed successfully, meaning the
+// scan cursor may advance and persist. This is deliberately decoupled
+// from dry-run: dry-run only suppresses sending trust txs (handled by
+// config.dryRun inside runForAffiliateEvents) — the worker has still
+// observed these events. Tying advancement to !dryRun kept lastSeenCursor
+// and the persisted cursor pinned at the start block, so every flush
+// re-processed the same events and every restart full-replayed millions
+// of blocks (the node-wedging load this worker is meant to avoid).
 async function processEvents(
   events: AffiliateGroupChangedWithCursor[],
   effectiveDryRun: boolean
@@ -277,7 +285,7 @@ async function processEvents(
   if (events.length === 0) {
     runLogger.info("No group affiliate events to process.");
     recordRunSuccess(APP_NAME, 0);
-    return !effectiveDryRun;
+    return true;
   }
 
   const startedAt = Date.now();
@@ -301,7 +309,7 @@ async function processEvents(
       `untrustTxs=${outcome.untrustTxHashes.length} ` +
       `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
     );
-    return !effectiveDryRun;
+    return true;
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
     const consecutiveErrors = errorTracker.recordError();
