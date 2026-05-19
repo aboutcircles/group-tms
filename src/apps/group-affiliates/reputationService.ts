@@ -74,6 +74,123 @@ export class ReputationService implements IReputationService {
   }
 }
 
+type ScoresItem = {
+  address?: unknown;
+  reputation_score?: unknown;
+};
+
+type ScoresPage = {
+  total?: unknown;
+  items?: unknown;
+};
+
+/**
+ * Pulls the whole group reputation set from the rep_score `/scores`
+ * endpoint in a few sequential pages instead of one HTTP request per
+ * address. The per-address ReputationService fans out N requests across
+ * thousands of trustees on the full-reconcile path, which blows the
+ * rep_score service's request rate limit and aborts the run. Paging
+ * `/scores` (limit 100) is ~ceil(total/100) sequential requests total,
+ * well under the limit, and serves repeated/incremental checks from a
+ * short-lived snapshot so an event burst can't re-page on every event.
+ */
+export class BulkReputationService implements IReputationService {
+  private snapshot: Map<string, number | null> | null = null;
+  private snapshotBuiltAt = 0;
+
+  constructor(
+    private readonly scoresUrl: string,
+    private readonly timeoutMs: number = 30_000,
+    private readonly snapshotTtlMs: number = 5 * 60 * 1000,
+    private readonly pageSize: number = 100
+  ) {
+  }
+
+  async check(addresses: string[], threshold: number): Promise<Map<string, ReputationVerdict>> {
+    const snapshot = await this.ensureSnapshot();
+    const unique = Array.from(new Set(addresses.map((address) => getAddress(address).toLowerCase())));
+    return new Map(unique.map((address) => {
+      // Absent from the group snapshot ⇒ not a scored member ⇒ ineligible.
+      // Mirrors the per-address service, where a missing/failed lookup
+      // also yields a non-eligible verdict.
+      const score = snapshot.has(address) ? snapshot.get(address)! : null;
+      return [address, {address, reputationScore: score, eligible: score !== null && score > threshold}];
+    }));
+  }
+
+  private async ensureSnapshot(): Promise<Map<string, number | null>> {
+    if (this.snapshot && Date.now() - this.snapshotBuiltAt < this.snapshotTtlMs) {
+      return this.snapshot;
+    }
+
+    // Build into a local map and only publish on full success. A failure
+    // partway through pagination must NOT yield a partial snapshot —
+    // that would make real members look absent and mass-untrust them.
+    const built = new Map<string, number | null>();
+    let parsedScores = 0;
+    let offset = 0;
+    let total = Number.POSITIVE_INFINITY;
+    const base = this.scoresUrl.replace(/\/+$/, "");
+    // Hard ceiling so a misbehaving API (always-full page) can't loop forever.
+    const maxPages = 10_000;
+
+    for (let page = 0; page < maxPages; page++) {
+      const sep = base.includes("?") ? "&" : "?";
+      const url = `${base}${sep}limit=${this.pageSize}&offset=${offset}`;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      let payload: ScoresPage;
+      try {
+        const response = await fetch(url, {
+          method: "GET",
+          headers: {"accept": "application/json"},
+          signal: controller.signal
+        });
+        if (!response.ok) {
+          throw new Error(`bulk reputation request failed at offset ${offset}: HTTP ${response.status}`);
+        }
+        payload = await response.json() as ScoresPage;
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (typeof payload.total === "number" && Number.isFinite(payload.total)) {
+        total = payload.total;
+      }
+      const items = Array.isArray(payload.items) ? payload.items as ScoresItem[] : [];
+      for (const item of items) {
+        if (typeof item.address !== "string" || item.address.trim().length === 0) {
+          continue;
+        }
+        const score = parseScore(item.reputation_score);
+        if (score !== null) {
+          parsedScores++;
+        }
+        built.set(getAddress(item.address).toLowerCase(), score);
+      }
+
+      offset += items.length;
+      if (items.length === 0 || items.length < this.pageSize || offset >= total) {
+        break;
+      }
+    }
+
+    // Contract guard: members reported but none had a parseable
+    // reputation_score ⇒ the response shape changed. Fail loud rather
+    // than silently treating every member as ineligible (mass-untrust).
+    if (built.size > 0 && parsedScores === 0) {
+      throw new Error(
+        `bulk reputation: ${built.size} member(s) returned but none had a parseable ` +
+        `reputation_score — rep_score /scores response shape may have changed`
+      );
+    }
+
+    this.snapshot = built;
+    this.snapshotBuiltAt = Date.now();
+    return built;
+  }
+}
+
 function parseScore(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;

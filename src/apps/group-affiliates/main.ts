@@ -21,7 +21,7 @@ import {
   runForAffiliateEvents,
   type RunConfig
 } from "./logic";
-import {ReputationService} from "./reputationService";
+import {BulkReputationService, IReputationService, ReputationService} from "./reputationService";
 import {
   AffiliateGroupChangedListenerHandle,
   AffiliateGroupChangedWithCursor,
@@ -75,7 +75,26 @@ const circlesRpc = new CirclesRpcService(rpcUrl, (message) => {
     SlackSeverity.WARNING
   ).catch((error) => console.warn("[SlackAlert] failed:", (error as Error).message));
 });
-const reputationService = new ReputationService(reputationBaseUrl, reputationTimeoutMs, reputationConcurrency);
+// Bulk reputation (default): page the rep_score /scores endpoint once
+// into a short-lived snapshot instead of one HTTP request per address.
+// The per-address path fans out one request per trustee on the full
+// reconcile (thousands), blowing the rep_score rate limit → AbortError
+// → crash loop. Disable with GROUP_AFFILIATES_REPUTATION_BULK=0.
+const reputationBulkEnabled = process.env.GROUP_AFFILIATES_REPUTATION_BULK !== "0";
+const reputationScoresUrl =
+  process.env.GROUP_AFFILIATES_REPUTATION_SCORES_URL ||
+  (/\/avatars\/*$/.test(reputationBaseUrl) ? reputationBaseUrl.replace(/\/avatars\/*$/, "/scores") : "");
+const reputationSnapshotTtlMs = Math.max(
+  60_000,
+  parseEnvInt("GROUP_AFFILIATES_REPUTATION_SNAPSHOT_TTL_MS", reputationRefreshMs > 0 ? reputationRefreshMs : 5 * 60 * 1000)
+);
+const useBulkReputation = reputationBulkEnabled && reputationScoresUrl.length > 0;
+const reputationService: IReputationService = useBulkReputation
+  ? new BulkReputationService(reputationScoresUrl, reputationTimeoutMs, reputationSnapshotTtlMs)
+  : new ReputationService(reputationBaseUrl, reputationTimeoutMs, reputationConcurrency);
+const reputationModeLabel = useBulkReputation
+  ? `bulk (${reputationScoresUrl}, ttl ${reputationSnapshotTtlMs}ms)`
+  : `per-address (${reputationBaseUrl}, concurrency ${reputationConcurrency})`;
 
 let leaderElection: LeaderElection | null = null;
 let listener: AffiliateGroupChangedListenerHandle | null = null;
@@ -417,7 +436,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Start Block: ${startBlock}\n` +
     `- Confirmations: ${confirmationBlocks}\n` +
     `- Batch Size: ${batchSize}\n` +
-    `- Reputation URL: ${reputationBaseUrl}\n` +
+    `- Reputation Mode: ${reputationModeLabel}\n` +
     `- Reputation Threshold: > ${reputationScoreThreshold}\n` +
     `- Reputation Refresh (ms): ${reputationRefreshMs}\n` +
     `- Safe: ${safeAddress || "(not set)"}\n` +
