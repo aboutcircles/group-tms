@@ -5,9 +5,8 @@ import {SlackSeverity} from "../../interfaces/ISlackService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {formatErrorWithCauses} from "../../formatError";
-import {getEffectiveDryRun, LeaderElection} from "../../services/leaderElection";
 import {LoggerService} from "../../services/loggerService";
-import {recordRunError, recordRunSuccess, setLeaderStatus, startMetricsServer} from "../../services/metricsService";
+import {recordRunError, recordRunSuccess, startMetricsServer} from "../../services/metricsService";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {SafeGroupService} from "../../services/safeGroupService";
 import {SlackService} from "../../services/slackService";
@@ -96,7 +95,6 @@ const reputationModeLabel = useBulkReputation
   ? `bulk (${reputationScoresUrl}, ttl ${reputationSnapshotTtlMs}ms)`
   : `per-address (${reputationBaseUrl}, concurrency ${reputationConcurrency})`;
 
-let leaderElection: LeaderElection | null = null;
 let listener: AffiliateGroupChangedListenerHandle | null = null;
 let groupService: IGroupService;
 let executionQueue: Promise<void> = Promise.resolve();
@@ -143,13 +141,6 @@ process.on("unhandledRejection", async (reason) => {
 
 async function start(): Promise<void> {
   startMetricsServer(APP_NAME);
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus(APP_NAME, isLeader)
-  );
 
   if (groupService.validateSafeOwnership) {
     try {
@@ -191,7 +182,6 @@ async function runStartupReplay(
   stateStore: StateStore | null,
   cursor: EventCursor
 ): Promise<EventCursor> {
-  const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
   const isHealthy = await ensureRpcHealthyOrNotify({
     appName: APP_NAME,
     rpcUrl,
@@ -222,7 +212,7 @@ async function runStartupReplay(
     runLogger
   );
 
-  const shouldAdvance = await processEvents(events, effectiveDryRun);
+  const shouldAdvance = await processEvents(events);
   const replayCursor = makeHeadCursor(safeHead);
   if (shouldAdvance) {
     await saveCursor(stateStore, replayCursor);
@@ -245,8 +235,7 @@ function startRealtimeListener(stateStore: StateStore | null, cursor: EventCurso
     startCursor: cursor,
     onEvents: async (events) => {
       return enqueueExclusive(async () => {
-        const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-        const shouldAdvance = await processEvents(events, effectiveDryRun);
+        const shouldAdvance = await processEvents(events);
         if (shouldAdvance && events.length > 0) {
           const latest = events[events.length - 1].cursor;
           await saveCursor(stateStore, latest);
@@ -266,8 +255,7 @@ function startRealtimeListener(stateStore: StateStore | null, cursor: EventCurso
 // re-processed the same events and every restart full-replayed millions
 // of blocks (the node-wedging load this worker is meant to avoid).
 async function processEvents(
-  events: AffiliateGroupChangedWithCursor[],
-  effectiveDryRun: boolean
+  events: AffiliateGroupChangedWithCursor[]
 ): Promise<boolean> {
   if (events.length === 0) {
     runLogger.info("No group affiliate events to process.");
@@ -279,7 +267,7 @@ async function processEvents(
   try {
     const outcome = await runForAffiliateEvents(
       {circlesRpc, groupService, reputationService, logger: runLogger},
-      {...config, dryRun: effectiveDryRun},
+      config,
       events
     );
     recordRunSuccess(APP_NAME, Date.now() - startedAt);
@@ -294,7 +282,7 @@ async function processEvents(
       `group-affiliates batch completed: events=${outcome.processedEvents} ` +
       `ignored=${outcome.ignoredEvents} trustTxs=${outcome.trustTxHashes.length} ` +
       `untrustTxs=${outcome.untrustTxHashes.length} ` +
-      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
+      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${dryRun}`
     );
     return true;
   } catch (cause) {
@@ -319,8 +307,7 @@ function startReputationReconciliationLoop(): void {
   rootLogger.info(`Starting reputation reconciliation loop every ${reputationRefreshMs}ms.`);
   reputationRefreshTimer = setInterval(() => {
     void enqueueExclusive(async () => {
-      const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-      await processReputationReconciliation(effectiveDryRun);
+      await processReputationReconciliation();
     }).catch((error) => {
       rootLogger.error("Reputation reconciliation failed:");
       rootLogger.error(formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
@@ -328,19 +315,19 @@ function startReputationReconciliationLoop(): void {
   }, reputationRefreshMs);
 }
 
-async function processReputationReconciliation(effectiveDryRun: boolean): Promise<void> {
+async function processReputationReconciliation(): Promise<void> {
   const startedAt = Date.now();
   try {
     const outcome = await runReputationReconciliation(
       {circlesRpc, groupService, reputationService, logger: runLogger.child("reputation")},
-      {...config, dryRun: effectiveDryRun}
+      config
     );
     recordRunSuccess(APP_NAME, Date.now() - startedAt);
     errorTracker.recordSuccess();
     runLogger.info(
       `group-affiliates reputation reconciliation completed: ` +
       `untrustTxs=${outcome.untrustTxHashes.length} ` +
-      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
+      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${dryRun}`
     );
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
@@ -415,12 +402,6 @@ async function gracefulShutdown(signal: string): Promise<void> {
   if (reputationRefreshTimer) {
     clearInterval(reputationRefreshTimer);
     reputationRefreshTimer = null;
-  }
-
-  try {
-    await leaderElection?.stop();
-  } catch (error) {
-    rootLogger.warn("Failed to stop leader election:", error);
   }
 
   try {

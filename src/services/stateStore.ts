@@ -3,16 +3,18 @@
  * resume from last successful scan instead of re-scanning from genesis.
  *
  * Graceful fallback: if PG is unavailable, logs a warning and returns null / is a no-op.
- * Uses the same LEADER_DB_URL connection already available on both hosts.
+ * Uses the LEADER_DB_URL env var — historical name from when this connection
+ * also served leader election; now it's just the shared state-DB URL.
  */
 import pg from "pg";
 
-// Shared advisory-lock key across StateStore + LeaderElection. Serializes
-// all group-tms DDL against itself so 5 workers booting concurrently
-// against the same Postgres can't race on pg_type_typname_nsp_index
-// during the implicit CREATE TYPE under each CREATE TABLE. xact-scoped
-// so the lock auto-releases on COMMIT — required for pgbouncer
-// transaction-pool mode (session-scoped locks would orphan).
+// Shared advisory-lock key for group-tms DDL. Serializes concurrent
+// CREATE TABLE IF NOT EXISTS across StateStore + PgRouterEnablementStore
+// so multiple workers booting against the same Postgres can't race on
+// pg_type_typname_nsp_index during the implicit CREATE TYPE under each
+// CREATE TABLE. xact-scoped so the lock auto-releases on COMMIT —
+// required for pgbouncer transaction-pool mode (session-scoped locks
+// would orphan).
 export const GROUP_TMS_DDL_LOCK_KEY = 7281992451;
 
 const DDL = `

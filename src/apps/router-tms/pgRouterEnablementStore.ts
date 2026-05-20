@@ -7,9 +7,9 @@
  * Graceful fallback: pg errors are logged and the method resolves quietly
  * so a transient PG hiccup never crashes the run loop.
  *
- * Shares GROUP_TMS_DDL_LOCK_KEY with StateStore + LeaderElection so all
- * group-tms DDL serializes against the system-catalog race
- * (pg_type_typname_nsp_index) when multiple workers boot concurrently.
+ * Shares GROUP_TMS_DDL_LOCK_KEY with StateStore so all group-tms DDL
+ * serializes against the system-catalog race (pg_type_typname_nsp_index)
+ * when multiple workers boot concurrently.
  */
 import {getAddress} from "ethers";
 import pg from "pg";

@@ -8,10 +8,9 @@ import {SlackSeverity} from "../../interfaces/ISlackService";
 import {LoggerService} from "../../services/loggerService";
 import {runOnce} from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
-import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
@@ -36,7 +35,6 @@ const errorsBeforeCrash = 3;
 const rootLogger = new LoggerService(verboseLogging);
 
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
-let leaderElection: LeaderElection | null = null;
 
 if (!dryRun) {
   if (!safeSignerPrivateKey || safeSignerPrivateKey.trim().length === 0) {
@@ -79,11 +77,6 @@ const cowSwapService = new BackingInstanceService(
 let nextFromBlock = deployedAtBlock;
 
 async function gracefulShutdown(signal: string) {
-  try {
-    await leaderElection?.stop();
-  } catch (err) {
-    rootLogger.warn("Failed to stop leader election:", err);
-  }
   try {
     await slackService.notifySlackStartOrCrash(`🔄 *Backers Group TMS Service Shutting Down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
@@ -143,7 +136,7 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-async function loop(leaderElection: LeaderElection | null) {
+async function loop() {
   const pollIntervalMs = 60 * 1000;
   const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
@@ -160,7 +153,6 @@ async function loop(leaderElection: LeaderElection | null) {
 
   while (true) {
     const runStartedAt = Date.now();
-    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "crc-backers",
@@ -189,7 +181,7 @@ async function loop(leaderElection: LeaderElection | null) {
           fromBlock: nextFromBlock,
           expectedTimeTillCompletion,
           confirmationBlocks,
-          dryRun: effectiveDryRun
+          dryRun
         }
       );
       nextFromBlock = outcome.nextFromBlock;
@@ -269,15 +261,8 @@ async function main() {
       process.exit(1);
     }
   }
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus("crc-backers", isLeader)
-  );
   await sendStartupNotification();
-  await loop(leaderElection);
+  await loop();
 }
 
 main().catch(async (err) => {
