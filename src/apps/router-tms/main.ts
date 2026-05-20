@@ -21,6 +21,8 @@ import {formatErrorWithCauses} from "../../formatError";
 import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {InMemoryRouterEnablementStore} from "./enablementStore";
+import {PgRouterEnablementStore} from "./pgRouterEnablementStore";
+import {IRouterEnablementStore} from "../../interfaces/IRouterEnablementStore";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
@@ -60,7 +62,15 @@ const blacklistTimeoutMs = (() => {
 })();
 const blacklistingService = new BlacklistingService(blacklistingServiceUrl, blacklistTimeoutMs);
 const quarantineTtlHours = parseEnvInt("ROUTER_QUARANTINE_TTL_HOURS", 24);
-const enablementStore = new InMemoryRouterEnablementStore([], quarantineTtlHours * 60 * 60 * 1000);
+const quarantineTtlMs = quarantineTtlHours * 60 * 60 * 1000;
+// Persist enablement + quarantine state when LEADER_DB_URL is available.
+// Without persistence, every restart re-emits ~7k enableCRCForRouting txs
+// because the in-memory dedup cache can't tell "previously enabled but
+// reverted/revoked on-chain" from "never tried" — both fall through to
+// `!routerTrustSet.has(avatar)` which is true for both.
+const enablementStore: IRouterEnablementStore = process.env.LEADER_DB_URL
+  ? new PgRouterEnablementStore(process.env.LEADER_DB_URL, quarantineTtlMs)
+  : new InMemoryRouterEnablementStore([], quarantineTtlMs);
 const errorsBeforeCrash = Math.max(1, parseEnvInt("ERRORS_BEFORE_CRASH", 5));
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 let leaderElection: LeaderElection | null = null;
