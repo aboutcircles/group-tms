@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import { SlackSeverity } from "../interfaces/ISlackService";
 import { ILoggerService } from "../interfaces/ILoggerService";
+import { GROUP_TMS_DDL_LOCK_KEY } from "./stateStore";
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const STALENESS_THRESHOLD_SEC = 45;
@@ -60,13 +61,24 @@ export class LeaderElection {
   }
 
   private async ensureTable(): Promise<void> {
-    await this.pool.query(`
-      CREATE TABLE IF NOT EXISTS group_tms_leader (
-        id          INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-        instance_id TEXT    NOT NULL,
-        last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock($1)", [GROUP_TMS_DDL_LOCK_KEY]);
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS group_tms_leader (
+          id          INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+          instance_id TEXT    NOT NULL,
+          last_heartbeat TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   private async tryAcquire(): Promise<void> {

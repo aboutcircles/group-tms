@@ -1,4 +1,4 @@
-import { StateStore } from "../../src/services/stateStore";
+import { StateStore, GROUP_TMS_DDL_LOCK_KEY } from "../../src/services/stateStore";
 
 // Mock the pg module
 jest.mock("pg", () => {
@@ -32,6 +32,24 @@ describe("StateStore", () => {
 
   afterEach(async () => {
     await store.close();
+  });
+
+  describe("ensureTable", () => {
+    it("runs DDL inside BEGIN + pg_advisory_xact_lock + COMMIT", async () => {
+      mockPool.query.mockResolvedValueOnce({ rows: [] });
+      // Trigger ready via any query
+      await store.load("anything");
+      const mockClient = await mockPool.connect.mock.results[0].value;
+      const calls = mockClient.query.mock.calls;
+      expect(calls[0]).toEqual(["BEGIN"]);
+      expect(calls[1]).toEqual([
+        "SELECT pg_advisory_xact_lock($1)",
+        [GROUP_TMS_DDL_LOCK_KEY],
+      ]);
+      expect(calls[2][0]).toMatch(/CREATE TABLE IF NOT EXISTS group_tms_state/);
+      expect(calls[3]).toEqual(["COMMIT"]);
+      expect(mockClient.release).toHaveBeenCalled();
+    });
   });
 
   describe("load", () => {
