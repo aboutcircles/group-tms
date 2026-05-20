@@ -1,13 +1,18 @@
 import {getEffectiveDryRun, LeaderElection} from "../../src/services/leaderElection";
+import {GROUP_TMS_DDL_LOCK_KEY} from "../../src/services/stateStore";
 import {FakeLogger} from "../../fakes/fakes";
 
 // --- Mock pg ---
 const mockQuery = jest.fn();
 const mockEnd = jest.fn();
+const mockClientQuery = jest.fn();
+const mockClientRelease = jest.fn();
+const mockConnect = jest.fn();
 
 jest.mock("pg", () => ({
   Pool: jest.fn().mockImplementation(() => ({
     query: mockQuery,
+    connect: mockConnect,
     end: mockEnd,
   })),
 }));
@@ -42,8 +47,15 @@ describe("LeaderElection", () => {
     statusUpdates = [];
     slackMessages = [];
     logger = new FakeLogger(true);
-    // Default: ensureTable succeeds
+    // Default: pool.query (tryAcquire/stop) and client.query (ensureTable
+    // BEGIN + lock + DDL + COMMIT) both succeed quietly.
     mockQuery.mockResolvedValue({rows: [], rowCount: 0});
+    mockClientQuery.mockResolvedValue(undefined);
+    mockClientRelease.mockReturnValue(undefined);
+    mockConnect.mockResolvedValue({
+      query: mockClientQuery,
+      release: mockClientRelease,
+    });
     mockEnd.mockResolvedValue(undefined);
   });
 
@@ -63,10 +75,7 @@ describe("LeaderElection", () => {
 
   describe("tryAcquire", () => {
     it("acquires leadership when UPSERT returns a row", async () => {
-      // First call = ensureTable, second = tryAcquire
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})  // CREATE TABLE
-        .mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1}); // UPSERT
+      mockQuery.mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1}); // UPSERT
 
       const le = createLE();
       await le.start();
@@ -79,9 +88,7 @@ describe("LeaderElection", () => {
     });
 
     it("does NOT acquire when UPSERT returns 0 rows (another leader holds it)", async () => {
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})  // CREATE TABLE
-        .mockResolvedValueOnce({rows: [], rowCount: 0});  // UPSERT — no match
+      mockQuery.mockResolvedValueOnce({rows: [], rowCount: 0});  // UPSERT — no match
 
       const le = createLE();
       await le.start();
@@ -94,9 +101,7 @@ describe("LeaderElection", () => {
 
     it("rowCount: null treated as non-leader (edge case from pg driver)", async () => {
       // pg can return rowCount: null for certain statements
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})
-        .mockResolvedValueOnce({rows: [], rowCount: null});
+      mockQuery.mockResolvedValueOnce({rows: [], rowCount: null});
 
       const le = createLE();
       await le.start();
@@ -106,9 +111,7 @@ describe("LeaderElection", () => {
     });
 
     it("PG error during tryAcquire → falls back to non-leader (safe)", async () => {
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})  // CREATE TABLE
-        .mockRejectedValueOnce(new Error("connection refused")); // tryAcquire fails
+      mockQuery.mockRejectedValueOnce(new Error("connection refused")); // tryAcquire fails
 
       const le = createLE();
       await le.start();
@@ -125,9 +128,7 @@ describe("LeaderElection", () => {
     });
 
     it("detects leadership loss on subsequent heartbeat", async () => {
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})  // CREATE TABLE
-        .mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1}); // acquire
+      mockQuery.mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1}); // acquire
 
       const le = createLE();
       await le.start();
@@ -147,7 +148,6 @@ describe("LeaderElection", () => {
 
     it("re-acquires on heartbeat (same instance, stays leader)", async () => {
       mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})  // CREATE TABLE
         .mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1}) // acquire
         .mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1}); // heartbeat
 
@@ -170,9 +170,7 @@ describe("LeaderElection", () => {
 
   describe("stop", () => {
     it("releases leadership by backdating heartbeat", async () => {
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})
-        .mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1});
+      mockQuery.mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1});
 
       const le = createLE();
       await le.start();
@@ -193,9 +191,7 @@ describe("LeaderElection", () => {
     });
 
     it("stop when not leader → skips UPDATE, just cleans up", async () => {
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})
-        .mockResolvedValueOnce({rows: [], rowCount: 0}); // not leader
+      mockQuery.mockResolvedValueOnce({rows: [], rowCount: 0}); // not leader
 
       const le = createLE();
       await le.start();
@@ -212,9 +208,7 @@ describe("LeaderElection", () => {
     });
 
     it("PG error during stop release → warns but doesn't throw", async () => {
-      mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})
-        .mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1});
+      mockQuery.mockResolvedValueOnce({rows: [{instance_id: "host-1"}], rowCount: 1});
 
       const le = createLE();
       await le.start();
@@ -254,10 +248,29 @@ describe("LeaderElection", () => {
     });
   });
 
+  describe("ensureTable", () => {
+    it("runs DDL inside BEGIN + pg_advisory_xact_lock + COMMIT", async () => {
+      const le = createLE();
+      await le.start();
+
+      // mockClientQuery captures the ensureTable transaction sequence
+      const calls = mockClientQuery.mock.calls.map((c: any[]) => c);
+      expect(calls[0]).toEqual(["BEGIN"]);
+      expect(calls[1]).toEqual([
+        "SELECT pg_advisory_xact_lock($1)",
+        [GROUP_TMS_DDL_LOCK_KEY],
+      ]);
+      expect(calls[2][0]).toMatch(/CREATE TABLE IF NOT EXISTS group_tms_leader/);
+      expect(calls[3]).toEqual(["COMMIT"]);
+      expect(mockClientRelease).toHaveBeenCalled();
+
+      await le.stop();
+    });
+  });
+
   describe("onStatusUpdate callback", () => {
     it("fires on every tryAcquire, not just state changes", async () => {
       mockQuery
-        .mockResolvedValueOnce({rows: [], rowCount: 0})  // CREATE TABLE
         .mockResolvedValueOnce({rows: [], rowCount: 0})  // tryAcquire: not leader
         .mockResolvedValueOnce({rows: [], rowCount: 0}); // heartbeat: still not leader
 

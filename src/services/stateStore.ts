@@ -7,6 +7,14 @@
  */
 import pg from "pg";
 
+// Shared advisory-lock key across StateStore + LeaderElection. Serializes
+// all group-tms DDL against itself so 5 workers booting concurrently
+// against the same Postgres can't race on pg_type_typname_nsp_index
+// during the implicit CREATE TYPE under each CREATE TABLE. xact-scoped
+// so the lock auto-releases on COMMIT — required for pgbouncer
+// transaction-pool mode (session-scoped locks would orphan).
+export const GROUP_TMS_DDL_LOCK_KEY = 7281992451;
+
 const DDL = `
 CREATE TABLE IF NOT EXISTS group_tms_state (
   app_name         TEXT PRIMARY KEY,
@@ -33,7 +41,13 @@ export class StateStore {
   private async ensureTable(): Promise<void> {
     const client = await this.pool.connect();
     try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock($1)", [GROUP_TMS_DDL_LOCK_KEY]);
       await client.query(DDL);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => {});
+      throw err;
     } finally {
       client.release();
     }
