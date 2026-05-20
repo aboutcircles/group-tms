@@ -7,11 +7,10 @@ import {SlackService} from "../../services/slackService";
 import {SlackSeverity} from "../../interfaces/ISlackService";
 import {LoggerService} from "../../services/loggerService";
 import {IGroupService} from "../../interfaces/IGroupService";
-import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {formatErrorWithCauses} from "../../formatError";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
-import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {Wallet} from "ethers";
@@ -46,7 +45,6 @@ const affiliateRegistry = new AffiliateGroupEventsService(rpcUrl, rootLogger.chi
 const slackConfigured = !!slackWebhookUrl;
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
-let leaderElection: LeaderElection | null = null;
 
 validateConfig();
 
@@ -87,11 +85,6 @@ function createDryRunGroupService(simulationService?: IGroupService): IGroupServ
 }
 
 async function gracefulShutdown(signal: string) {
-  try {
-    await leaderElection?.stop();
-  } catch (err) {
-    rootLogger.warn("Failed to stop leader election:", err);
-  }
   try {
     await slackService.notifySlackStartOrCrash(`🔄 *OIC Service Shutting Down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
@@ -158,13 +151,6 @@ function delay(ms: number): Promise<void> {
 
 async function loop() {
   startMetricsServer("oic");
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus("oic", isLeader)
-  );
   const pollIntervalMs = refreshIntervalSec * 1000;
   const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
@@ -186,7 +172,6 @@ async function loop() {
   let printedStartupLogs = false;
   while (true) {
     const runStartedAt = Date.now();
-    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const LOG = rootLogger.child("oic");
       const isHealthy = await ensureRpcHealthyOrNotify({
@@ -217,7 +202,7 @@ async function loop() {
           affiliateRegistryAddress,
           outputBatchSize,
           deployedAtBlock,
-          dryRun: effectiveDryRun,
+          dryRun,
         },
         state,
       );

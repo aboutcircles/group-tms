@@ -14,10 +14,9 @@ import {
   DEFAULT_GROUP_BATCH_SIZE
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
-import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
@@ -42,7 +41,6 @@ const pollIntervalMs = 10 * 60 * 1_000;
 const groupBatchSize = DEFAULT_GROUP_BATCH_SIZE;
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
-let leaderElection: LeaderElection | null = null;
 
 const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slackInfoChannel);
 const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
@@ -113,11 +111,6 @@ void notifySlackStartup();
 
 async function gracefulShutdown(signal: string) {
   try {
-    await leaderElection?.stop();
-  } catch (err) {
-    rootLogger.warn("Failed to stop leader election:", err);
-  }
-  try {
     await slackService.notifySlackStartOrCrash(`🔄 *GP-CRC TMS Service shutting down*\n\nService received ${signal} signal. Graceful shutdown initiated.`, SlackSeverity.INFO);
   } catch (error) {
     rootLogger.error('Failed to send shutdown notification:', error);
@@ -151,20 +144,12 @@ process.on("unhandledRejection", async (reason) => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gp-crc");
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus("gp-crc", isLeader)
-  );
   const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
 
   while (true) {
     const runStartedAt = Date.now();
-    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gp-crc",
@@ -182,7 +167,7 @@ async function mainLoop(): Promise<void> {
           logger: runLogger,
           avatarSafeMappingStore
         },
-        { ...config, dryRun: effectiveDryRun }
+        config
       );
       await stateStore?.save("gp-crc", 0, { lastSuccessfulRunAt: new Date().toISOString() });
       recordRunSuccess("gp-crc", Date.now() - runStartedAt);

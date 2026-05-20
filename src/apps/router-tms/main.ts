@@ -18,13 +18,12 @@ import {
   type RegisterHumanListenerHandle
 } from "./realtime";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {InMemoryRouterEnablementStore} from "./enablementStore";
 import {PgRouterEnablementStore} from "./pgRouterEnablementStore";
 import {IRouterEnablementStore} from "../../interfaces/IRouterEnablementStore";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
-import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
@@ -73,7 +72,6 @@ const enablementStore: IRouterEnablementStore = process.env.LEADER_DB_URL
   : new InMemoryRouterEnablementStore([], quarantineTtlMs);
 const errorsBeforeCrash = Math.max(1, parseEnvInt("ERRORS_BEFORE_CRASH", 5));
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
-let leaderElection: LeaderElection | null = null;
 let registerHumanListener: RegisterHumanListenerHandle | null = null;
 let executionQueue: Promise<void> = Promise.resolve();
 
@@ -153,11 +151,6 @@ void notifySlackStartup();
 async function gracefulShutdown(signal: string) {
   stopRealtimeRegisterHumanListener(`graceful shutdown (${signal})`);
   try {
-    await leaderElection?.stop();
-  } catch (err) {
-    rootLogger.warn("Failed to stop leader election:", err);
-  }
-  try {
     await slackService.notifySlackStartOrCrash(
       `🔄 *Router-TMS Service shutting down*\n\nService received ${signal} signal.`, SlackSeverity.INFO
     );
@@ -193,13 +186,6 @@ process.on("unhandledRejection", async (reason) => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("router-tms");
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus("router-tms", isLeader)
-  );
   const maxDelay = Math.min(pollIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = pollIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
@@ -209,7 +195,6 @@ async function mainLoop(): Promise<void> {
     stopRealtimeRegisterHumanListener("starting scheduled router-tms run");
     try {
       const outcome = await enqueueExclusive(async () => {
-        const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
         const isHealthy = await ensureRpcHealthyOrNotify({
           appName: "router-tms",
           rpcUrl,
@@ -228,7 +213,7 @@ async function mainLoop(): Promise<void> {
             logger: runLogger,
             enablementStore
           },
-          {...config, dryRun: effectiveDryRun}
+          config
         );
       });
       if (!outcome) {
@@ -343,7 +328,6 @@ async function handleRealtimeHumanRegistrations(avatars: string[]): Promise<void
 
   try {
     const outcome = await enqueueExclusive(async () => {
-      const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "router-tms",
         rpcUrl,
@@ -362,7 +346,7 @@ async function handleRealtimeHumanRegistrations(avatars: string[]): Promise<void
           logger: realtimeLogger,
           enablementStore
         },
-        {...config, dryRun: effectiveDryRun},
+        config,
         avatars
       );
     });
