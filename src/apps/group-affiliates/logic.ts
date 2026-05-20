@@ -1,20 +1,18 @@
-import {getAddress} from "ethers";
+import { getAddress } from "ethers";
 
-import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
-import {IGroupService} from "../../interfaces/IGroupService";
-import {ILoggerService} from "../../interfaces/ILoggerService";
-import {AffiliateGroupChangedWithCursor, EventCursor, compareEventCursor} from "./realtime";
-import {IReputationService} from "./reputationService";
+import { ICirclesRpc } from "../../interfaces/ICirclesRpc";
+import { IGroupService } from "../../interfaces/IGroupService";
+import { ILoggerService } from "../../interfaces/ILoggerService";
+import { AffiliateGroupChangedWithCursor, EventCursor, compareEventCursor } from "./realtime";
+import { IReputationService } from "./reputationService";
 
 export const DEFAULT_GROUP_AFFILIATES_BATCH_SIZE = 20;
-export const DEFAULT_REPUTATION_SCORE_THRESHOLD = 40;
+export const DEFAULT_REPUTATION_SCORE_THRESHOLD = 75;
 
 export const DEFAULT_MANAGED_GROUP_ADDRESSES = [
-  "0x1ACA75e38263c79d9D4F10dF0635cc6FCfe6F026",
-  "0xb629a1e86F3eFada0F87C83494Da8Cc34C3F84ef",
   "0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5",
-  "0xC19BC204eb1c1D5B3FE500E5E5dfaBaB625F286c",
-  "0x86533d1ada8ffbe7b6f7244f9a1b707f7f3e239b"
+  "0x2709757a543CF1BF4d92586b73d3891438b2589d",
+  "0x698D0C3aDD0e3b4C29Bf5D9de01a747110F3E1fD"
 ] as const;
 
 export type RunConfig = {
@@ -50,7 +48,7 @@ export async function runForAffiliateEvents(
   cfg: RunConfig,
   events: AffiliateGroupChangedWithCursor[]
 ): Promise<GroupAffiliateOutcome> {
-  const {circlesRpc, groupService, reputationService, logger} = deps;
+  const { circlesRpc, groupService, reputationService, logger } = deps;
   const managedGroups = normalizeManagedGroups(cfg.managedGroupAddresses);
   const sortedEvents = dedupeAndSortEvents(events);
   const latestCursor = sortedEvents.length > 0
@@ -145,7 +143,7 @@ export async function runForAffiliateEvents(
     };
   }
 
-  const {trustTxHashes, untrustTxHashes} = await executePlannedOperations(
+  const { trustTxHashes, untrustTxHashes } = await executePlannedOperations(
     groupService,
     cfg.batchSize,
     untrustedByGroup,
@@ -170,7 +168,7 @@ export async function runReputationReconciliation(
   deps: Deps,
   cfg: RunConfig
 ): Promise<GroupAffiliateOutcome> {
-  const {circlesRpc, groupService, reputationService, logger} = deps;
+  const { circlesRpc, groupService, reputationService, logger } = deps;
   const managedGroups = Array.from(normalizeManagedGroups(cfg.managedGroupAddresses)).sort();
   const trustedByGroup: Record<string, string[]> = {};
   const untrustedByGroup: Record<string, string[]> = {};
@@ -224,7 +222,7 @@ export async function runReputationReconciliation(
     };
   }
 
-  const {trustTxHashes, untrustTxHashes} = await executePlannedOperations(
+  const { trustTxHashes, untrustTxHashes } = await executePlannedOperations(
     groupService,
     cfg.batchSize,
     untrustedByGroup,
@@ -271,7 +269,7 @@ function normalizeEvent(event: AffiliateGroupChangedWithCursor): {
   if (!human || !oldGroup || !newGroup) {
     return null;
   }
-  return {human, oldGroup, newGroup};
+  return { human, oldGroup, newGroup };
 }
 
 function normalizeAddress(address: string): string | null {
@@ -319,7 +317,7 @@ async function executePlannedOperations(
   untrustedByGroup: Record<string, string[]>,
   trustedByGroup: Record<string, string[]>,
   logger: ILoggerService
-): Promise<{trustTxHashes: string[]; untrustTxHashes: string[]}> {
+): Promise<{ trustTxHashes: string[]; untrustTxHashes: string[] }> {
   const trustTxHashes: string[] = [];
   const untrustTxHashes: string[] = [];
 
@@ -341,7 +339,7 @@ async function executePlannedOperations(
     }
   }
 
-  return {trustTxHashes, untrustTxHashes};
+  return { trustTxHashes, untrustTxHashes };
 }
 
 async function simulatePlannedOperations(
