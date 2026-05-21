@@ -1,18 +1,20 @@
-import {Wallet} from "ethers";
+import { Wallet } from "ethers";
 
-import {IGroupService} from "../../interfaces/IGroupService";
-import {SlackSeverity} from "../../interfaces/ISlackService";
-import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
-import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
-import {formatErrorWithCauses} from "../../formatError";
-import {getEffectiveDryRun, LeaderElection} from "../../services/leaderElection";
-import {LoggerService} from "../../services/loggerService";
-import {recordRunError, recordRunSuccess, setLeaderStatus, startMetricsServer} from "../../services/metricsService";
-import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
-import {SafeGroupService} from "../../services/safeGroupService";
-import {SlackService} from "../../services/slackService";
-import {StateStore} from "../../services/stateStore";
-import {CirclesRpcService} from "../../services/circlesRpcService";
+import { IGroupService } from "../../interfaces/IGroupService";
+import { SlackSeverity } from "../../interfaces/ISlackService";
+import { ConsecutiveErrorTracker } from "../../services/consecutiveErrorTracker";
+import { ensureRpcHealthyOrNotify } from "../../services/rpcHealthService";
+import { formatErrorWithCauses } from "../../formatError";
+import { getEffectiveDryRun, LeaderElection } from "../../services/leaderElection";
+import { LoggerService } from "../../services/loggerService";
+import { recordRunError, recordRunSuccess, setLeaderStatus, startMetricsServer } from "../../services/metricsService";
+import { resolveTransactionRpcUrl } from "../../services/transactionRpc";
+import { SafeGroupService } from "../../services/safeGroupService";
+import { SlackService } from "../../services/slackService";
+import { StateStore } from "../../services/stateStore";
+import { CirclesRpcService } from "../../services/circlesRpcService";
+import { AffiliateMap } from "./affiliateMap";
+import { GroupProfileService, IGroupProfileService } from "./groupProfileService";
 import {
   DEFAULT_GROUP_AFFILIATES_BATCH_SIZE,
   DEFAULT_MANAGED_GROUP_ADDRESSES,
@@ -21,7 +23,7 @@ import {
   runForAffiliateEvents,
   type RunConfig
 } from "./logic";
-import {BulkReputationService, IReputationService, ReputationService} from "./reputationService";
+import { BulkReputationService, IReputationService, ReputationService } from "./reputationService";
 import {
   AffiliateGroupChangedListenerHandle,
   AffiliateGroupChangedWithCursor,
@@ -36,9 +38,12 @@ import {
 } from "./realtime";
 
 const APP_NAME = "group-affiliates";
+const AFFILIATE_MAP_STATE_KEY = "group-affiliates:affiliate-map";
+const BACKFILL_CHUNK_SIZE = 10_000;
 const DEFAULT_AFFILIATE_REGISTRY_ADDRESS = "0xca8222e780d046707083f51377b5fd85e2866014";
 const DEFAULT_REPUTATION_BASE_URL = "https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars";
-const DEFAULT_START_BLOCK = 41_734_312;
+const DEFAULT_GROUP_PROFILE_BASE_URL = "https://staging.circlesubi.network/profiles/profile";
+const DEFAULT_START_BLOCK = 46282003;
 
 const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
@@ -47,11 +52,12 @@ const wsUrl = process.env.GROUP_AFFILIATES_WSS_URL || deriveGroupAffiliatesWsUrl
 const startBlock = parseEnvInt("GROUP_AFFILIATES_START_BLOCK", DEFAULT_START_BLOCK);
 const confirmationBlocks = parseEnvInt("CONFIRMATION_BLOCKS", 2);
 const batchSize = parseEnvInt("GROUP_AFFILIATES_BATCH_SIZE", DEFAULT_GROUP_AFFILIATES_BATCH_SIZE);
-const reputationScoreThreshold = parseEnvNumber("GROUP_AFFILIATES_REPUTATION_SCORE_THRESHOLD", DEFAULT_REPUTATION_SCORE_THRESHOLD);
 const reputationBaseUrl = process.env.GROUP_AFFILIATES_REPUTATION_BASE_URL || DEFAULT_REPUTATION_BASE_URL;
 const reputationTimeoutMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_TIMEOUT_MS", 30_000);
 const reputationRefreshMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_REFRESH_MS", 30 * 60 * 1000);
 const reputationConcurrency = parseEnvInt("GROUP_AFFILIATES_REPUTATION_CONCURRENCY", 8);
+const groupProfileBaseUrl = process.env.GROUP_AFFILIATES_PROFILE_BASE_URL || DEFAULT_GROUP_PROFILE_BASE_URL;
+const groupProfileTimeoutMs = parseEnvInt("GROUP_AFFILIATES_PROFILE_TIMEOUT_MS", 30_000);
 const dryRun = process.env.DRY_RUN === "1";
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const safeAddress = process.env.GROUP_AFFILIATES_SAFE_ADDRESS || "";
@@ -95,17 +101,25 @@ const reputationService: IReputationService = useBulkReputation
 const reputationModeLabel = useBulkReputation
   ? `bulk (${reputationScoresUrl}, ttl ${reputationSnapshotTtlMs}ms)`
   : `per-address (${reputationBaseUrl}, concurrency ${reputationConcurrency})`;
+const groupProfileService: IGroupProfileService = new GroupProfileService(groupProfileBaseUrl, groupProfileTimeoutMs);
 
 let leaderElection: LeaderElection | null = null;
 let listener: AffiliateGroupChangedListenerHandle | null = null;
 let groupService: IGroupService;
 let executionQueue: Promise<void> = Promise.resolve();
 let reputationRefreshTimer: NodeJS.Timeout | null = null;
+/**
+ * Persistent forward index of human → current affiliate group. Built once
+ * from history (see ensureAffiliateMapBackfill), kept current by the event
+ * loop (runForAffiliateEvents writes to it), and consumed by the periodic
+ * reputation reconciliation to re-trust humans whose score has recovered.
+ */
+let affiliateMap: AffiliateMap = new AffiliateMap(startBlock - 1);
 
 const config: RunConfig = {
   managedGroupAddresses: DEFAULT_MANAGED_GROUP_ADDRESSES,
   batchSize,
-  reputationScoreThreshold,
+  reputationScoreThreshold: DEFAULT_REPUTATION_SCORE_THRESHOLD,
   dryRun
 };
 
@@ -172,9 +186,11 @@ async function start(): Promise<void> {
   let cursor = await loadCursor(stateStore);
 
   try {
+    const affiliateMapTargetBlock = await fetchSafeHeadBlockForStartup();
+    await ensureAffiliateMapBackfill(stateStore, affiliateMapTargetBlock);
     cursor = await runStartupReplay(stateStore, cursor);
     startRealtimeListener(stateStore, cursor);
-    startReputationReconciliationLoop();
+    startReputationReconciliationLoop(stateStore);
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
     recordRunError(APP_NAME);
@@ -226,6 +242,7 @@ async function runStartupReplay(
   const replayCursor = makeHeadCursor(safeHead);
   if (shouldAdvance) {
     await saveCursor(stateStore, replayCursor);
+    await saveAffiliateMap(stateStore, replayCursor.blockNumber);
     return replayCursor;
   }
   return cursor;
@@ -250,11 +267,116 @@ function startRealtimeListener(stateStore: StateStore | null, cursor: EventCurso
         if (shouldAdvance && events.length > 0) {
           const latest = events[events.length - 1].cursor;
           await saveCursor(stateStore, latest);
+          await saveAffiliateMap(stateStore, latest.blockNumber);
         }
         return shouldAdvance;
       });
     }
   });
+}
+
+/**
+ * Ensure the persistent affiliate map covers the registry's history up to the
+ * current safe head before event replay starts. This gives the reconciliation
+ * loop a complete current human -> affiliate group index immediately on fresh
+ * deployments, while startup replay remains responsible for applying any
+ * trust/untrust decisions from the worker cursor forward.
+ *
+ * The realtime listener keeps the map current going forward, so the cost is an
+ * O(history) eth_getLogs paging on first boot only.
+ */
+async function ensureAffiliateMapBackfill(
+  stateStore: StateStore | null,
+  targetBlock: number
+): Promise<void> {
+  const persisted = stateStore ? await AffiliateMap.load(stateStore, AFFILIATE_MAP_STATE_KEY) : null;
+  if (persisted) {
+    affiliateMap = persisted;
+  }
+
+  const target = Math.max(startBlock, targetBlock);
+  if (affiliateMap.lastScannedBlock >= target) {
+    rootLogger.info(
+      `[affiliate-map] Reusing persisted map: entries=${affiliateMap.size()} ` +
+      `lastScannedBlock=${affiliateMap.lastScannedBlock} cursor=${target}.`
+    );
+    return;
+  }
+
+  const from = Math.max(startBlock, affiliateMap.lastScannedBlock + 1);
+  const to = target;
+  if (from > to) {
+    affiliateMap.advanceCursor(target);
+    return;
+  }
+
+  rootLogger.info(
+    `[affiliate-map] Backfilling AffiliateGroupChanged history ${from}..${to} ` +
+    `in chunks of ${BACKFILL_CHUNK_SIZE} (one-time on fresh deployment).`
+  );
+
+  const startedAt = Date.now();
+  let nextSaveAt = startedAt + 60_000;
+  for (let chunkStart = from; chunkStart <= to; chunkStart += BACKFILL_CHUNK_SIZE) {
+    const chunkEnd = Math.min(chunkStart + BACKFILL_CHUNK_SIZE - 1, to);
+    const events = await fetchAffiliateGroupChangedEventsBetween(
+      rpcUrl,
+      affiliateRegistryAddress,
+      chunkStart,
+      chunkEnd,
+      null,
+      rootLogger.child("affiliate-map-backfill")
+    );
+    for (const event of events) {
+      affiliateMap.set(event.human, event.newGroup, event.cursor.blockNumber);
+    }
+    affiliateMap.advanceCursor(chunkEnd);
+
+    // Persist incrementally so a crash mid-backfill doesn't force a full restart.
+    if (Date.now() >= nextSaveAt) {
+      await saveAffiliateMap(stateStore, affiliateMap.lastScannedBlock);
+      nextSaveAt = Date.now() + 60_000;
+    }
+  }
+
+  await saveAffiliateMap(stateStore, affiliateMap.lastScannedBlock);
+  const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+  rootLogger.info(
+    `[affiliate-map] Backfill complete: entries=${affiliateMap.size()} ` +
+    `lastScannedBlock=${affiliateMap.lastScannedBlock} elapsed=${elapsedSec}s.`
+  );
+}
+
+async function fetchSafeHeadBlockForStartup(): Promise<number> {
+  const head = await fetchCurrentBlockNumber(rpcUrl);
+  if (head === null) {
+    throw new Error("Failed to fetch current block number for affiliate-map backfill.");
+  }
+  return Math.max(0, head - confirmationBlocks);
+}
+
+async function saveAffiliateMap(stateStore: StateStore | null, observedBlock: number): Promise<void> {
+  if (!stateStore) return;
+  // Cursor advance is independent of any human→group mutation in the batch,
+  // but we want it persisted so subsequent restarts don't re-scan history.
+  affiliateMap.advanceCursor(observedBlock);
+  try {
+    await affiliateMap.save(stateStore, AFFILIATE_MAP_STATE_KEY);
+  } catch (error) {
+    rootLogger.warn(
+      `[affiliate-map] Failed to persist affiliate map: ${(error as Error).message}`
+    );
+  }
+}
+
+async function fetchManagedGroupMinRepScores(): Promise<Record<string, number>> {
+  const thresholds = await groupProfileService.fetchMinRepScores(DEFAULT_MANAGED_GROUP_ADDRESSES);
+  runLogger.info(
+    `Loaded managed group minRepScore values: ${Object.entries(thresholds)
+      .map(([group, threshold]) => `${group}=${threshold}`)
+      .join(", ")}`
+  );
+  return thresholds;
 }
 
 // Returns true when the batch was processed successfully, meaning the
@@ -278,8 +400,8 @@ async function processEvents(
   const startedAt = Date.now();
   try {
     const outcome = await runForAffiliateEvents(
-      {circlesRpc, groupService, reputationService, logger: runLogger},
-      {...config, dryRun: effectiveDryRun},
+      { circlesRpc, groupService, reputationService, logger: runLogger, affiliateMap },
+      { ...config, dryRun: effectiveDryRun, reputationScoreThresholdsByGroup: await fetchManagedGroupMinRepScores() },
       events
     );
     recordRunSuccess(APP_NAME, Date.now() - startedAt);
@@ -311,7 +433,7 @@ async function processEvents(
   }
 }
 
-function startReputationReconciliationLoop(): void {
+function startReputationReconciliationLoop(stateStore: StateStore | null): void {
   if (reputationRefreshMs <= 0 || reputationRefreshTimer) {
     return;
   }
@@ -320,7 +442,7 @@ function startReputationReconciliationLoop(): void {
   reputationRefreshTimer = setInterval(() => {
     void enqueueExclusive(async () => {
       const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-      await processReputationReconciliation(effectiveDryRun);
+      await processReputationReconciliation(stateStore, effectiveDryRun);
     }).catch((error) => {
       rootLogger.error("Reputation reconciliation failed:");
       rootLogger.error(formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
@@ -328,20 +450,27 @@ function startReputationReconciliationLoop(): void {
   }, reputationRefreshMs);
 }
 
-async function processReputationReconciliation(effectiveDryRun: boolean): Promise<void> {
+async function processReputationReconciliation(
+  stateStore: StateStore | null,
+  effectiveDryRun: boolean
+): Promise<void> {
   const startedAt = Date.now();
   try {
     const outcome = await runReputationReconciliation(
-      {circlesRpc, groupService, reputationService, logger: runLogger.child("reputation")},
-      {...config, dryRun: effectiveDryRun}
+      { circlesRpc, groupService, reputationService, logger: runLogger.child("reputation"), affiliateMap },
+      { ...config, dryRun: effectiveDryRun, reputationScoreThresholdsByGroup: await fetchManagedGroupMinRepScores() }
     );
     recordRunSuccess(APP_NAME, Date.now() - startedAt);
     errorTracker.recordSuccess();
     runLogger.info(
       `group-affiliates reputation reconciliation completed: ` +
+      `trustTxs=${outcome.trustTxHashes.length} ` +
       `untrustTxs=${outcome.untrustTxHashes.length} ` +
       `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
     );
+    // Reconciliation doesn't mutate the affiliate map (it only reads), but we
+    // still persist it here on the off chance another batch interleaved.
+    await saveAffiliateMap(stateStore, affiliateMap.lastScannedBlock);
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));
     const consecutiveErrors = errorTracker.recordError();
@@ -445,7 +574,7 @@ async function notifySlackStartup(): Promise<void> {
     `- Confirmations: ${confirmationBlocks}\n` +
     `- Batch Size: ${batchSize}\n` +
     `- Reputation Mode: ${reputationModeLabel}\n` +
-    `- Reputation Threshold: > ${reputationScoreThreshold}\n` +
+    `- Group Profile URL: ${groupProfileBaseUrl}\n` +
     `- Reputation Refresh (ms): ${reputationRefreshMs}\n` +
     `- Safe: ${safeAddress || "(not set)"}\n` +
     `- Safe signer configured: ${safeSignerPrivateKey.trim().length > 0}\n` +
@@ -506,20 +635,6 @@ function parseEnvInt(name: string, fallback: number): number {
   const value = Number.parseInt(raw, 10);
   if (Number.isNaN(value)) {
     rootLogger.warn(`Invalid integer for ${name}='${raw}', using fallback ${fallback}.`);
-    return fallback;
-  }
-  return value;
-}
-
-function parseEnvNumber(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw || raw.trim().length === 0) {
-    return fallback;
-  }
-
-  const value = Number(raw);
-  if (!Number.isFinite(value)) {
-    rootLogger.warn(`Invalid number for ${name}='${raw}', using fallback ${fallback}.`);
     return fallback;
   }
   return value;
