@@ -4,9 +4,8 @@ import {LoggerService} from "../../services/loggerService";
 import {SlackService} from "../../services/slackService";
 import {SlackSeverity} from "../../interfaces/ISlackService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
-import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
-import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {createProvider, primaryRpcUrl} from "../../services/rpcProvider";
@@ -62,7 +61,6 @@ const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slac
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const circlesRpc = new CirclesRpc(primaryRpcUrl(rpcUrl));
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
-let leaderElection: LeaderElection | null = null;
 
 const readProvider = createProvider(rpcUrl);
 const readContract = new Contract(contractAddress, TRUST_BATCH_ABI, readProvider);
@@ -125,11 +123,6 @@ process.on("unhandledRejection", async (reason) => {
 
 async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
   try {
-    await leaderElection?.stop();
-  } catch (err) {
-    rootLogger.warn("Failed to stop leader election:", err);
-  }
-  try {
     await slackService.notifySlackStartOrCrash(
       `🔄 *new-gnosis* shutting down — received ${signal}.`,
       SlackSeverity.INFO
@@ -142,13 +135,6 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer(APP_NAME);
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus(APP_NAME, isLeader)
-  );
 
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
   let nextStartBlock = configuredStartBlock;
@@ -167,7 +153,6 @@ async function mainLoop(): Promise<void> {
 
   while (true) {
     const runStartedAt = Date.now();
-    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: APP_NAME,
@@ -191,7 +176,7 @@ async function mainLoop(): Promise<void> {
         {
           ...config,
           startBlock: nextStartBlock,
-          dryRun: effectiveDryRun
+          dryRun
         }
       );
 
@@ -218,7 +203,7 @@ async function mainLoop(): Promise<void> {
         `batches=${outcome.trustBatches.length}, txs=${outcome.trustTxHashes.length}, ` +
         `highestBlock=${outcome.highestBlockSeen}.`
       );
-      await notifySlackRunSummary(outcome, effectiveDryRun);
+      await notifySlackRunSummary(outcome, dryRun);
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();

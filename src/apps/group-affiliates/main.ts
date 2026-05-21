@@ -5,9 +5,8 @@ import { SlackSeverity } from "../../interfaces/ISlackService";
 import { ConsecutiveErrorTracker } from "../../services/consecutiveErrorTracker";
 import { ensureRpcHealthyOrNotify } from "../../services/rpcHealthService";
 import { formatErrorWithCauses } from "../../formatError";
-import { getEffectiveDryRun, LeaderElection } from "../../services/leaderElection";
 import { LoggerService } from "../../services/loggerService";
-import { recordRunError, recordRunSuccess, setLeaderStatus, startMetricsServer } from "../../services/metricsService";
+import { recordRunError, recordRunSuccess, startMetricsServer } from "../../services/metricsService";
 import { resolveTransactionRpcUrl } from "../../services/transactionRpc";
 import { SafeGroupService } from "../../services/safeGroupService";
 import { SlackService } from "../../services/slackService";
@@ -390,7 +389,7 @@ async function processEvents(
   try {
     const outcome = await runForAffiliateEvents(
       { circlesRpc, groupService, reputationService, logger: runLogger, affiliateMap },
-      { ...config, dryRun: effectiveDryRun, reputationScoreThresholdsByGroup: await fetchManagedGroupMinRepScores() },
+      { ...config, reputationScoreThresholdsByGroup: await fetchManagedGroupMinRepScores() },
       events
     );
     recordRunSuccess(APP_NAME, Date.now() - startedAt);
@@ -430,8 +429,7 @@ function startReputationReconciliationLoop(stateStore: StateStore | null): void 
   rootLogger.info(`Starting reputation reconciliation loop every ${reputationRefreshMs}ms.`);
   reputationRefreshTimer = setInterval(() => {
     void enqueueExclusive(async () => {
-      const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-      await processReputationReconciliation(stateStore, effectiveDryRun);
+      await processReputationReconciliation(stateStore);
     }).catch((error) => {
       rootLogger.error("Reputation reconciliation failed:");
       rootLogger.error(formatErrorWithCauses(error instanceof Error ? error : new Error(String(error))));
@@ -440,14 +438,13 @@ function startReputationReconciliationLoop(stateStore: StateStore | null): void 
 }
 
 async function processReputationReconciliation(
-  stateStore: StateStore | null,
-  effectiveDryRun: boolean
+  stateStore: StateStore | null
 ): Promise<void> {
   const startedAt = Date.now();
   try {
     const outcome = await runReputationReconciliation(
       { circlesRpc, groupService, reputationService, logger: runLogger.child("reputation"), affiliateMap },
-      { ...config, dryRun: effectiveDryRun, reputationScoreThresholdsByGroup: await fetchManagedGroupMinRepScores() }
+      { ...config, reputationScoreThresholdsByGroup: await fetchManagedGroupMinRepScores() }
     );
     recordRunSuccess(APP_NAME, Date.now() - startedAt);
     errorTracker.recordSuccess();
