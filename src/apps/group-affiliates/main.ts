@@ -103,7 +103,6 @@ const reputationModeLabel = useBulkReputation
   : `per-address (${reputationBaseUrl}, concurrency ${reputationConcurrency})`;
 const groupProfileService: IGroupProfileService = new GroupProfileService(groupProfileBaseUrl, groupProfileTimeoutMs);
 
-let leaderElection: LeaderElection | null = null;
 let listener: AffiliateGroupChangedListenerHandle | null = null;
 let groupService: IGroupService;
 let executionQueue: Promise<void> = Promise.resolve();
@@ -157,13 +156,6 @@ process.on("unhandledRejection", async (reason) => {
 
 async function start(): Promise<void> {
   startMetricsServer(APP_NAME);
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus(APP_NAME, isLeader)
-  );
 
   if (groupService.validateSafeOwnership) {
     try {
@@ -207,7 +199,6 @@ async function runStartupReplay(
   stateStore: StateStore | null,
   cursor: EventCursor
 ): Promise<EventCursor> {
-  const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
   const isHealthy = await ensureRpcHealthyOrNotify({
     appName: APP_NAME,
     rpcUrl,
@@ -238,7 +229,7 @@ async function runStartupReplay(
     runLogger
   );
 
-  const shouldAdvance = await processEvents(events, effectiveDryRun);
+  const shouldAdvance = await processEvents(events);
   const replayCursor = makeHeadCursor(safeHead);
   if (shouldAdvance) {
     await saveCursor(stateStore, replayCursor);
@@ -262,8 +253,7 @@ function startRealtimeListener(stateStore: StateStore | null, cursor: EventCurso
     startCursor: cursor,
     onEvents: async (events) => {
       return enqueueExclusive(async () => {
-        const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
-        const shouldAdvance = await processEvents(events, effectiveDryRun);
+        const shouldAdvance = await processEvents(events);
         if (shouldAdvance && events.length > 0) {
           const latest = events[events.length - 1].cursor;
           await saveCursor(stateStore, latest);
@@ -388,8 +378,7 @@ async function fetchManagedGroupMinRepScores(): Promise<Record<string, number>> 
 // re-processed the same events and every restart full-replayed millions
 // of blocks (the node-wedging load this worker is meant to avoid).
 async function processEvents(
-  events: AffiliateGroupChangedWithCursor[],
-  effectiveDryRun: boolean
+  events: AffiliateGroupChangedWithCursor[]
 ): Promise<boolean> {
   if (events.length === 0) {
     runLogger.info("No group affiliate events to process.");
@@ -416,7 +405,7 @@ async function processEvents(
       `group-affiliates batch completed: events=${outcome.processedEvents} ` +
       `ignored=${outcome.ignoredEvents} trustTxs=${outcome.trustTxHashes.length} ` +
       `untrustTxs=${outcome.untrustTxHashes.length} ` +
-      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
+      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${dryRun}`
     );
     return true;
   } catch (cause) {
@@ -466,7 +455,7 @@ async function processReputationReconciliation(
       `group-affiliates reputation reconciliation completed: ` +
       `trustTxs=${outcome.trustTxHashes.length} ` +
       `untrustTxs=${outcome.untrustTxHashes.length} ` +
-      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${effectiveDryRun}`
+      `reputationIneligible=${outcome.ineligibleByReputation.length} dryRun=${dryRun}`
     );
     // Reconciliation doesn't mutate the affiliate map (it only reads), but we
     // still persist it here on the off chance another batch interleaved.
@@ -544,12 +533,6 @@ async function gracefulShutdown(signal: string): Promise<void> {
   if (reputationRefreshTimer) {
     clearInterval(reputationRefreshTimer);
     reputationRefreshTimer = null;
-  }
-
-  try {
-    await leaderElection?.stop();
-  } catch (error) {
-    rootLogger.warn("Failed to stop leader election:", error);
   }
 
   try {

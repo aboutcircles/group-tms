@@ -266,8 +266,8 @@ DRY_RUN=0                                    # Set to "1" to log actions without
 # Notifications / coordination
 SLACK_WEBHOOK_URL=
 SLACK_WEBHOOK_URL_INFO=
-LEADER_DB_URL=                               # Optional: enables leader election and cursor persistence
-INSTANCE_ID=                                 # Required when LEADER_DB_URL is set
+LEADER_DB_URL=                               # Optional: PG connection for cursor persistence (group_tms_state) and router-tms enablement state (historical name)
+INSTANCE_ID=                                 # Used by Slack messages to tag the source host
 
 # Logging
 VERBOSE_LOGGING=1

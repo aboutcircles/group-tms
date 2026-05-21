@@ -22,10 +22,9 @@ import {
   RunOutcome
 } from "./logic";
 import {formatErrorWithCauses} from "../../formatError";
-import {startMetricsServer, recordRunSuccess, recordRunError, setLeaderStatus} from "../../services/metricsService";
+import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
-import {LeaderElection, getEffectiveDryRun} from "../../services/leaderElection";
 import {StateStore} from "../../services/stateStore";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 
@@ -75,7 +74,6 @@ const slackConfigured = slackWebhookUrl.trim().length > 0;
 const scoreCache = new ScoreCache();
 const errorsBeforeCrash = 3;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
-let leaderElection: LeaderElection | null = null;
 const canSimulateTransactions = safeSignerPrivateKey.trim().length > 0 && safeAddress.trim().length > 0;
 
 const runLogger = rootLogger.child("run");
@@ -132,11 +130,6 @@ rootLogger.info(`  - slackConfigured=${slackConfigured}`);
 void notifySlackStartup();
 
 async function gracefulShutdown(signal: NodeJS.Signals) {
-  try {
-    await leaderElection?.stop();
-  } catch (err) {
-    rootLogger.warn("Failed to stop leader election:", err);
-  }
   await notifySlackShutdown(signal);
   process.exit(0);
 }
@@ -159,13 +152,6 @@ process.on("unhandledRejection", async (reason) => {
 
 async function mainLoop(): Promise<void> {
   startMetricsServer("gnosis-group");
-  leaderElection = await LeaderElection.create(
-    process.env.LEADER_DB_URL,
-    process.env.INSTANCE_ID,
-    rootLogger.child("leader-election"),
-    slackService,
-    (isLeader) => setLeaderStatus("gnosis-group", isLeader)
-  );
   const maxDelay = Math.min(runIntervalMs * 4, 15 * 60 * 1000); // cap at 15 min
   let currentDelay = runIntervalMs;
   const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
@@ -173,7 +159,6 @@ async function mainLoop(): Promise<void> {
 
   while (true) {
     const runStartedAt = Date.now();
-    const effectiveDryRun = getEffectiveDryRun(leaderElection, dryRun);
     try {
       const isHealthy = await ensureRpcHealthyOrNotify({
         appName: "gnosis-group",
@@ -195,7 +180,6 @@ async function mainLoop(): Promise<void> {
         },
         {
           ...config,
-          dryRun: effectiveDryRun,
           historicAutoTrustSnapshotMembers
         }
       );
