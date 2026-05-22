@@ -14,6 +14,7 @@
     "start:dublin-tms": "node --env-file=.env dist/src/apps/dublin-tms/main.js",
     "start:oic": "node --env-file=.env dist/src/apps/oic/main.js",
     "start:router-tms": "node --env-file=.env dist/src/apps/router-tms/main.js",
+    "start:router2": "node --env-file=.env dist/src/apps/router2/main.js",
     "start:group-affiliates": "node --env-file=.env dist/src/apps/group-affiliates/main.js",
     "start:new-gnosis": "node --env-file=.env dist/src/apps/new-gnosis/main.js",
     "start:all": "node --env-file=.env dist/src/apps/manager.js",

@@ -469,6 +469,57 @@ export class CirclesRpcService implements ICirclesRpc {
     return avatars;
   }
 
+  async fetchHumanAvatarsRegisteredAfterBlock(
+    blockNumber: number,
+    pageSize: number = 1000,
+    logger?: ILoggerService
+  ): Promise<string[]> {
+    const query = new PagedQuery<{ avatar: string }>(this.rpc.client, {
+      namespace: "CrcV2",
+      table: "RegisterHuman",
+      columns: ["avatar", "blockNumber", "transactionIndex", "logIndex"],
+      sortOrder: "ASC",
+      filter: [{
+        Type: "FilterPredicate",
+        FilterType: "GreaterThan",
+        Column: "blockNumber",
+        Value: blockNumber
+      }],
+      limit: pageSize,
+    });
+
+    const avatars: string[] = [];
+    let pages = 0;
+    let skipped = 0;
+
+    while (pages < MAX_PAGES && await withTimeout(query.queryNextPage(), PAGE_TIMEOUT_MS)) {
+      pages++;
+      const rows = query.currentPage?.results ?? [];
+      for (const row of rows) {
+        if (row && typeof row.avatar === "string") {
+          try {
+            avatars.push(getAddress(row.avatar).toLowerCase());
+          } catch {
+            skipped++;
+          }
+        }
+      }
+      await delay(PAGE_DELAY_MS);
+    }
+
+    if (pages >= MAX_PAGES) {
+      const msg = `fetchHumanAvatarsRegisteredAfterBlock(${blockNumber}): hit ${MAX_PAGES}-page cap — result may be truncated (${avatars.length} avatars so far)`;
+      this.onWarning(msg);
+    }
+    if (skipped > 0) {
+      logger?.warn(`Skipped ${skipped} invalid avatar address(es) from RPC.`);
+    }
+    logger?.info(
+      `Fetched ${avatars.length} avatars from RegisterHuman table after block ${blockNumber} across ${pages} page(s).`
+    );
+    return avatars;
+  }
+
   private async fetchBlockTimestamp(blockNumber: number): Promise<number> {
     const hexBlockNumber = `0x${blockNumber.toString(16)}`;
     const block = await this.rpc.client.call("eth_getBlockByNumber", [hexBlockNumber, false]) as {
