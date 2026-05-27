@@ -73,11 +73,39 @@ export async function retryWithBackoff<T>(
       // Jitter: 50-100% of base delay to avoid thundering herd across workers
       const jitter = 0.5 + Math.random() * 0.5;
       const delayMs = Math.round(baseDelayMs * Math.pow(2, attempt) * jitter);
-      const errMsg = (err as any)?.message ?? String(err);
+      const errMsg = formatRetryError(err);
       console.warn(`[RPC_RETRY] attempt ${attempt + 1}/${maxRetries}, waiting ${delayMs}ms — ${errMsg}`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
   // Unreachable, but satisfies TypeScript
   throw lastError;
+}
+
+function formatRetryError(err: unknown): string {
+  if (err == null) {
+    return "unknown error";
+  }
+
+  const anyErr = err as any;
+  const code = anyErr?.code;
+  const action = anyErr?.action;
+  const reason = anyErr?.reason;
+  const data = anyErr?.data;
+
+  if (code || action || reason || data !== undefined) {
+    const parts = [
+      code ? `code=${String(code)}` : undefined,
+      action ? `action=${String(action)}` : undefined,
+      reason ? `reason=${String(reason)}` : undefined,
+      data === null ? "data=null" : data === "0x" ? "data=0x" : undefined
+    ].filter(Boolean);
+
+    if (parts.length > 0) {
+      return parts.join(" ");
+    }
+  }
+
+  const msg = String(anyErr?.message ?? err);
+  return msg.length > 500 ? `${msg.slice(0, 500)}...` : msg;
 }

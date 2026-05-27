@@ -22,6 +22,7 @@ export class SafeOwnershipError extends Error {
 const DEFAULT_TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1000;
 const GAS_LIMIT_BUFFER_NUMERATOR = 120n;
 const GAS_LIMIT_BUFFER_DENOMINATOR = 100n;
+const FALLBACK_SAFE_EXECUTION_GAS_LIMIT = 3_000_000n;
 
 /** Max retries for the create→sign→estimate cycle when a nonce race causes GS026.
  *  The Safe contract reads nonce from storage (not calldata); if it changed since
@@ -51,6 +52,31 @@ function ensureSuccessfulReceipt(receipt: any, context: string) {
   return receipt;
 }
 
+function bufferGasLimit(gasEstimate: bigint): bigint {
+  return ((gasEstimate * GAS_LIMIT_BUFFER_NUMERATOR) + (GAS_LIMIT_BUFFER_DENOMINATOR - 1n)) / GAS_LIMIT_BUFFER_DENOMINATOR;
+}
+
+function formatExecutorError(err: unknown): string {
+  if (err == null) {
+    return "unknown error";
+  }
+
+  const anyErr = err as any;
+  const parts = [
+    anyErr?.code ? `code=${String(anyErr.code)}` : undefined,
+    anyErr?.action ? `action=${String(anyErr.action)}` : undefined,
+    anyErr?.reason ? `reason=${String(anyErr.reason)}` : undefined,
+    anyErr?.data === null ? "data=null" : anyErr?.data === "0x" ? "data=0x" : undefined
+  ].filter(Boolean);
+
+  if (parts.length > 0) {
+    return parts.join(" ");
+  }
+
+  const msg = String(anyErr?.message ?? err);
+  return msg.length > 500 ? `${msg.slice(0, 500)}...` : msg;
+}
+
 /**
  * Thin helper around Safe Protocol Kit to execute arbitrary contract calls and wait for confirmations.
  *
@@ -60,6 +86,7 @@ function ensureSuccessfulReceipt(receipt: any, context: string) {
  */
 export class SafeTransactionExecutor {
   private readonly provider: JsonRpcProvider | FallbackProvider;
+  private readonly rawProvider: JsonRpcProvider;
   private readonly safePromise: Promise<Safe>;
   private readonly safeAddress: string;
   private readonly signerAddress: string;
@@ -75,6 +102,7 @@ export class SafeTransactionExecutor {
     }
 
     this.provider = createProvider(rpcUrl);
+    this.rawProvider = new JsonRpcProvider(primaryRpcUrl(rpcUrl));
     this.safeAddress = getAddress(safeAddress);
     this.signerAddress = getAddress(SafeTransactionExecutor.privateKeyToAddress(signerPrivateKey));
     this.safePromise = Safe.init({
@@ -198,7 +226,8 @@ export class SafeTransactionExecutor {
         await retryWithBackoff(() => this.provider.call({
           from: this.signerAddress,
           to: this.safeAddress,
-          data: encodedSafeTx
+          data: encodedSafeTx,
+          gasLimit: gasEstimate
         }));
 
         return {gasEstimate};
@@ -223,13 +252,44 @@ export class SafeTransactionExecutor {
     // internal viem estimate path. Wrapped in retryWithBackoff because public RPCs
     // intermittently return "evm timeout" or empty CALL_EXCEPTION on complex Safe calls.
     const encodedSafeTx = await safe.getEncodedTransaction(safeTx);
-    const gasEstimate = await retryWithBackoff<bigint>(() => this.provider.estimateGas({
+    const request = {
       from: this.signerAddress,
       to: this.safeAddress,
       data: encodedSafeTx
-    }), { maxRetries: 5, baseDelayMs: 2_000 });
+    };
 
-    return ((gasEstimate * GAS_LIMIT_BUFFER_NUMERATOR) + (GAS_LIMIT_BUFFER_DENOMINATOR - 1n)) / GAS_LIMIT_BUFFER_DENOMINATOR;
+    try {
+      const gasEstimate = await retryWithBackoff<bigint>(() => this.provider.estimateGas(request), {
+        maxRetries: 5,
+        baseDelayMs: 2_000
+      });
+      return bufferGasLimit(gasEstimate);
+    } catch (estimateError) {
+      console.warn(
+        "[SafeExecutor] ethers estimateGas failed after retries; trying raw eth_estimateGas fallback: " +
+        formatExecutorError(estimateError)
+      );
+    }
+
+    try {
+      const rawEstimate = await retryWithBackoff<bigint>(async () => {
+        const result = await this.rawProvider.send("eth_estimateGas", [request]);
+        return BigInt(result);
+      }, { maxRetries: 3, baseDelayMs: 1_000 });
+      return bufferGasLimit(rawEstimate);
+    } catch (rawEstimateError) {
+      console.warn(
+        "[SafeExecutor] raw eth_estimateGas fallback failed; verifying with eth_call and conservative gas cap: " +
+        formatExecutorError(rawEstimateError)
+      );
+    }
+
+    await retryWithBackoff(() => this.provider.call({
+      ...request,
+      gasLimit: FALLBACK_SAFE_EXECUTION_GAS_LIMIT
+    }), { maxRetries: 3, baseDelayMs: 1_000 });
+
+    return FALLBACK_SAFE_EXECUTION_GAS_LIMIT;
   }
 
   private static privateKeyToAddress(privateKey: string): string {

@@ -36,4 +36,5 @@ export interface ICirclesRpc {
   isHuman(address: string): Promise<boolean>;
   isHumanBatch(addresses: string[]): Promise<Map<string, boolean>>;
   fetchAllHumanAvatars(pageSize?: number, logger?: ILoggerService): Promise<string[]>;
+  fetchHumanAvatarsRegisteredAfterBlock?(blockNumber: number, pageSize?: number, logger?: ILoggerService): Promise<string[]>;
 }

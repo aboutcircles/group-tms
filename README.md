@@ -39,6 +39,12 @@ Specialized services for Circles protocol trust management:
 * Replays historical logs from a persisted cursor on startup before listening live
 * Supports dry-run mode with optional Safe transaction simulation
 
+## Router2 App
+* Calls `enableCRCForRouting(address[])` on the router2 contract for every address trusted by the configured truster
+* Calls `setApprovalForCRC(address[])` for current Circles v2 human avatars and realtime new humans
+* Executes transactions through the configured admin Safe using a Safe owner private key
+* Supports dry-run mode and signer-backed simulation
+
 ## Requirements
 
 * Node.js **≥ 24**
@@ -68,6 +74,7 @@ npm run start:dublin-tms
 npm run start:oic
 npm run start:all
 npm run start:group-affiliates
+npm run start:router2
 ```
 
 ## Configuration (.env)
@@ -229,6 +236,41 @@ DRY_RUN=0                                  # Set to "1" to log actions without e
 # Notifications
 SLACK_WEBHOOK_URL=
 SLACK_WEBHOOK_URL_INFO=                    # Secondary webhook for informational messages
+
+# Logging
+VERBOSE_LOGGING=1
+```
+
+### Router2 Configuration
+
+```dotenv
+# RPC & addresses
+RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
+ROUTER2_WSS_URL=wss://rpc.aboutcircles.com/ws/chain
+ROUTER2_ADDRESS=0xA60Cd6ddbB4eBa93246D6f80ff4504476c8117D1
+ROUTER2_TRUSTED_BY_ADDRESS=0x7CadB2E92295F3E4fA65D3d4E7265E2e05d7a783
+
+# Safe execution (required unless dry run)
+ROUTER2_ADMIN_SAFE_ADDRESS=0xcC05dab6e530b5E846DDfdEd09874BF4ADDEE8eC
+ROUTER2_SAFE_SIGNER_PRIVATE_KEY=             # Private key for one admin Safe owner
+
+# Scan window / timing
+ROUTER2_POLL_INTERVAL_MS=1800000
+ROUTER2_BATCH_SIZE=20
+ROUTER2_FETCH_PAGE_SIZE=2000
+ROUTER2_APPROVALS_FROM_BLOCK=              # optional; when set, scheduled setApprovalForCRC only uses RegisterHuman rows with blockNumber > this value
+ROUTER2_ERRORS_BEFORE_CRASH=5
+ROUTER2_DRY_RUN_SIMULATION=1               # Set to "0" to skip signer-backed gas simulations in dry-run
+ROUTER2_LOG_BATCH_ADDRESSES=0              # Set to "1" to log every address in every batch
+
+# Operation mode
+DRY_RUN=0                                    # Set to "1" to log/simulate without sending Safe transactions
+
+# Notifications
+ROUTER2_SLACK_WEBHOOK_URL=                   # optional override; falls back to SLACK_WEBHOOK_URL
+SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=
 
 # Logging
 VERBOSE_LOGGING=1

@@ -1,4 +1,5 @@
 import {
+  SafeTransactionExecutor,
   TransactionConfirmationTimeoutError,
   isNonceRaceError
 } from "../../src/services/safeTransactionExecutor";
@@ -101,5 +102,65 @@ describe("isNonceRaceError", () => {
   it("handles objects with message but not Error instances", () => {
     const err = { message: "reverted: GS026" };
     expect(isNonceRaceError(err)).toBe(true);
+  });
+});
+
+describe("SafeTransactionExecutor gas estimation fallback", () => {
+  const safe = {
+    getEncodedTransaction: jest.fn(async () => "0xencoded")
+  };
+
+  it("falls back to raw eth_estimateGas when ethers estimateGas fails", async () => {
+    const executor = {
+      provider: {
+        estimateGas: jest.fn(async () => {
+          throw new Error("primary estimator unavailable");
+        })
+      },
+      rawProvider: {
+        send: jest.fn(async () => "0x100")
+      },
+      signerAddress: "0x0000000000000000000000000000000000000001",
+      safeAddress: "0x0000000000000000000000000000000000000002"
+    };
+
+    const gasLimit = await (SafeTransactionExecutor.prototype as any)
+      .estimateExecutionGasLimit.call(executor, safe, {});
+
+    expect(gasLimit).toBe(308n);
+    expect(executor.rawProvider.send).toHaveBeenCalledWith("eth_estimateGas", [{
+      from: executor.signerAddress,
+      to: executor.safeAddress,
+      data: "0xencoded"
+    }]);
+  });
+
+  it("uses a conservative gas cap after successful eth_call when both estimators fail", async () => {
+    const executor = {
+      provider: {
+        estimateGas: jest.fn(async () => {
+          throw new Error("primary estimator unavailable");
+        }),
+        call: jest.fn(async () => "0x")
+      },
+      rawProvider: {
+        send: jest.fn(async () => {
+          throw new Error("raw estimator unavailable");
+        })
+      },
+      signerAddress: "0x0000000000000000000000000000000000000001",
+      safeAddress: "0x0000000000000000000000000000000000000002"
+    };
+
+    const gasLimit = await (SafeTransactionExecutor.prototype as any)
+      .estimateExecutionGasLimit.call(executor, safe, {});
+
+    expect(gasLimit).toBe(3_000_000n);
+    expect(executor.provider.call).toHaveBeenCalledWith({
+      from: executor.signerAddress,
+      to: executor.safeAddress,
+      data: "0xencoded",
+      gasLimit: 3_000_000n
+    });
   });
 });
