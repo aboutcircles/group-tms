@@ -249,7 +249,7 @@ RPC_URL=https://rpc.aboutcircles.com/
 TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 ROUTER2_WSS_URL=wss://rpc.aboutcircles.com/ws/chain
 ROUTER2_ADDRESS=0xA60Cd6ddbB4eBa93246D6f80ff4504476c8117D1
-ROUTER2_TRUSTED_BY_ADDRESS=0x7CadB2E92295F3E4fA65D3d4E7265E2e05d7a783
+ROUTER2_TRUSTED_BY_ADDRESS=0x93eD5A96347927ff6fF6b790F8Cf5258240c321f
 
 # Safe execution (required unless dry run)
 ROUTER2_ADMIN_SAFE_ADDRESS=0xcC05dab6e530b5E846DDfdEd09874BF4ADDEE8eC

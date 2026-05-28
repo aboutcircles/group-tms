@@ -56,7 +56,7 @@ export const DEFAULT_FETCH_TIMEOUT_MS = 60_000;
 export const DEFAULT_INDEXER_URL =
   "https://indexer.eu.hyperindex.xyz/3bc5dfd/v1/graphql";
 export const DEFAULT_CONTRACT_ADDRESS =
-  "0x7CadB2E92295F3E4fA65D3d4E7265E2e05d7a783";
+  "0x93eD5A96347927ff6fF6b790F8Cf5258240c321f";
 export const DEFAULT_START_BLOCK = 46271576;
 
 export async function runOnce(deps: RunDeps, cfg: RunConfig): Promise<RunOutcome> {

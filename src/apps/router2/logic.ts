@@ -4,7 +4,7 @@ import {ILoggerService} from "../../interfaces/ILoggerService";
 import {IRouter2Service} from "../../interfaces/IRouter2Service";
 
 export const DEFAULT_ROUTER2_ADDRESS = "0xA60Cd6ddbB4eBa93246D6f80ff4504476c8117D1";
-export const DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS = "0x7CadB2E92295F3E4fA65D3d4E7265E2e05d7a783";
+export const DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS = "0x93eD5A96347927ff6fF6b790F8Cf5258240c321f";
 export const DEFAULT_ROUTER2_ADMIN_SAFE_ADDRESS = "0xcC05dab6e530b5E846DDfdEd09874BF4ADDEE8eC";
 export const DEFAULT_ROUTER2_BATCH_SIZE = 20;
 export const DEFAULT_ROUTER2_FETCH_PAGE_SIZE = 2_000;
