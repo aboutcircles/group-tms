@@ -40,9 +40,9 @@ Specialized services for Circles protocol trust management:
 * Supports dry-run mode with optional Safe transaction simulation
 
 ## Router2 App
-* Calls `enableCRCForRouting(address[])` on the router2 contract for every address trusted by the configured truster
-* Calls `setApprovalForCRC(address[])` for current Circles v2 human avatars and realtime new humans
-* Executes transactions through the configured admin Safe using a Safe owner private key
+* Calls `setApprovalForCRC(address[])` for every address trusted by the configured truster and every Gnosis App user with `avatarType=RegisterHuman`
+* Executes transactions directly from the configured EOA signer
+* Keeps a process-local in-memory approval cache to avoid repeating `setApprovalForCRC` for the same address after a successful batch
 * Supports dry-run mode and signer-backed simulation
 
 ## Requirements
@@ -247,25 +247,25 @@ VERBOSE_LOGGING=1
 # RPC & addresses
 RPC_URL=https://rpc.aboutcircles.com/
 TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
-ROUTER2_WSS_URL=wss://rpc.aboutcircles.com/ws/chain
-ROUTER2_ADDRESS=0xA60Cd6ddbB4eBa93246D6f80ff4504476c8117D1
+ROUTER2_ADDRESS=0xE171a76De6B645A28b3767f84B177a4f6659a3D7
 ROUTER2_TRUSTED_BY_ADDRESS=0x93eD5A96347927ff6fF6b790F8Cf5258240c321f
+ROUTER2_GNOSIS_APP_INDEXER_URL=https://indexer.eu.hyperindex.xyz/3bc5dfd/v1/graphql
+ROUTER2_GNOSIS_APP_FROM_BLOCK=              # optional; only fetches GnosisAppUser rows with createdAtBlock > this value
 
-# Safe execution (required unless dry run)
-ROUTER2_ADMIN_SAFE_ADDRESS=0xcC05dab6e530b5E846DDfdEd09874BF4ADDEE8eC
-ROUTER2_SAFE_SIGNER_PRIVATE_KEY=             # Private key for one admin Safe owner
+# EOA execution (required unless dry run)
+ROUTER2_SIGNER_PRIVATE_KEY=                  # Private key for the EOA that can call router2
 
 # Scan window / timing
-ROUTER2_POLL_INTERVAL_MS=1800000
+ROUTER2_POLL_INTERVAL_MS=600000
 ROUTER2_BATCH_SIZE=20
-ROUTER2_FETCH_PAGE_SIZE=2000
-ROUTER2_APPROVALS_FROM_BLOCK=              # optional; when set, scheduled setApprovalForCRC only uses RegisterHuman rows with blockNumber > this value
+ROUTER2_FETCH_PAGE_SIZE=1000
+ROUTER2_FETCH_TIMEOUT_MS=60000
 ROUTER2_ERRORS_BEFORE_CRASH=5
 ROUTER2_DRY_RUN_SIMULATION=1               # Set to "0" to skip signer-backed gas simulations in dry-run
 ROUTER2_LOG_BATCH_ADDRESSES=0              # Set to "1" to log every address in every batch
 
 # Operation mode
-DRY_RUN=0                                    # Set to "1" to log/simulate without sending Safe transactions
+DRY_RUN=0                                    # Set to "1" to log/simulate without sending EOA transactions
 
 # Notifications
 ROUTER2_SLACK_WEBHOOK_URL=                   # optional override; falls back to SLACK_WEBHOOK_URL

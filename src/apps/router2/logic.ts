@@ -1,44 +1,88 @@
-import {getAddress} from "ethers";
-import {ICirclesRpc} from "../../interfaces/ICirclesRpc";
-import {ILoggerService} from "../../interfaces/ILoggerService";
-import {IRouter2Service} from "../../interfaces/IRouter2Service";
+import { getAddress } from "ethers";
+import { ICirclesRpc } from "../../interfaces/ICirclesRpc";
+import { ILoggerService } from "../../interfaces/ILoggerService";
+import { IRouter2Service } from "../../interfaces/IRouter2Service";
+import {
+  DEFAULT_GNOSIS_APP_FETCH_PAGE_SIZE,
+  DEFAULT_GNOSIS_APP_FETCH_TIMEOUT_MS,
+  DEFAULT_GNOSIS_APP_INDEXER_URL
+} from "../../services/gnosisAppUserService";
 
-export const DEFAULT_ROUTER2_ADDRESS = "0xA60Cd6ddbB4eBa93246D6f80ff4504476c8117D1";
+export const DEFAULT_ROUTER2_ADDRESS = "0xE171a76De6B645A28b3767f84B177a4f6659a3D7";
 export const DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS = "0x93eD5A96347927ff6fF6b790F8Cf5258240c321f";
-export const DEFAULT_ROUTER2_ADMIN_SAFE_ADDRESS = "0xcC05dab6e530b5E846DDfdEd09874BF4ADDEE8eC";
 export const DEFAULT_ROUTER2_BATCH_SIZE = 20;
-export const DEFAULT_ROUTER2_FETCH_PAGE_SIZE = 2_000;
+export const DEFAULT_ROUTER2_GNOSIS_APP_INDEXER_URL = DEFAULT_GNOSIS_APP_INDEXER_URL;
+export const DEFAULT_ROUTER2_FETCH_PAGE_SIZE = DEFAULT_GNOSIS_APP_FETCH_PAGE_SIZE;
+export const DEFAULT_ROUTER2_FETCH_TIMEOUT_MS = DEFAULT_GNOSIS_APP_FETCH_TIMEOUT_MS;
+
+export type GnosisAppRegisterHumanFetcher = (
+  indexerUrl: string,
+  pageSize: number,
+  fromBlock: number | undefined,
+  logger: ILoggerService
+) => Promise<string[]>;
 
 export type RunConfig = {
   routerAddress: string;
   trustedByAddress: string;
+  gnosisAppIndexerUrl?: string;
+  gnosisAppFromBlock?: number;
   dryRun?: boolean;
   batchSize?: number;
   fetchPageSize?: number;
   logBatchAddresses?: boolean;
-  approvalsFromBlock?: number;
 };
 
 export type Deps = {
   circlesRpc: ICirclesRpc;
   logger: ILoggerService;
   router2Service?: IRouter2Service;
+  fetchGnosisAppRegisterHumanAddresses: GnosisAppRegisterHumanFetcher;
+  approvalStore?: Router2ApprovalStore;
 };
 
 export type Router2RunOutcome = {
   totalTrustedRows: number;
   uniqueTrustedCount: number;
-  routingCandidateCount: number;
-  routingTxHashes: string[];
-  totalHumanRows: number;
-  uniqueHumanCount: number;
+  totalGnosisAppRegisterHumanRows: number;
+  uniqueGnosisAppRegisterHumanCount: number;
+  totalApprovalRows: number;
+  uniqueApprovalCount: number;
+  cachedApprovalCount: number;
   approvalCandidateCount: number;
   approvalTxHashes: string[];
   dryRun: boolean;
 };
 
+export interface Router2ApprovalStore {
+  isApproved(address: string): boolean;
+  markApproved(addresses: string[]): void;
+  count(): number;
+}
+
+export class InMemoryRouter2ApprovalStore implements Router2ApprovalStore {
+  private readonly approved = new Set<string>();
+
+  isApproved(address: string): boolean {
+    const normalized = normalizeAddress(address);
+    return normalized !== undefined && this.approved.has(normalized);
+  }
+
+  markApproved(addresses: string[]): void {
+    for (const address of addresses) {
+      const normalized = normalizeAddress(address);
+      if (normalized) {
+        this.approved.add(normalized);
+      }
+    }
+  }
+
+  count(): number {
+    return this.approved.size;
+  }
+}
+
 export async function runOnce(deps: Deps, cfg: RunConfig): Promise<Router2RunOutcome> {
-  const fetchPageSize = Math.max(1, cfg.fetchPageSize ?? DEFAULT_ROUTER2_FETCH_PAGE_SIZE);
   const routerAddress = normalizeAddress(cfg.routerAddress);
   if (!routerAddress) {
     throw new Error(`Invalid router2 address configured: '${cfg.routerAddress}'`);
@@ -53,33 +97,31 @@ export async function runOnce(deps: Deps, cfg: RunConfig): Promise<Router2RunOut
   const trustedRows = await deps.circlesRpc.fetchAllTrustees(trustedByAddress);
   deps.logger.info(`Fetched ${trustedRows.length} trustee row(s).`);
 
-  deps.logger.info(`Fetching addresses already trusted by router2 ${routerAddress}...`);
-  const routerTrustedRows = await deps.circlesRpc.fetchAllTrustees(routerAddress);
-  deps.logger.info(`Router2 already trusts ${routerTrustedRows.length} trustee row(s).`);
+  const indexerUrl = cfg.gnosisAppIndexerUrl ?? DEFAULT_ROUTER2_GNOSIS_APP_INDEXER_URL;
+  const fetchPageSize = Math.max(1, cfg.fetchPageSize ?? DEFAULT_ROUTER2_FETCH_PAGE_SIZE);
+  const fromBlock = validateOptionalBlock(cfg.gnosisAppFromBlock, "router2 Gnosis App from-block");
+  deps.logger.info(
+    `Fetching Gnosis App RegisterHuman users from ${indexerUrl}` +
+    `${fromBlock === undefined ? "" : ` after block ${fromBlock}`}...`
+  );
+  const gnosisAppRegisterHumanRows = await deps.fetchGnosisAppRegisterHumanAddresses(
+    indexerUrl,
+    fetchPageSize,
+    fromBlock,
+    deps.logger.child("gnosis-app-users")
+  );
+  deps.logger.info(`Fetched ${gnosisAppRegisterHumanRows.length} Gnosis App RegisterHuman row(s).`);
 
-  deps.logger.info(formatApprovalFetchMessage(cfg.approvalsFromBlock));
-  const humanRows = await fetchApprovalHumanRows(deps, fetchPageSize, cfg.approvalsFromBlock);
-  deps.logger.info(`Fetched ${humanRows.length} RegisterHuman row(s).`);
-
-  return executeRouter2Plan(deps, cfg, trustedRows, routerTrustedRows, humanRows);
-}
-
-export async function runApprovalsForHumanAvatars(
-  deps: Deps,
-  cfg: RunConfig,
-  humanAvatarRows: string[]
-): Promise<Router2RunOutcome> {
-  return executeRouter2Plan(deps, cfg, [], [], humanAvatarRows);
+  return executeRouter2Plan(deps, cfg, trustedRows, gnosisAppRegisterHumanRows);
 }
 
 async function executeRouter2Plan(
   deps: Deps,
   cfg: RunConfig,
   trustedRows: string[],
-  routerTrustedRows: string[],
-  humanRows: string[]
+  gnosisAppRegisterHumanRows: string[]
 ): Promise<Router2RunOutcome> {
-  const {logger, router2Service} = deps;
+  const { logger, router2Service } = deps;
   const dryRun = !!cfg.dryRun;
 
   const routerAddress = normalizeAddress(cfg.routerAddress);
@@ -97,32 +139,29 @@ async function executeRouter2Plan(
   }
 
   const batchSize = Math.max(1, cfg.batchSize ?? DEFAULT_ROUTER2_BATCH_SIZE);
-  const desiredRoutingCandidates = uniqueNormalizedAddresses(trustedRows, logger);
-  const routerTrustedSet = new Set(uniqueNormalizedAddresses(routerTrustedRows, logger));
-  const routingCandidates = desiredRoutingCandidates.filter((address) => !routerTrustedSet.has(address));
-  const approvalCandidates = uniqueNormalizedAddresses(humanRows, logger);
+  const trustedCandidates = uniqueNormalizedAddresses(trustedRows, logger);
+  const gnosisAppRegisterHumanCandidates = uniqueNormalizedAddresses(gnosisAppRegisterHumanRows, logger);
+  const approvalCandidates = uniqueNormalizedAddresses([
+    ...trustedCandidates,
+    ...gnosisAppRegisterHumanCandidates
+  ], logger);
+  const cachedApprovalCount = deps.approvalStore
+    ? approvalCandidates.filter((address) => deps.approvalStore!.isApproved(address)).length
+    : 0;
+  const approvalCandidatesToProcess = deps.approvalStore
+    ? approvalCandidates.filter((address) => !deps.approvalStore!.isApproved(address))
+    : approvalCandidates;
 
   logger.info(
-    `router2 plan: routing=${routingCandidates.length}/${desiredRoutingCandidates.length} missing trusted address(es), ` +
-    `approval=${approvalCandidates.length} human avatar(s), batchSize=${batchSize}, dryRun=${dryRun}.`
+    `router2 plan: approval=${approvalCandidatesToProcess.length}/${approvalCandidates.length} address(es) to process ` +
+    `(${trustedCandidates.length} trusted, ${gnosisAppRegisterHumanCandidates.length} Gnosis App RegisterHuman), ` +
+    `cached=${cachedApprovalCount}, ` +
+    `batchSize=${batchSize}, dryRun=${dryRun}.`
   );
-
-  const routingTxHashes = await executeBatches({
-    label: "enableCRCForRouting",
-    addresses: routingCandidates,
-    batchSize,
-    dryRun,
-    logBatchAddresses: !!cfg.logBatchAddresses,
-    logger,
-    execute: (batch) => router2Service!.enableCRCForRouting(batch),
-    simulate: router2Service?.simulateEnableCRCForRouting
-      ? (batch) => router2Service.simulateEnableCRCForRouting!(batch)
-      : undefined
-  });
 
   const approvalTxHashes = await executeBatches({
     label: "setApprovalForCRC",
-    addresses: approvalCandidates,
+    addresses: approvalCandidatesToProcess,
     batchSize,
     dryRun,
     logBatchAddresses: !!cfg.logBatchAddresses,
@@ -130,17 +169,21 @@ async function executeRouter2Plan(
     execute: (batch) => router2Service!.setApprovalForCRC(batch),
     simulate: router2Service?.simulateSetApprovalForCRC
       ? (batch) => router2Service.simulateSetApprovalForCRC!(batch)
+      : undefined,
+    onBatchSuccess: deps.approvalStore
+      ? (batch) => deps.approvalStore!.markApproved(batch)
       : undefined
   });
 
   return {
     totalTrustedRows: trustedRows.length,
-    uniqueTrustedCount: desiredRoutingCandidates.length,
-    routingCandidateCount: routingCandidates.length,
-    routingTxHashes,
-    totalHumanRows: humanRows.length,
-    uniqueHumanCount: approvalCandidates.length,
-    approvalCandidateCount: approvalCandidates.length,
+    uniqueTrustedCount: trustedCandidates.length,
+    totalGnosisAppRegisterHumanRows: gnosisAppRegisterHumanRows.length,
+    uniqueGnosisAppRegisterHumanCount: gnosisAppRegisterHumanCandidates.length,
+    totalApprovalRows: trustedRows.length + gnosisAppRegisterHumanRows.length,
+    uniqueApprovalCount: approvalCandidates.length,
+    cachedApprovalCount,
+    approvalCandidateCount: approvalCandidatesToProcess.length,
     approvalTxHashes,
     dryRun
   };
@@ -154,11 +197,12 @@ type ExecuteBatchesArgs = {
   logBatchAddresses: boolean;
   logger: ILoggerService;
   execute: (batch: string[]) => Promise<string>;
-  simulate?: (batch: string[]) => Promise<{gasEstimate: bigint}>;
+  simulate?: (batch: string[]) => Promise<{ gasEstimate: bigint }>;
+  onBatchSuccess?: (batch: string[]) => void;
 };
 
 async function executeBatches(args: ExecuteBatchesArgs): Promise<string[]> {
-  const {label, addresses, batchSize, dryRun, logBatchAddresses, logger, execute, simulate} = args;
+  const { label, addresses, batchSize, dryRun, logBatchAddresses, logger, execute, simulate, onBatchSuccess } = args;
   const batches = chunkArray(addresses, batchSize);
   const txHashes: string[] = [];
 
@@ -191,6 +235,7 @@ async function executeBatches(args: ExecuteBatchesArgs): Promise<string[]> {
     logger.info(`router2 ${label} batch ${batchLabel}: processing ${batch.length} address(es).`);
     const txHash = await execute(batch);
     txHashes.push(txHash);
+    onBatchSuccess?.(batch);
     logger.info(`router2 ${label} tx=${txHash} batch ${batchLabel}.`);
   }
 
@@ -258,39 +303,22 @@ function chunkArray<T>(values: T[], chunkSize: number): T[][] {
   return chunks;
 }
 
-async function fetchApprovalHumanRows(
-  deps: Deps,
-  fetchPageSize: number,
-  approvalsFromBlock: number | undefined
-): Promise<string[]> {
-  const humansLogger = deps.logger.child("humans");
-  if (approvalsFromBlock === undefined) {
-    return deps.circlesRpc.fetchAllHumanAvatars(fetchPageSize, humansLogger);
+function validateOptionalBlock(blockNumber: number | undefined, label: string): number | undefined {
+  if (blockNumber === undefined) {
+    return undefined;
   }
 
-  if (!Number.isInteger(approvalsFromBlock) || approvalsFromBlock < 0) {
-    throw new Error(`Invalid router2 approvals-from block configured: '${approvalsFromBlock}'`);
+  if (!Number.isInteger(blockNumber) || blockNumber < 0) {
+    throw new Error(`Invalid ${label} configured: '${blockNumber}'`);
   }
 
-  if (!deps.circlesRpc.fetchHumanAvatarsRegisteredAfterBlock) {
-    throw new Error("Circles RPC dependency does not support block-filtered RegisterHuman fetching.");
-  }
-
-  return deps.circlesRpc.fetchHumanAvatarsRegisteredAfterBlock(approvalsFromBlock, fetchPageSize, humansLogger);
-}
-
-function formatApprovalFetchMessage(approvalsFromBlock: number | undefined): string {
-  if (approvalsFromBlock === undefined) {
-    return "Fetching Circles v2 human avatars for router2 approval...";
-  }
-
-  return `Fetching Circles v2 human avatars registered after block ${approvalsFromBlock} for router2 approval...`;
+  return blockNumber;
 }
 
 export const __testables = {
   chunkArray,
-  formatApprovalFetchMessage,
   formatBatchAddresses,
   normalizeAddress,
+  validateOptionalBlock,
   uniqueNormalizedAddresses
 };

@@ -8,18 +8,15 @@ import {recordRunError, recordRunSuccess, startMetricsServer} from "../../servic
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
-import {
-  deriveRegisterHumanWsUrl,
-  startRegisterHumanListener,
-  type RegisterHumanListenerHandle
-} from "../router-tms/realtime";
+import {fetchRegisterHumanGnosisAppUserAddresses} from "../../services/gnosisAppUserService";
 import {
   DEFAULT_ROUTER2_ADDRESS,
-  DEFAULT_ROUTER2_ADMIN_SAFE_ADDRESS,
   DEFAULT_ROUTER2_BATCH_SIZE,
   DEFAULT_ROUTER2_FETCH_PAGE_SIZE,
+  DEFAULT_ROUTER2_FETCH_TIMEOUT_MS,
+  DEFAULT_ROUTER2_GNOSIS_APP_INDEXER_URL,
   DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS,
-  runApprovalsForHumanAvatars,
+  InMemoryRouter2ApprovalStore,
   runOnce,
   type RunConfig
 } from "./logic";
@@ -31,14 +28,14 @@ const rpcUrl = process.env.RPC_URL || "https://rpc.aboutcircles.com/";
 const txRpcUrl = resolveTransactionRpcUrl(rpcUrl);
 const routerAddress = process.env.ROUTER2_ADDRESS || DEFAULT_ROUTER2_ADDRESS;
 const trustedByAddress = process.env.ROUTER2_TRUSTED_BY_ADDRESS || DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS;
-const safeAddress = process.env.ROUTER2_ADMIN_SAFE_ADDRESS || DEFAULT_ROUTER2_ADMIN_SAFE_ADDRESS;
-const safeSignerPrivateKey = process.env.ROUTER2_SAFE_SIGNER_PRIVATE_KEY || "";
+const gnosisAppIndexerUrl = process.env.ROUTER2_GNOSIS_APP_INDEXER_URL || DEFAULT_ROUTER2_GNOSIS_APP_INDEXER_URL;
+const gnosisAppFromBlock = parseOptionalEnvInt("ROUTER2_GNOSIS_APP_FROM_BLOCK");
+const signerPrivateKey = process.env.ROUTER2_SIGNER_PRIVATE_KEY || "";
 const dryRun = process.env.DRY_RUN === "1";
-const pollIntervalMs = parseEnvInt("ROUTER2_POLL_INTERVAL_MS", 30 * 60 * 1000);
+const pollIntervalMs = parseEnvInt("ROUTER2_POLL_INTERVAL_MS", 10 * 60 * 1000);
 const batchSize = parseEnvInt("ROUTER2_BATCH_SIZE", DEFAULT_ROUTER2_BATCH_SIZE);
 const fetchPageSize = parseEnvInt("ROUTER2_FETCH_PAGE_SIZE", DEFAULT_ROUTER2_FETCH_PAGE_SIZE);
-const approvalsFromBlock = parseOptionalEnvInt("ROUTER2_APPROVALS_FROM_BLOCK");
-const registerHumanWsUrl = process.env.ROUTER2_WSS_URL || deriveRegisterHumanWsUrl(rpcUrl);
+const fetchTimeoutMs = parseEnvInt("ROUTER2_FETCH_TIMEOUT_MS", DEFAULT_ROUTER2_FETCH_TIMEOUT_MS);
 const slackWebhookUrl = process.env.ROUTER2_SLACK_WEBHOOK_URL || process.env.SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
@@ -57,52 +54,49 @@ const circlesRpc = new CirclesRpcService(rpcUrl, (msg) => {
   ).catch((e) => console.warn("[SlackAlert] failed:", (e as Error).message));
 });
 const canSimulateTransactions = dryRun && dryRunSimulationEnabled &&
-  safeSignerPrivateKey.trim().length > 0 &&
-  safeAddress.trim().length > 0;
+  signerPrivateKey.trim().length > 0;
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 const runLogger = rootLogger.child("run");
+const approvalStore = new InMemoryRouter2ApprovalStore();
 
 let router2Service: Router2Service | undefined;
-let registerHumanListener: RegisterHumanListenerHandle | null = null;
 let executionQueue: Promise<void> = Promise.resolve();
 
-if (!dryRun && safeSignerPrivateKey.trim().length === 0) {
-  throw new Error("ROUTER2_SAFE_SIGNER_PRIVATE_KEY is required when router2 is not running in dry-run mode.");
-}
-
-if (!dryRun && safeAddress.trim().length === 0) {
-  throw new Error("ROUTER2_ADMIN_SAFE_ADDRESS is required when router2 is not running in dry-run mode.");
+if (!dryRun && signerPrivateKey.trim().length === 0) {
+  throw new Error("ROUTER2_SIGNER_PRIVATE_KEY is required when router2 is not running in dry-run mode.");
 }
 
 if (!dryRun || canSimulateTransactions) {
-  router2Service = new Router2Service(rpcUrl, routerAddress, safeSignerPrivateKey, safeAddress, txRpcUrl);
+  router2Service = new Router2Service(rpcUrl, routerAddress, signerPrivateKey, txRpcUrl);
 }
 
 const config: RunConfig = {
   routerAddress,
   trustedByAddress,
+  gnosisAppIndexerUrl,
+  gnosisAppFromBlock,
   dryRun,
   batchSize,
   fetchPageSize,
-  approvalsFromBlock,
   logBatchAddresses
 };
 
 rootLogger.info("Starting router2 watcher with config:");
 rootLogger.info(`  - rpcUrl=${rpcUrl}`);
 rootLogger.info(`  - txRpcUrl=${txRpcUrl}`);
-rootLogger.info(`  - registerHumanWsUrl=${registerHumanWsUrl}`);
 rootLogger.info(`  - routerAddress=${routerAddress}`);
 rootLogger.info(`  - trustedByAddress=${trustedByAddress}`);
-rootLogger.info(`  - adminSafeAddress=${safeAddress || "(not set)"}`);
-rootLogger.info(`  - safeSignerConfigured=${safeSignerPrivateKey.trim().length > 0}`);
+rootLogger.info(`  - gnosisAppIndexerUrl=${gnosisAppIndexerUrl}`);
+rootLogger.info(`  - gnosisAppFromBlock=${gnosisAppFromBlock ?? "(not set)"}`);
+rootLogger.info(`  - eoaSignerConfigured=${signerPrivateKey.trim().length > 0}`);
+rootLogger.info(`  - eoaSignerAddress=${router2Service?.getSignerAddress() ?? "(not set)"}`);
 rootLogger.info(`  - dryRunSimulationEnabled=${dryRunSimulationEnabled}`);
 rootLogger.info(`  - dryRunSimulationConfigured=${canSimulateTransactions}`);
 rootLogger.info(`  - logBatchAddresses=${logBatchAddresses}`);
 rootLogger.info(`  - pollIntervalMs=${pollIntervalMs}`);
 rootLogger.info(`  - batchSize=${batchSize}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
-rootLogger.info(`  - approvalsFromBlock=${approvalsFromBlock ?? "(not set)"}`);
+rootLogger.info(`  - fetchTimeoutMs=${fetchTimeoutMs}`);
 rootLogger.info(`  - dryRun=${dryRun}`);
 
 void notifySlackStartup();
@@ -138,7 +132,6 @@ async function mainLoop(): Promise<void> {
 
   while (true) {
     const runStartedAt = Date.now();
-    stopRealtimeRegisterHumanListener("starting scheduled router2 run");
 
     try {
       const outcome = await enqueueExclusive(async () => {
@@ -155,14 +148,16 @@ async function mainLoop(): Promise<void> {
           {
             circlesRpc,
             logger: runLogger,
-            router2Service
+            router2Service,
+            approvalStore,
+            fetchGnosisAppRegisterHumanAddresses: (indexerUrl, pageSize, fromBlock, logger) =>
+              fetchRegisterHumanGnosisAppUserAddresses(indexerUrl, pageSize, fetchTimeoutMs, fromBlock, logger)
           },
           config
         );
       });
 
       if (!outcome) {
-        startRealtimeRegisterHumanListener();
         await delay(currentDelay);
         continue;
       }
@@ -179,12 +174,13 @@ async function mainLoop(): Promise<void> {
       runLogger.info(
         "router2 run completed: " +
         `trusted=${outcome.uniqueTrustedCount} ` +
-        `routingTxs=${outcome.routingTxHashes.length} ` +
-        `humans=${outcome.uniqueHumanCount} ` +
+        `gnosisAppRegisterHumans=${outcome.uniqueGnosisAppRegisterHumanCount} ` +
+        `approvals=${outcome.uniqueApprovalCount} ` +
+        `cached=${outcome.cachedApprovalCount} ` +
+        `approvalCandidates=${outcome.approvalCandidateCount} ` +
         `approvalTxs=${outcome.approvalTxHashes.length} ` +
         `dryRun=${outcome.dryRun}`
       );
-      startRealtimeRegisterHumanListener();
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
       const consecutiveErrors = errorTracker.recordError();
@@ -198,7 +194,6 @@ async function mainLoop(): Promise<void> {
         return;
       }
       currentDelay = Math.min(currentDelay * 2, maxDelay);
-      startRealtimeRegisterHumanListener();
     }
 
     await delay(currentDelay);
@@ -206,108 +201,10 @@ async function mainLoop(): Promise<void> {
 }
 
 async function start(): Promise<void> {
-  if (router2Service) {
-    try {
-      await router2Service.validateSafeOwnership();
-      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      rootLogger.error(`Safe ownership validation FAILED: ${errorMessage}`);
-      try {
-        await slackService.notifySlackStartOrCrash(
-          `🚨 *router2 Safe ownership check failed*\n\n${errorMessage}`,
-          SlackSeverity.CRITICAL
-        );
-      } catch (slackErr) {
-        rootLogger.warn("Failed to send Slack ownership failure notification:", slackErr);
-      }
-      process.exit(1);
-    }
-  }
-
   await mainLoop();
 }
 
-async function handleRealtimeHumanRegistrations(avatars: string[]): Promise<void> {
-  if (avatars.length === 0) {
-    return;
-  }
-
-  const startedAt = Date.now();
-  const realtimeLogger = runLogger.child("realtime");
-  realtimeLogger.info(`Processing realtime router2 approval avatar(s): ${avatars.join(", ")}`);
-
-  try {
-    const outcome = await enqueueExclusive(async () => {
-      const isHealthy = await ensureRpcHealthyOrNotify({
-        appName: "router2",
-        rpcUrl,
-        logger: rootLogger
-      });
-      if (!isHealthy) {
-        return null;
-      }
-
-      return runApprovalsForHumanAvatars(
-        {
-          circlesRpc,
-          logger: realtimeLogger,
-          router2Service
-        },
-        config,
-        avatars
-      );
-    });
-
-    if (!outcome) {
-      realtimeLogger.warn("Skipping realtime router2 approval because the RPC health check failed.");
-      return;
-    }
-
-    recordRunSuccess("router2", Date.now() - startedAt);
-    realtimeLogger.info(
-      "router2 realtime approval completed: " +
-      `humans=${outcome.uniqueHumanCount} approvalTxs=${outcome.approvalTxHashes.length}`
-    );
-  } catch (cause) {
-    const error = cause instanceof Error ? cause : new Error(String(cause));
-    recordRunError("router2");
-    realtimeLogger.error("Realtime router2 approval failed:");
-    realtimeLogger.error(formatErrorWithCauses(error));
-  }
-}
-
-function startRealtimeRegisterHumanListener(): void {
-  if (registerHumanListener) {
-    return;
-  }
-
-  rootLogger.info("Starting router2 RegisterHuman realtime listener between scheduled runs.");
-  registerHumanListener = startRegisterHumanListener({
-    httpRpcUrl: rpcUrl,
-    wsUrl: registerHumanWsUrl,
-    logger: rootLogger.child("register-human"),
-    onHumansRegistered: handleRealtimeHumanRegistrations
-  });
-}
-
-function stopRealtimeRegisterHumanListener(reason: string): void {
-  if (!registerHumanListener) {
-    return;
-  }
-
-  rootLogger.info(`Stopping router2 RegisterHuman realtime listener: ${reason}.`);
-  try {
-    registerHumanListener.stop();
-  } catch (error) {
-    rootLogger.warn("Failed to stop RegisterHuman listener:", error);
-  } finally {
-    registerHumanListener = null;
-  }
-}
-
 async function gracefulShutdown(signal: string): Promise<void> {
-  stopRealtimeRegisterHumanListener(`graceful shutdown (${signal})`);
   try {
     await slackService.notifySlackStartOrCrash(
       `🔄 *router2 service shutting down*\n\nService received ${signal} signal.`,
@@ -334,16 +231,17 @@ start().catch((cause) => {
 
 async function notifySlackStartup(): Promise<void> {
   const message = `✅ *router2 service started*\n\n` +
-    `Enabling router2 routing for addresses trusted by the configured truster and setting CRC approvals for Circles v2 humans.\n` +
-    `- RegisterHuman WSS: ${registerHumanWsUrl}\n` +
+    `Setting CRC approvals for addresses trusted by the configured truster.\n` +
     `- RPC: ${rpcUrl}\n` +
     `- TX RPC: ${txRpcUrl}\n` +
     `- Router2: ${routerAddress}\n` +
     `- Trusted By: ${trustedByAddress}\n` +
-    `- Admin Safe: ${safeAddress || "(not set)"}\n` +
-    `- Safe signer configured: ${safeSignerPrivateKey.trim().length > 0}\n` +
+    `- Gnosis App Indexer: ${gnosisAppIndexerUrl}\n` +
+    `- Gnosis App From Block: ${gnosisAppFromBlock ?? "(not set)"}\n` +
+    `- EOA signer configured: ${signerPrivateKey.trim().length > 0}\n` +
+    `- EOA signer: ${router2Service?.getSignerAddress() ?? "(not set)"}\n` +
     `- Poll Interval (minutes): ${formatMinutes(pollIntervalMs)}\n` +
-    `- Approvals From Block: ${approvalsFromBlock ?? "(not set)"}\n` +
+    `- Fetch Page Size: ${fetchPageSize}\n` +
     `- Dry Run: ${dryRun}`;
 
   try {

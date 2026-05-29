@@ -1,7 +1,7 @@
 import {Interface, getAddress} from "ethers";
 import {IRouter2Service} from "../interfaces/IRouter2Service";
 import {TransactionSimulationResult} from "../interfaces/ITransactionSimulation";
-import {SafeTransactionExecutor} from "./safeTransactionExecutor";
+import {EoaTransactionExecutor} from "./eoaTransactionExecutor";
 
 const ROUTER2_ABI = [
   "function enableCRCForRouting(address[] crcArray)",
@@ -11,22 +11,21 @@ const ROUTER2_ABI = [
 const ROUTER2_INTERFACE = new Interface(ROUTER2_ABI);
 
 export class Router2Service implements IRouter2Service {
-  private readonly executor: SafeTransactionExecutor;
+  private readonly executor: EoaTransactionExecutor;
   private readonly routerAddress: string;
 
   constructor(
     rpcUrl: string,
     routerAddress: string,
     signerPrivateKey: string,
-    safeAddress: string,
     txRpcUrl: string = rpcUrl
   ) {
     this.routerAddress = getAddress(routerAddress);
-    this.executor = new SafeTransactionExecutor(txRpcUrl, signerPrivateKey, safeAddress);
+    this.executor = new EoaTransactionExecutor(txRpcUrl, signerPrivateKey);
   }
 
-  async validateSafeOwnership(): Promise<void> {
-    return this.executor.validateOwnership();
+  getSignerAddress(): string {
+    return this.executor.getSignerAddress();
   }
 
   async enableCRCForRouting(crcAddresses: string[]): Promise<string> {

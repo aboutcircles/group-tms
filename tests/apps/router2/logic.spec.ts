@@ -2,9 +2,10 @@ import {getAddress} from "ethers";
 import {
   DEFAULT_ROUTER2_ADDRESS,
   DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS,
-  runApprovalsForHumanAvatars,
+  InMemoryRouter2ApprovalStore,
   runOnce,
   type Deps,
+  type Router2ApprovalStore,
   type RunConfig
 } from "../../../src/apps/router2/logic";
 import {IRouter2Service} from "../../../src/interfaces/IRouter2Service";
@@ -44,26 +45,47 @@ function makeConfig(overrides?: Partial<RunConfig>): RunConfig {
     trustedByAddress: DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS,
     dryRun: false,
     batchSize: 2,
-    fetchPageSize: 10,
     ...overrides
   };
 }
 
-function makeDeps(circlesRpc: FakeCirclesRpc, router2Service?: IRouter2Service): Deps {
+function makeDeps(
+  circlesRpc: FakeCirclesRpc,
+  router2Service?: IRouter2Service,
+  gnosisAppRegisterHumanRows: string[] = [],
+  approvalStore?: Router2ApprovalStore
+): Deps {
   return {
     circlesRpc,
     logger: new FakeLogger(true),
-    router2Service
+    router2Service,
+    approvalStore,
+    fetchGnosisAppRegisterHumanAddresses: async () => [...gnosisAppRegisterHumanRows]
+  };
+}
+
+function makeDepsWithBlockCapture(
+  circlesRpc: FakeCirclesRpc,
+  seenBlocks: Array<number | undefined>,
+  router2Service?: IRouter2Service
+): Deps {
+  return {
+    circlesRpc,
+    logger: new FakeLogger(true),
+    router2Service,
+    fetchGnosisAppRegisterHumanAddresses: async (_indexerUrl, _pageSize, fromBlock) => {
+      seenBlocks.push(fromBlock);
+      return [];
+    }
   };
 }
 
 describe("router2 logic", () => {
-  it("enables routing for trusted addresses and approvals for human avatars", async () => {
+  it("approves addresses trusted by the configured truster and Gnosis App RegisterHuman users", async () => {
     const trustedA = getAddress("0x1000000000000000000000000000000000000001");
     const trustedB = getAddress("0x1000000000000000000000000000000000000002");
-    const humanA = getAddress("0x2000000000000000000000000000000000000001");
-    const humanB = getAddress("0x2000000000000000000000000000000000000002");
-    const humanC = getAddress("0x2000000000000000000000000000000000000003");
+    const registerHumanA = getAddress("0x2000000000000000000000000000000000000001");
+    const registerHumanB = getAddress("0x2000000000000000000000000000000000000002");
 
     const circlesRpc = new FakeCirclesRpc();
     circlesRpc.trusteesByTruster[DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS.toLowerCase()] = [
@@ -71,51 +93,50 @@ describe("router2 logic", () => {
       trustedB,
       trustedA
     ];
-    circlesRpc.humanAvatars = [humanA, humanB, humanC, humanA];
     const router2Service = new FakeRouter2Service();
 
-    const outcome = await runOnce(makeDeps(circlesRpc, router2Service), makeConfig());
+    const outcome = await runOnce(
+      makeDeps(circlesRpc, router2Service, [registerHumanA, registerHumanB, trustedA]),
+      makeConfig()
+    );
 
     expect(outcome.totalTrustedRows).toBe(3);
     expect(outcome.uniqueTrustedCount).toBe(2);
-    expect(outcome.totalHumanRows).toBe(4);
-    expect(outcome.uniqueHumanCount).toBe(3);
-    expect(outcome.routingTxHashes).toEqual(["0xenable_1"]);
+    expect(outcome.totalGnosisAppRegisterHumanRows).toBe(3);
+    expect(outcome.uniqueGnosisAppRegisterHumanCount).toBe(3);
+    expect(outcome.totalApprovalRows).toBe(6);
+    expect(outcome.uniqueApprovalCount).toBe(4);
     expect(outcome.approvalTxHashes).toEqual(["0xapproval_1", "0xapproval_2"]);
-    expect(router2Service.enableCalls).toEqual([
-      [trustedA.toLowerCase(), trustedB.toLowerCase()]
-    ]);
+    expect(router2Service.enableCalls).toEqual([]);
     expect(router2Service.approvalCalls).toEqual([
-      [humanA.toLowerCase(), humanB.toLowerCase()],
-      [humanC.toLowerCase()]
+      [trustedA.toLowerCase(), trustedB.toLowerCase()],
+      [registerHumanA.toLowerCase(), registerHumanB.toLowerCase()]
     ]);
   });
 
   it("simulates batches without executing in dry-run mode", async () => {
     const trustedA = getAddress("0x1000000000000000000000000000000000000011");
-    const humanA = getAddress("0x2000000000000000000000000000000000000011");
+    const registerHumanA = getAddress("0x2000000000000000000000000000000000000011");
 
     const circlesRpc = new FakeCirclesRpc();
     circlesRpc.trusteesByTruster[DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS.toLowerCase()] = [trustedA];
-    circlesRpc.humanAvatars = [humanA];
     const router2Service = new FakeRouter2Service();
 
     const outcome = await runOnce(
-      makeDeps(circlesRpc, router2Service),
+      makeDeps(circlesRpc, router2Service, [registerHumanA]),
       makeConfig({dryRun: true})
     );
 
-    expect(outcome.routingTxHashes).toEqual([]);
     expect(outcome.approvalTxHashes).toEqual([]);
     expect(router2Service.enableCalls).toEqual([]);
     expect(router2Service.approvalCalls).toEqual([]);
-    expect(router2Service.enableSimulations).toEqual([[trustedA.toLowerCase()]]);
+    expect(router2Service.enableSimulations).toEqual([]);
     expect(router2Service.approvalSimulations).toEqual([
-      [humanA.toLowerCase()]
+      [trustedA.toLowerCase(), registerHumanA.toLowerCase()]
     ]);
   });
 
-  it("skips enableCRCForRouting for addresses already trusted by router2", async () => {
+  it("approves trusted addresses without calling enableCRCForRouting", async () => {
     const alreadyEnabled = getAddress("0x1000000000000000000000000000000000000021");
     const missing = getAddress("0x1000000000000000000000000000000000000022");
 
@@ -132,56 +153,34 @@ describe("router2 logic", () => {
     const outcome = await runOnce(makeDeps(circlesRpc, router2Service), makeConfig());
 
     expect(outcome.uniqueTrustedCount).toBe(2);
-    expect(outcome.routingCandidateCount).toBe(1);
-    expect(router2Service.enableCalls).toEqual([
-      [missing.toLowerCase()]
+    expect(router2Service.enableCalls).toEqual([]);
+    expect(router2Service.approvalCalls).toEqual([
+      [alreadyEnabled.toLowerCase(), missing.toLowerCase()]
     ]);
   });
 
-  it("only enables routing for addresses trusted by the configured score group", async () => {
+  it("only uses RegisterHuman rows returned by the Gnosis App fetcher", async () => {
     const scoreGroupTrusted = getAddress("0x1000000000000000000000000000000000000031");
-    const humanOnlyAvatar = getAddress("0x2000000000000000000000000000000000000031");
+    const registerHuman = getAddress("0x2000000000000000000000000000000000000031");
+    const unclaimed = getAddress("0x2000000000000000000000000000000000000032");
 
     const circlesRpc = new FakeCirclesRpc();
     circlesRpc.trusteesByTruster[DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS.toLowerCase()] = [
       scoreGroupTrusted
     ];
-    circlesRpc.humanAvatars = [humanOnlyAvatar];
-    const router2Service = new FakeRouter2Service();
-
-    const outcome = await runOnce(makeDeps(circlesRpc, router2Service), makeConfig());
-
-    expect(outcome.routingCandidateCount).toBe(1);
-    expect(outcome.approvalCandidateCount).toBe(1);
-    expect(router2Service.enableCalls).toEqual([
-      [scoreGroupTrusted.toLowerCase()]
-    ]);
-    expect(router2Service.approvalCalls).toEqual([
-      [humanOnlyAvatar.toLowerCase()]
-    ]);
-  });
-
-  it("limits scheduled approvals to avatars registered after the configured block", async () => {
-    const oldHuman = getAddress("0x2000000000000000000000000000000000000041");
-    const newHuman = getAddress("0x2000000000000000000000000000000000000042");
-    const approvalsFromBlock = 12345;
-
-    const circlesRpc = new FakeCirclesRpc();
-    circlesRpc.humanAvatars = [oldHuman, newHuman];
-    circlesRpc.humanAvatarsAfterBlock[approvalsFromBlock] = [newHuman];
     const router2Service = new FakeRouter2Service();
 
     const outcome = await runOnce(
-      makeDeps(circlesRpc, router2Service),
-      makeConfig({approvalsFromBlock})
+      makeDeps(circlesRpc, router2Service, [registerHuman]),
+      makeConfig()
     );
 
-    expect(circlesRpc.requestedHumanAvatarsAfterBlock).toBe(approvalsFromBlock);
-    expect(outcome.totalHumanRows).toBe(1);
-    expect(outcome.approvalCandidateCount).toBe(1);
+    expect(outcome.approvalCandidateCount).toBe(2);
+    expect(router2Service.enableCalls).toEqual([]);
     expect(router2Service.approvalCalls).toEqual([
-      [newHuman.toLowerCase()]
+      [scoreGroupTrusted.toLowerCase(), registerHuman.toLowerCase()]
     ]);
+    expect(router2Service.approvalCalls.flat()).not.toContain(unclaimed.toLowerCase());
   });
 
   it("requires a router2 service outside dry-run mode", async () => {
@@ -192,24 +191,61 @@ describe("router2 logic", () => {
       .toThrow("Router2 service dependency is required");
   });
 
-  it("can approve realtime human avatars without routing", async () => {
-    const humanA = getAddress("0x2000000000000000000000000000000000000021");
-    const humanB = getAddress("0x2000000000000000000000000000000000000022");
-
+  it("passes the configured Gnosis App from-block to the fetcher", async () => {
     const circlesRpc = new FakeCirclesRpc();
+    const seenBlocks: Array<number | undefined> = [];
     const router2Service = new FakeRouter2Service();
 
-    const outcome = await runApprovalsForHumanAvatars(
-      makeDeps(circlesRpc, router2Service),
-      makeConfig(),
-      [humanA, humanB]
+    await runOnce(
+      makeDepsWithBlockCapture(circlesRpc, seenBlocks, router2Service),
+      makeConfig({gnosisAppFromBlock: 12345})
     );
 
-    expect(outcome.routingCandidateCount).toBe(0);
-    expect(outcome.approvalCandidateCount).toBe(2);
-    expect(router2Service.enableCalls).toEqual([]);
-    expect(router2Service.approvalCalls).toEqual([
-      [humanA.toLowerCase(), humanB.toLowerCase()]
-    ]);
+    expect(seenBlocks).toEqual([12345]);
   });
+
+  it("skips addresses already marked approved in the in-memory store", async () => {
+    const cached = getAddress("0x1000000000000000000000000000000000000041");
+    const uncached = getAddress("0x1000000000000000000000000000000000000042");
+    const store = new InMemoryRouter2ApprovalStore();
+    store.markApproved([cached]);
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.trusteesByTruster[DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS.toLowerCase()] = [
+      cached,
+      uncached
+    ];
+    const router2Service = new FakeRouter2Service();
+
+    const outcome = await runOnce(
+      makeDeps(circlesRpc, router2Service, [], store),
+      makeConfig()
+    );
+
+    expect(outcome.uniqueApprovalCount).toBe(2);
+    expect(outcome.cachedApprovalCount).toBe(1);
+    expect(outcome.approvalCandidateCount).toBe(1);
+    expect(router2Service.approvalCalls).toEqual([
+      [uncached.toLowerCase()]
+    ]);
+    expect(store.isApproved(uncached)).toBe(true);
+  });
+
+  it("does not mark dry-run simulations as approved", async () => {
+    const address = getAddress("0x1000000000000000000000000000000000000051");
+    const store = new InMemoryRouter2ApprovalStore();
+
+    const circlesRpc = new FakeCirclesRpc();
+    circlesRpc.trusteesByTruster[DEFAULT_ROUTER2_TRUSTED_BY_ADDRESS.toLowerCase()] = [address];
+    const router2Service = new FakeRouter2Service();
+
+    await runOnce(
+      makeDeps(circlesRpc, router2Service, [], store),
+      makeConfig({dryRun: true})
+    );
+
+    expect(store.isApproved(address)).toBe(false);
+    expect(router2Service.approvalSimulations).toEqual([[address.toLowerCase()]]);
+  });
+
 });
