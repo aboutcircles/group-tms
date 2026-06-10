@@ -1,7 +1,7 @@
 import {getAddress} from "ethers";
 import {ILoggerService} from "../interfaces/ILoggerService";
 
-export const DEFAULT_GNOSIS_APP_INDEXER_URL = "https://indexer.eu.hyperindex.xyz/3bc5dfd/v1/graphql";
+export const DEFAULT_GNOSIS_APP_INDEXER_URL = "https://gnosis-e702590.dedicated.hyperindex.xyz/v1/graphql";
 export const DEFAULT_GNOSIS_APP_FETCH_PAGE_SIZE = 1_000;
 export const DEFAULT_GNOSIS_APP_FETCH_TIMEOUT_MS = 60_000;
 const MAX_INDEXER_PAGE_SIZE = 1_000;

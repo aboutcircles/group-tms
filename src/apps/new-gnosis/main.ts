@@ -1,25 +1,36 @@
-import {Contract, Wallet} from "ethers";
+import {Contract, Wallet, isCallException} from "ethers";
 import {CirclesRpc} from "@aboutcircles/sdk-rpc";
 import {LoggerService} from "../../services/loggerService";
 import {SlackService} from "../../services/slackService";
 import {SlackSeverity} from "../../interfaces/ISlackService";
 import {ConsecutiveErrorTracker} from "../../services/consecutiveErrorTracker";
-import {StateStore} from "../../services/stateStore";
+import {BlacklistingService} from "../../services/blacklistingService";
+import {IBlacklistServiceVerdict} from "../../interfaces/IBlacklistingService";
+import {
+  fetchTrustScores,
+  DEFAULT_TRUST_SCORE_BATCH_SIZE,
+  DEFAULT_TRUST_SCORE_TIMEOUT_MS,
+  DEFAULT_TRUST_SCORE_URL
+} from "../../services/trustScoreService";
 import {startMetricsServer, recordRunSuccess, recordRunError} from "../../services/metricsService";
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {createProvider, primaryRpcUrl} from "../../services/rpcProvider";
 import {formatErrorWithCauses} from "../../formatError";
 import {
-  runOnce,
+  runBackfill,
+  runIncremental,
   defaultGraphQLFetcher,
   DEFAULT_CONTRACT_ADDRESS,
+  DEFAULT_CUTOFF_BLOCK,
   DEFAULT_INDEXER_URL,
   DEFAULT_FETCH_PAGE_SIZE,
   DEFAULT_FETCH_TIMEOUT_MS,
-  DEFAULT_START_BLOCK,
+  DEFAULT_SCORE_THRESHOLD,
   DEFAULT_TRUST_BATCH_SIZE,
+  BackfillOutcome,
   RunConfig,
+  RunDeps,
   RunOutcome,
   TrustBatchExecutor
 } from "./logic";
@@ -27,11 +38,13 @@ import {
 const APP_NAME = "new-gnosis";
 const TRUST_BATCH_ABI = [
   "function trustBatch(address[] avatar)",
+  "function trust(address trustReceiver)",
   "function optOuts(address) view returns (bool)"
 ];
 const TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1_000;
 const READ_CONCURRENCY = 25;
 const REGISTERED_HUMAN_LOOKUP_BATCH = 500;
+const AVATAR_INFO_LOOKUP_BATCH = 500;
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, APP_NAME);
@@ -45,12 +58,18 @@ const slackWebhookUrl = process.env.NEW_GNOSIS_SLACK_WEBHOOK_URL || "";
 const slackWebhookUrlInfo = process.env.SLACK_WEBHOOK_URL_INFO || "";
 const slackInfoChannel = process.env.SLACK_INFO_CHANNEL || "";
 const dryRun = process.env.DRY_RUN === "1";
-const runIntervalMinutes = Math.max(1, parseEnvInt("NEW_GNOSIS_RUN_INTERVAL_MINUTES", 30));
+const runIntervalMinutes = Math.max(1, parseEnvInt("NEW_GNOSIS_RUN_INTERVAL_MINUTES", 10));
 const runIntervalMs = runIntervalMinutes * 60 * 1_000;
 const fetchPageSize = parseEnvInt("NEW_GNOSIS_FETCH_PAGE_SIZE", DEFAULT_FETCH_PAGE_SIZE);
 const trustBatchSize = parseEnvInt("NEW_GNOSIS_TRUST_BATCH_SIZE", DEFAULT_TRUST_BATCH_SIZE);
 const fetchTimeoutMs = Math.max(1_000, parseEnvInt("NEW_GNOSIS_FETCH_TIMEOUT_MS", DEFAULT_FETCH_TIMEOUT_MS));
-const configuredStartBlock = parseEnvInt("NEW_GNOSIS_START_BLOCK", DEFAULT_START_BLOCK);
+const blacklistingServiceUrl = process.env.BLACKLISTING_SERVICE_URL ||
+  "https://squid-app-3gxnl.ondigitalocean.app/aboutcircles-advanced-analytics2/bot-analytics/blacklist";
+const scoringServiceUrl = process.env.NEW_GNOSIS_SCORING_URL || DEFAULT_TRUST_SCORE_URL;
+const scoreThreshold = parseEnvFloat("NEW_GNOSIS_SCORE_THRESHOLD", DEFAULT_SCORE_THRESHOLD);
+const scoreBatchSize = Math.max(1, parseEnvInt("NEW_GNOSIS_SCORE_BATCH_SIZE", DEFAULT_TRUST_SCORE_BATCH_SIZE));
+const scoreFetchTimeoutMs = Math.max(1_000, parseEnvInt("NEW_GNOSIS_SCORE_FETCH_TIMEOUT_MS", DEFAULT_TRUST_SCORE_TIMEOUT_MS));
+const cutoffBlock = parseEnvInt("NEW_GNOSIS_CUTOFF_BLOCK", DEFAULT_CUTOFF_BLOCK);
 const errorsBeforeCrash = 3;
 
 if (!dryRun && signerPrivateKey.trim().length === 0) {
@@ -61,6 +80,7 @@ const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slac
 const slackConfigured = slackWebhookUrl.trim().length > 0;
 const circlesRpc = new CirclesRpc(primaryRpcUrl(rpcUrl));
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
+const blacklistingService = new BlacklistingService(blacklistingServiceUrl);
 
 const readProvider = createProvider(rpcUrl);
 const readContract = new Contract(contractAddress, TRUST_BATCH_ABI, readProvider);
@@ -82,20 +102,26 @@ const trustBatchExecutor: TrustBatchExecutor | undefined = wallet
     }
   : undefined;
 
-const config: RunConfig = {
-  indexerUrl,
-  contractAddress,
-  startBlock: configuredStartBlock,
-  fetchPageSize,
-  trustBatchSize,
-  fetchTimeoutMs,
-  dryRun
+const baseDeps: Omit<RunDeps, "logger"> = {
+  fetchUsers: (q) => defaultGraphQLFetcher(indexerUrl, q, fetchTimeoutMs),
+  fetchExistingTrustees: (addr) => fetchOutgoingTrustees(circlesRpc, addr),
+  filterRegisteredHumans: (addrs) => fetchRegisteredHumans(indexerUrl, addrs, fetchTimeoutMs),
+  filterHumanAvatars: (addrs) => filterHumanAvatars(circlesRpc, addrs),
+  isOptedOutBatch: (addrs) => fetchIsOptedOutBatch(readContract, addrs),
+  checkBlacklist: (addrs) => checkBlacklistedAddresses(addrs),
+  fetchTrustScores: (addrs) =>
+    fetchTrustScores(scoringServiceUrl, addrs, scoreBatchSize, scoreFetchTimeoutMs, rootLogger.child("scores")),
+  filterTrustable: (addrs) => filterTrustSimulated(readContract, addrs, wallet?.address),
+  trustBatch: trustBatchExecutor
 };
 
 rootLogger.info("Starting new-gnosis run with config:");
 rootLogger.info(`  - indexerUrl=${indexerUrl}`);
 rootLogger.info(`  - contractAddress=${contractAddress}`);
-rootLogger.info(`  - startBlock=${configuredStartBlock}`);
+rootLogger.info(`  - cutoffBlock=${cutoffBlock}`);
+rootLogger.info(`  - scoreThreshold=${scoreThreshold}`);
+rootLogger.info(`  - scoringServiceUrl=${scoringServiceUrl}`);
+rootLogger.info(`  - blacklistingServiceUrl=${blacklistingServiceUrl}`);
 rootLogger.info(`  - fetchPageSize=${fetchPageSize}`);
 rootLogger.info(`  - trustBatchSize=${trustBatchSize}`);
 rootLogger.info(`  - runIntervalMinutes=${runIntervalMinutes}`);
@@ -136,18 +162,25 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
 async function mainLoop(): Promise<void> {
   startMetricsServer(APP_NAME);
 
-  const stateStore = process.env.LEADER_DB_URL ? new StateStore(process.env.LEADER_DB_URL) : null;
-  let nextStartBlock = configuredStartBlock;
-  if (stateStore) {
-    const persisted = await stateStore.load(APP_NAME);
-    if (persisted) {
-      nextStartBlock = persisted.lastScannedBlock;
-      rootLogger.info(`[state-store] Restored startBlock=${nextStartBlock}`);
-    }
-  }
+  rootLogger.info(
+    `Using cutoff block ${cutoffBlock}. Avatars registered before it require ` +
+    `a relative trust score > ${scoreThreshold} and a clean blacklist; avatars at or after it are trusted unconditionally.`
+  );
+
+  const config: RunConfig = {
+    indexerUrl,
+    contractAddress,
+    cutoffBlock,
+    scoreThreshold,
+    fetchPageSize,
+    trustBatchSize,
+    fetchTimeoutMs,
+    dryRun
+  };
 
   const maxDelay = Math.min(runIntervalMs * 4, 15 * 60 * 1_000);
   let currentDelay = runIntervalMs;
+  let backfillCompleted = false;
 
   await notifySlackStartup();
 
@@ -164,26 +197,36 @@ async function mainLoop(): Promise<void> {
         continue;
       }
 
-      const outcome = await runOnce(
-        {
-          fetchUsers: (q) => defaultGraphQLFetcher(indexerUrl, q, fetchTimeoutMs),
-          fetchExistingTrustees: (addr) => fetchOutgoingTrustees(circlesRpc, addr),
-          filterRegisteredHumans: (addrs) => fetchRegisteredHumans(indexerUrl, addrs, fetchTimeoutMs),
-          isOptedOutBatch: (addrs) => fetchIsOptedOutBatch(readContract, addrs),
-          trustBatch: trustBatchExecutor,
-          logger: rootLogger.child("run")
-        },
-        {
-          ...config,
-          startBlock: nextStartBlock,
-          dryRun
-        }
-      );
+      if (!backfillCompleted) {
+        rootLogger.info("Loading blacklist for the one-time backfill...");
+        await blacklistingService.loadBlacklist();
+        rootLogger.info(`Blacklist loaded with ${blacklistingService.getBlacklistCount()} address(es).`);
 
-      if (outcome.highestBlockSeen > nextStartBlock) {
-        nextStartBlock = outcome.highestBlockSeen;
-        await stateStore?.save(APP_NAME, nextStartBlock, {lastSuccessfulRunAt: new Date().toISOString()});
+        const backfillOutcome = await runBackfill(
+          {...baseDeps, logger: rootLogger.child("backfill")},
+          config
+        );
+        backfillCompleted = true;
+
+        rootLogger.info(
+          `Backfill completed. Fetched=${backfillOutcome.fetchedUsers}, ` +
+          `unclaimed=${backfillOutcome.unclaimedCount}, ` +
+          `alreadyTrusted=${backfillOutcome.alreadyTrustedCount}, ` +
+          `blacklisted=${backfillOutcome.blacklistedCount}, ` +
+          `belowThreshold=${backfillOutcome.belowThresholdCount}, ` +
+          `optedOut=${backfillOutcome.optedOutCount}, ` +
+          `notHuman=${backfillOutcome.notHumanCount}, ` +
+          `untrustable=${backfillOutcome.untrustableCount}, ` +
+          `newAvatars=${backfillOutcome.newAvatars.length}, ` +
+          `batches=${backfillOutcome.trustBatches.length}, txs=${backfillOutcome.trustTxHashes.length}.`
+        );
+        await notifySlackBackfillSummary(backfillOutcome, dryRun);
       }
+
+      const outcome = await runIncremental(
+        {...baseDeps, logger: rootLogger.child("run")},
+        config
+      );
 
       recordRunSuccess(APP_NAME, Date.now() - runStartedAt);
       errorTracker.recordSuccess();
@@ -198,6 +241,8 @@ async function mainLoop(): Promise<void> {
         `Run completed. Fetched=${outcome.fetchedUsers}, ` +
         `unclaimed=${outcome.unclaimedCount}, ` +
         `optedOut=${outcome.optedOutCount}, ` +
+        `notHuman=${outcome.notHumanCount}, ` +
+        `untrustable=${outcome.untrustableCount}, ` +
         `alreadyTrusted=${outcome.alreadyTrustedCount}, ` +
         `newAvatars=${outcome.newAvatars.length}, ` +
         `batches=${outcome.trustBatches.length}, txs=${outcome.trustTxHashes.length}, ` +
@@ -228,6 +273,25 @@ async function mainLoop(): Promise<void> {
   }
 }
 
+async function checkBlacklistedAddresses(addresses: string[]): Promise<Set<string>> {
+  const verdicts = await blacklistingService.checkBlacklist(addresses);
+  const blacklisted = new Set<string>();
+  for (const verdict of verdicts) {
+    if (isBlacklistedVerdict(verdict)) {
+      blacklisted.add(verdict.address.toLowerCase());
+    }
+  }
+  return blacklisted;
+}
+
+function isBlacklistedVerdict(verdict: IBlacklistServiceVerdict): boolean {
+  if (verdict.is_bot) {
+    return true;
+  }
+  const category = verdict.category?.toLowerCase();
+  return category === "blocked" || category === "flagged";
+}
+
 async function notifySlackStartup(): Promise<void> {
   const header = dryRun
     ? "🧪 *New Gnosis Service Started (dry-run)*"
@@ -239,7 +303,10 @@ async function notifySlackStartup(): Promise<void> {
     `- RPC: ${rpcUrl}\n` +
     `- TX RPC: ${txRpcUrl}\n` +
     `- Signer (EOA): ${signerAddress}\n` +
-    `- Start Block: ${configuredStartBlock}\n` +
+    `- Cutoff Block: ${cutoffBlock}\n` +
+    `- Score Threshold (backfill): ${scoreThreshold}\n` +
+    `- Scoring Service: ${scoringServiceUrl}\n` +
+    `- Blacklist Service: ${blacklistingServiceUrl}\n` +
     `- Run Interval (min): ${runIntervalMinutes}\n` +
     `- Trust Batch Size: ${trustBatchSize}\n` +
     `- Slack Configured: ${slackConfigured}`;
@@ -250,8 +317,55 @@ async function notifySlackStartup(): Promise<void> {
   }
 }
 
+async function notifySlackBackfillSummary(outcome: BackfillOutcome, effectiveDryRun: boolean): Promise<void> {
+  const header = effectiveDryRun
+    ? "🧪 *New Gnosis Backfill Summary (dry-run)*"
+    : "✅ *New Gnosis Backfill Summary*";
+
+  const lines = [
+    header,
+    "",
+    `- Contract: ${contractAddress}`,
+    `- Mode: ${effectiveDryRun ? "Dry Run" : "Live"}`,
+    `- Fetched users (pre-cutoff): ${outcome.fetchedUsers}`,
+    `- Unclaimed (skipped): ${outcome.unclaimedCount}`,
+    `- Already trusted (skipped): ${outcome.alreadyTrustedCount}`,
+    `- Blacklisted (skipped): ${outcome.blacklistedCount}`,
+    `- Score <= ${scoreThreshold} (skipped): ${outcome.belowThresholdCount}`,
+    `- Opted out (skipped): ${outcome.optedOutCount}`,
+    `- Not a Circles human (skipped): ${outcome.notHumanCount}`,
+    `- Trust simulation reverted (skipped): ${outcome.untrustableCount}`,
+    `- New avatars: ${outcome.newAvatars.length}`,
+    `- Batches: ${outcome.trustBatches.length}`
+  ];
+
+  const sample = outcome.newAvatars.slice(0, 10);
+  if (sample.length > 0) {
+    const more = outcome.newAvatars.length - sample.length;
+    lines.push(
+      `- ${effectiveDryRun ? "Would trust" : "Trusted"}: ${sample.join(", ")}` +
+      (more > 0 ? `, … (+${more} more)` : "")
+    );
+  }
+
+  if (!effectiveDryRun && outcome.trustTxHashes.length > 0) {
+    const sampleTxs = outcome.trustTxHashes.slice(0, 5);
+    const more = outcome.trustTxHashes.length - sampleTxs.length;
+    lines.push(
+      `- Trust tx hash(es): ${sampleTxs.join(", ")}` +
+      (more > 0 ? `, … (+${more} more)` : "")
+    );
+  }
+
+  try {
+    await slackService.notifySlackStartOrCrash(lines.join("\n"), SlackSeverity.INFO);
+  } catch (err) {
+    rootLogger.warn("Failed to send Slack backfill summary:", err);
+  }
+}
+
 async function notifySlackRunSummary(outcome: RunOutcome, effectiveDryRun: boolean): Promise<void> {
-  if (outcome.newAvatars.length === 0) return;
+  if (outcome.newAvatars.length === 0 && outcome.notHumanCount === 0 && outcome.untrustableCount === 0) return;
 
   const header = effectiveDryRun
     ? "🧪 *New Gnosis Dry-Run Summary*"
@@ -265,6 +379,8 @@ async function notifySlackRunSummary(outcome: RunOutcome, effectiveDryRun: boole
     `- Fetched users: ${outcome.fetchedUsers}`,
     `- Unclaimed (skipped): ${outcome.unclaimedCount}`,
     `- Opted out (skipped): ${outcome.optedOutCount}`,
+    `- Not a Circles human (skipped): ${outcome.notHumanCount}`,
+    `- Trust simulation reverted (skipped): ${outcome.untrustableCount}`,
     `- Already trusted (skipped): ${outcome.alreadyTrustedCount}`,
     `- New avatars: ${outcome.newAvatars.length}`,
     `- Batches: ${outcome.trustBatches.length}`,
@@ -331,6 +447,60 @@ async function fetchOutgoingTrustees(rpc: CirclesRpc, truster: string): Promise<
     .map((r) => r.objectAvatar);
 }
 
+/**
+ * Checks avatar types via the Circles RPC and keeps only avatars registered
+ * as Circles v2 humans, mirroring the group contract's OnlyHuman requirement.
+ * Addresses unknown to the Circles RPC are dropped, since the group contract
+ * would reject them and revert the whole trust batch.
+ */
+async function filterHumanAvatars(rpc: CirclesRpc, addresses: string[]): Promise<Set<string>> {
+  const result = new Set<string>();
+  for (let i = 0; i < addresses.length; i += AVATAR_INFO_LOOKUP_BATCH) {
+    const chunk = addresses.slice(i, i + AVATAR_INFO_LOOKUP_BATCH);
+    const infos = await rpc.avatar.getAvatarInfoBatch(chunk as `0x${string}`[]);
+    for (const info of infos) {
+      if (info.type === "CrcV2_RegisterHuman") {
+        result.add(info.avatar.toLowerCase());
+      }
+    }
+  }
+  return result;
+}
+
+/**
+ * Simulates trust(address) on the group contract for each address and keeps
+ * only the ones whose simulation succeeds, lowercased. The ScoreGroup's
+ * _onlyHuman check staticcalls the avatar's wallet to verify its
+ * implementation, which the registry-based filters cannot replicate; without
+ * this pre-flight a single ineligible avatar reverts its whole trustBatch.
+ * Non-revert errors (e.g. RPC failures) are rethrown so the run fails instead
+ * of silently dropping candidates.
+ */
+async function filterTrustSimulated(
+  contract: Contract,
+  addresses: string[],
+  from?: string
+): Promise<Set<string>> {
+  const overrides = from ? {from} : {};
+  const result = new Set<string>();
+  for (let i = 0; i < addresses.length; i += READ_CONCURRENCY) {
+    const chunk = addresses.slice(i, i + READ_CONCURRENCY);
+    const outcomes = await Promise.all(chunk.map(async (a) => {
+      try {
+        await contract.trust.staticCall(a, overrides);
+        return true;
+      } catch (error) {
+        if (isCallException(error)) return false;
+        throw error;
+      }
+    }));
+    chunk.forEach((a, idx) => {
+      if (outcomes[idx]) result.add(a.toLowerCase());
+    });
+  }
+  return result;
+}
+
 async function fetchIsOptedOutBatch(contract: Contract, addresses: string[]): Promise<Map<string, boolean>> {
   const result = new Map<string, boolean>();
   for (let i = 0; i < addresses.length; i += READ_CONCURRENCY) {
@@ -369,6 +539,17 @@ function parseEnvInt(name: string, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   if (Number.isNaN(parsed)) {
     rootLogger.warn(`Invalid integer for ${name}='${raw}', using fallback ${fallback}.`);
+    return fallback;
+  }
+  return parsed;
+}
+
+function parseEnvFloat(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw || raw.trim().length === 0) return fallback;
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) {
+    rootLogger.warn(`Invalid number for ${name}='${raw}', using fallback ${fallback}.`);
     return fallback;
   }
   return parsed;

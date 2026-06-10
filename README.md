@@ -249,7 +249,7 @@ RPC_URL=https://rpc.aboutcircles.com/
 TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
 ROUTER2_ADDRESS=0xE171a76De6B645A28b3767f84B177a4f6659a3D7
 ROUTER2_TRUSTED_BY_ADDRESS=0x93eD5A96347927ff6fF6b790F8Cf5258240c321f
-ROUTER2_GNOSIS_APP_INDEXER_URL=https://indexer.eu.hyperindex.xyz/3bc5dfd/v1/graphql
+ROUTER2_GNOSIS_APP_INDEXER_URL=https://gnosis-e702590.dedicated.hyperindex.xyz/v1/graphql
 ROUTER2_GNOSIS_APP_FROM_BLOCK=              # optional; only fetches GnosisAppUser rows with createdAtBlock > this value
 
 # EOA execution (required unless dry run)

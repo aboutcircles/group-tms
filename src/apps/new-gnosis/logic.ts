@@ -11,9 +11,28 @@ export type GraphQLFetcher = (query: string) => Promise<unknown>;
 
 export type ExistingTrusteesFetcher = (contractAddress: string) => Promise<string[]>;
 
+/** Returns the subset of the given addresses whose Avatar has avatarType RegisterHuman, lowercased. */
 export type RegisteredHumanFilter = (addresses: string[]) => Promise<Set<string>>;
 
 export type IsOptedOutChecker = (addresses: string[]) => Promise<Map<string, boolean>>;
+
+/** Returns the subset of the given addresses that are blacklisted, lowercased. */
+export type BlacklistChecker = (addresses: string[]) => Promise<Set<string>>;
+
+/**
+ * Returns the subset of the given addresses that are registered as Circles v2
+ * human avatars (per the Circles RPC), lowercased.
+ */
+export type HumanAvatarFilter = (addresses: string[]) => Promise<Set<string>>;
+
+/** Returns relative trust scores keyed by lowercase address. */
+export type TrustScoreFetcher = (addresses: string[]) => Promise<Map<string, number>>;
+
+/**
+ * Returns the subset of the given addresses for which a simulated
+ * `trust(address)` call on the group contract succeeds, lowercased.
+ */
+export type TrustSimulationFilter = (addresses: string[]) => Promise<Set<string>>;
 
 export type TrustBatchExecutor = (
   contractAddress: string,
@@ -23,7 +42,8 @@ export type TrustBatchExecutor = (
 export type RunConfig = {
   indexerUrl: string;
   contractAddress: string;
-  startBlock: number;
+  cutoffBlock: number;
+  scoreThreshold: number;
   fetchPageSize: number;
   trustBatchSize: number;
   fetchTimeoutMs: number;
@@ -34,46 +54,182 @@ export type RunDeps = {
   fetchUsers: GraphQLFetcher;
   fetchExistingTrustees: ExistingTrusteesFetcher;
   filterRegisteredHumans: RegisteredHumanFilter;
+  filterHumanAvatars: HumanAvatarFilter;
   isOptedOutBatch: IsOptedOutChecker;
+  checkBlacklist: BlacklistChecker;
+  fetchTrustScores: TrustScoreFetcher;
+  filterTrustable: TrustSimulationFilter;
   trustBatch?: TrustBatchExecutor;
   logger: ILoggerService;
+};
+
+export type BackfillOutcome = {
+  fetchedUsers: number;
+  unclaimedCount: number;
+  alreadyTrustedCount: number;
+  blacklistedCount: number;
+  belowThresholdCount: number;
+  optedOutCount: number;
+  notHumanCount: number;
+  untrustableCount: number;
+  newAvatars: string[];
+  trustBatches: string[][];
+  trustTxHashes: string[];
 };
 
 export type RunOutcome = {
   fetchedUsers: number;
   unclaimedCount: number;
-  optedOutCount: number;
   alreadyTrustedCount: number;
+  optedOutCount: number;
+  notHumanCount: number;
+  untrustableCount: number;
   newAvatars: string[];
   trustBatches: string[][];
   trustTxHashes: string[];
   highestBlockSeen: number;
 };
 
-export const DEFAULT_FETCH_PAGE_SIZE = 100;
+// 1000 is the indexer's max page size. With the 1000-page pagination cap this
+// allows up to 1M users per fetch; the backfill window alone holds ~300k users,
+// which a page size of 100 would silently truncate.
+export const DEFAULT_FETCH_PAGE_SIZE = 1000;
 export const DEFAULT_TRUST_BATCH_SIZE = 20;
 export const DEFAULT_FETCH_TIMEOUT_MS = 60_000;
 export const DEFAULT_INDEXER_URL =
-  "https://indexer.eu.hyperindex.xyz/3bc5dfd/v1/graphql";
+  "https://gnosis-e702590.dedicated.hyperindex.xyz/v1/graphql";
 export const DEFAULT_CONTRACT_ADDRESS =
   "0x93eD5A96347927ff6fF6b790F8Cf5258240c321f";
-export const DEFAULT_START_BLOCK = 46271576;
+export const DEFAULT_SCORE_THRESHOLD = 50;
+// First Gnosis block of 2026-05-26 00:00 UTC (~15 days before this logic was deployed).
+// Avatars registered before it must pass the blacklist and score checks; avatars
+// registered at or after it are trusted unconditionally.
+export const DEFAULT_CUTOFF_BLOCK = 46_363_942;
 
-export async function runOnce(deps: RunDeps, cfg: RunConfig): Promise<RunOutcome> {
-  const { fetchUsers, fetchExistingTrustees, filterRegisteredHumans, isOptedOutBatch, trustBatch, logger } = deps;
-  const fetchPageSize = Math.max(1, cfg.fetchPageSize);
-  const trustBatchSize = Math.max(1, cfg.trustBatchSize);
+/**
+ * One-time pass over avatars registered before the cutoff block: they are only
+ * trusted when they are not blacklisted and their relative trust score is
+ * above the configured threshold.
+ */
+export async function runBackfill(deps: RunDeps, cfg: RunConfig): Promise<BackfillOutcome> {
+  const { fetchUsers, checkBlacklist, fetchTrustScores, logger } = deps;
+  assertTrustExecutor(deps, cfg);
 
-  if (!cfg.dryRun && !trustBatch) {
-    throw new Error("trustBatch executor is required when not in dry-run mode");
+  const users = await fetchAllUsers(
+    fetchUsers,
+    cfg.indexerUrl,
+    `_lt:${cfg.cutoffBlock}`,
+    Math.max(1, cfg.fetchPageSize),
+    logger
+  );
+  logger.info(`Backfill: fetched ${users.length} gnosis-app user(s) registered before block ${cfg.cutoffBlock}.`);
+
+  const { candidates } = collectCandidates(users, cfg.cutoffBlock, logger);
+
+  const { remaining: claimed, removed: unclaimedCount } = await dropUnregistered(deps, candidates, logger);
+  const { remaining: notTrusted, removed: alreadyTrustedCount } = await dropAlreadyTrusted(deps, cfg, claimed, logger);
+
+  let blacklistedCount = 0;
+  let avatars = notTrusted;
+  if (avatars.length > 0) {
+    const blacklisted = await checkBlacklist(avatars);
+    const allowed = avatars.filter((a) => !blacklisted.has(a.toLowerCase()));
+    blacklistedCount = avatars.length - allowed.length;
+    if (blacklistedCount > 0) {
+      logger.info(`Backfill: skipping ${blacklistedCount} blacklisted avatar(s).`);
+    }
+    avatars = allowed;
   }
 
-  const users = await fetchAllUsers(fetchUsers, cfg.indexerUrl, cfg.startBlock, fetchPageSize, logger);
-  logger.info(`Fetched ${users.length} new gnosis-app user(s) above block ${cfg.startBlock}.`);
+  let belowThresholdCount = 0;
+  if (avatars.length > 0) {
+    const scores = await fetchTrustScores(avatars);
+    const aboveThreshold = avatars.filter((a) => (scores.get(a.toLowerCase()) ?? 0) > cfg.scoreThreshold);
+    belowThresholdCount = avatars.length - aboveThreshold.length;
+    if (belowThresholdCount > 0) {
+      logger.info(
+        `Backfill: skipping ${belowThresholdCount} avatar(s) with relative trust score <= ${cfg.scoreThreshold}.`
+      );
+    }
+    avatars = aboveThreshold;
+  }
 
+  const { remaining: optedIn, removed: optedOutCount } = await dropOptedOut(deps, cfg, avatars, logger);
+  const { remaining: humans, removed: notHumanCount } = await dropNotHuman(deps, optedIn, logger);
+  const { remaining: trustable, removed: untrustableCount } = await dropUntrustable(deps, cfg, humans, logger);
+
+  const { trustBatches, trustTxHashes } = await executeTrustPlan(deps, cfg, trustable, "Backfill");
+
+  return {
+    fetchedUsers: users.length,
+    unclaimedCount,
+    alreadyTrustedCount,
+    blacklistedCount,
+    belowThresholdCount,
+    optedOutCount,
+    notHumanCount,
+    untrustableCount,
+    newAvatars: trustable,
+    trustBatches,
+    trustTxHashes
+  };
+}
+
+/**
+ * Recurring pass over avatars registered at or after the cutoff block: they
+ * are trusted irrespective of blacklist status and relative trust score.
+ */
+export async function runIncremental(deps: RunDeps, cfg: RunConfig): Promise<RunOutcome> {
+  const { fetchUsers, logger } = deps;
+  assertTrustExecutor(deps, cfg);
+
+  const users = await fetchAllUsers(
+    fetchUsers,
+    cfg.indexerUrl,
+    `_gte:${cfg.cutoffBlock}`,
+    Math.max(1, cfg.fetchPageSize),
+    logger
+  );
+  logger.info(`Fetched ${users.length} gnosis-app user(s) registered at or after block ${cfg.cutoffBlock}.`);
+
+  const { candidates, highestBlockSeen } = collectCandidates(users, cfg.cutoffBlock, logger);
+
+  const { remaining: claimed, removed: unclaimedCount } = await dropUnregistered(deps, candidates, logger);
+  const { remaining: notTrusted, removed: alreadyTrustedCount } = await dropAlreadyTrusted(deps, cfg, claimed, logger);
+  const { remaining: optedIn, removed: optedOutCount } = await dropOptedOut(deps, cfg, notTrusted, logger);
+  const { remaining: humans, removed: notHumanCount } = await dropNotHuman(deps, optedIn, logger);
+  const { remaining: trustable, removed: untrustableCount } = await dropUntrustable(deps, cfg, humans, logger);
+
+  const { trustBatches, trustTxHashes } = await executeTrustPlan(deps, cfg, trustable, "Incremental");
+
+  return {
+    fetchedUsers: users.length,
+    unclaimedCount,
+    alreadyTrustedCount,
+    optedOutCount,
+    notHumanCount,
+    untrustableCount,
+    newAvatars: trustable,
+    trustBatches,
+    trustTxHashes,
+    highestBlockSeen
+  };
+}
+
+function assertTrustExecutor(deps: RunDeps, cfg: RunConfig): void {
+  if (!cfg.dryRun && !deps.trustBatch) {
+    throw new Error("trustBatch executor is required when not in dry-run mode");
+  }
+}
+
+function collectCandidates(
+  users: GnosisAppUser[],
+  initialHighestBlock: number,
+  logger: ILoggerService
+): { candidates: string[]; highestBlockSeen: number } {
   const seen = new Set<string>();
   const candidates: string[] = [];
-  let highestBlockSeen = cfg.startBlock;
+  let highestBlockSeen = initialHighestBlock;
 
   for (const user of users) {
     if (typeof user.createdAtBlock === "number" && user.createdAtBlock > highestBlockSeen) {
@@ -90,84 +246,139 @@ export async function runOnce(deps: RunDeps, cfg: RunConfig): Promise<RunOutcome
     candidates.push(normalized);
   }
 
-  let unclaimedCount = 0;
-  let optedOutCount = 0;
-  let alreadyTrustedCount = 0;
-  let avatars: string[] = candidates;
+  return { candidates, highestBlockSeen };
+}
 
-  if (avatars.length > 0) {
-    const claimedLowercase = await filterRegisteredHumans(avatars);
-    const claimed = avatars.filter((a) => claimedLowercase.has(a.toLowerCase()));
-    unclaimedCount = avatars.length - claimed.length;
-    if (unclaimedCount > 0) {
-      logger.info(`Skipping ${unclaimedCount} candidate(s) with avatarType != RegisterHuman.`);
-    }
-    avatars = claimed;
+async function dropUnregistered(
+  deps: RunDeps,
+  avatars: string[],
+  logger: ILoggerService
+): Promise<{ remaining: string[]; removed: number }> {
+  if (avatars.length === 0) {
+    return { remaining: avatars, removed: 0 };
   }
 
-  if (avatars.length > 0) {
-    const optOutMap = await isOptedOutBatch(avatars);
-    const stillIn = avatars.filter((a) => optOutMap.get(a.toLowerCase()) !== true);
-    optedOutCount = avatars.length - stillIn.length;
-    if (optedOutCount > 0) {
-      logger.info(`Skipping ${optedOutCount} candidate(s) that have opted out of ${cfg.contractAddress}.`);
-    }
-    avatars = stillIn;
+  const claimedLowercase = await deps.filterRegisteredHumans(avatars);
+  const claimed = avatars.filter((a) => claimedLowercase.has(a.toLowerCase()));
+  const removed = avatars.length - claimed.length;
+  if (removed > 0) {
+    logger.info(`Skipping ${removed} candidate(s) with avatarType != RegisterHuman.`);
   }
+  return { remaining: claimed, removed };
+}
 
-  const existingTrustees = await fetchExistingTrustees(cfg.contractAddress);
+async function dropAlreadyTrusted(
+  deps: RunDeps,
+  cfg: RunConfig,
+  avatars: string[],
+  logger: ILoggerService
+): Promise<{ remaining: string[]; removed: number }> {
+  const existingTrustees = await deps.fetchExistingTrustees(cfg.contractAddress);
   const existingLowercase = new Set(existingTrustees.map((a) => a.toLowerCase()));
   logger.info(`Contract ${cfg.contractAddress} currently trusts ${existingLowercase.size} address(es).`);
 
-  const filtered: string[] = [];
-  for (const candidate of avatars) {
-    if (existingLowercase.has(candidate.toLowerCase())) {
-      alreadyTrustedCount += 1;
-      continue;
-    }
-    filtered.push(candidate);
+  const remaining = avatars.filter((a) => !existingLowercase.has(a.toLowerCase()));
+  const removed = avatars.length - remaining.length;
+  if (removed > 0) {
+    logger.info(`Skipping ${removed} avatar(s) already trusted by ${cfg.contractAddress}.`);
   }
-  avatars = filtered;
+  return { remaining, removed };
+}
 
-  if (alreadyTrustedCount > 0) {
-    logger.info(`Skipping ${alreadyTrustedCount} avatar(s) already trusted by ${cfg.contractAddress}.`);
+async function dropNotHuman(
+  deps: RunDeps,
+  avatars: string[],
+  logger: ILoggerService
+): Promise<{ remaining: string[]; removed: number }> {
+  if (avatars.length === 0) {
+    return { remaining: avatars, removed: 0 };
   }
 
+  const humansLowercase = await deps.filterHumanAvatars(avatars);
+  const remaining = avatars.filter((a) => humansLowercase.has(a.toLowerCase()));
+  const removed = avatars.length - remaining.length;
+  if (removed > 0) {
+    const dropped = avatars.filter((a) => !humansLowercase.has(a.toLowerCase()));
+    logger.warn(
+      `Skipping ${removed} candidate(s) that are not registered Circles humans: ${dropped.join(", ")}`
+    );
+  }
+  return { remaining, removed };
+}
+
+/**
+ * Drops avatars for which a simulated trust() call on the group contract
+ * reverts. The group's eligibility check inspects the avatar's wallet
+ * implementation on-chain (beyond Hub registration), so registry-based
+ * filters cannot fully replicate it; a single ineligible avatar would
+ * revert its whole trust batch.
+ */
+async function dropUntrustable(
+  deps: RunDeps,
+  cfg: RunConfig,
+  avatars: string[],
+  logger: ILoggerService
+): Promise<{ remaining: string[]; removed: number }> {
+  if (avatars.length === 0) {
+    return { remaining: avatars, removed: 0 };
+  }
+
+  const trustableLowercase = await deps.filterTrustable(avatars);
+  const remaining = avatars.filter((a) => trustableLowercase.has(a.toLowerCase()));
+  const removed = avatars.length - remaining.length;
+  if (removed > 0) {
+    const dropped = avatars.filter((a) => !trustableLowercase.has(a.toLowerCase()));
+    logger.warn(
+      `Skipping ${removed} candidate(s) whose trust() simulation reverts on ${cfg.contractAddress}: ${dropped.join(", ")}`
+    );
+  }
+  return { remaining, removed };
+}
+
+async function dropOptedOut(
+  deps: RunDeps,
+  cfg: RunConfig,
+  avatars: string[],
+  logger: ILoggerService
+): Promise<{ remaining: string[]; removed: number }> {
+  if (avatars.length === 0) {
+    return { remaining: avatars, removed: 0 };
+  }
+
+  const optOutMap = await deps.isOptedOutBatch(avatars);
+  const stillIn = avatars.filter((a) => optOutMap.get(a.toLowerCase()) !== true);
+  const removed = avatars.length - stillIn.length;
+  if (removed > 0) {
+    logger.info(`Skipping ${removed} candidate(s) that have opted out of ${cfg.contractAddress}.`);
+  }
+  return { remaining: stillIn, removed };
+}
+
+async function executeTrustPlan(
+  deps: RunDeps,
+  cfg: RunConfig,
+  avatars: string[],
+  phaseLabel: string
+): Promise<{ trustBatches: string[][]; trustTxHashes: string[] }> {
+  const { trustBatch, logger } = deps;
+  const trustBatchSize = Math.max(1, cfg.trustBatchSize);
   const trustBatches = chunk(avatars, trustBatchSize);
   const trustTxHashes: string[] = [];
 
   if (trustBatches.length === 0) {
-    logger.info("No new avatars to trust this run.");
-    return {
-      fetchedUsers: users.length,
-      unclaimedCount,
-      optedOutCount,
-      alreadyTrustedCount,
-      newAvatars: avatars,
-      trustBatches,
-      trustTxHashes,
-      highestBlockSeen
-    };
+    logger.info(`${phaseLabel}: no new avatars to trust.`);
+    return { trustBatches, trustTxHashes };
   }
 
   logger.info(
-    `Prepared ${trustBatches.length} trust batch(es) (size up to ${trustBatchSize}) for ${avatars.length} new avatar(s).`
+    `${phaseLabel}: prepared ${trustBatches.length} trust batch(es) (size up to ${trustBatchSize}) for ${avatars.length} new avatar(s).`
   );
 
   if (cfg.dryRun) {
     for (const [i, batch] of trustBatches.entries()) {
       logger.info(`Dry-run trust batch ${i + 1}/${trustBatches.length}: ${batch.length} avatar(s) -> ${batch.join(", ")}`);
     }
-    return {
-      fetchedUsers: users.length,
-      unclaimedCount,
-      optedOutCount,
-      alreadyTrustedCount,
-      newAvatars: avatars,
-      trustBatches,
-      trustTxHashes,
-      highestBlockSeen
-    };
+    return { trustBatches, trustTxHashes };
   }
 
   for (const [i, batch] of trustBatches.entries()) {
@@ -177,22 +388,13 @@ export async function runOnce(deps: RunDeps, cfg: RunConfig): Promise<RunOutcome
     logger.info(`Trust batch ${i + 1}/${trustBatches.length} succeeded (tx=${txHash}).`);
   }
 
-  return {
-    fetchedUsers: users.length,
-    unclaimedCount,
-    optedOutCount,
-    alreadyTrustedCount,
-    newAvatars: avatars,
-    trustBatches,
-    trustTxHashes,
-    highestBlockSeen
-  };
+  return { trustBatches, trustTxHashes };
 }
 
 async function fetchAllUsers(
   fetchUsers: GraphQLFetcher,
   indexerUrl: string,
-  startBlock: number,
+  blockFilter: string,
   pageSize: number,
   logger: ILoggerService
 ): Promise<GnosisAppUser[]> {
@@ -201,7 +403,7 @@ async function fetchAllUsers(
   const HARD_PAGE_CAP = 1000;
 
   for (let page = 0; page < HARD_PAGE_CAP; page++) {
-    const query = `{ GnosisAppUser(where:{createdAtBlock:{_gt:${startBlock}}}, order_by:{createdAtBlock:asc}, limit:${pageSize}, offset:${offset}){ id createdAtBlock lifetimeCashback } }`;
+    const query = `{ GnosisAppUser(where:{createdAtBlock:{${blockFilter}}}, order_by:{createdAtBlock:asc}, limit:${pageSize}, offset:${offset}){ id createdAtBlock lifetimeCashback } }`;
     logger.debug(`Querying ${indexerUrl} page=${page} offset=${offset} limit=${pageSize}`);
     const payload = await fetchUsers(query);
     const batch = parseUsers(payload);
@@ -283,5 +485,6 @@ function normalizeAddress(value: string): string | null {
 export const __testables = {
   parseUsers,
   normalizeAddress,
-  chunk
+  chunk,
+  collectCandidates
 };
