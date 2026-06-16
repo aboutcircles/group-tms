@@ -58,6 +58,18 @@ export class PgRouterEnablementStore implements IRouterEnablementStore {
   }
 
   private async ensureTable(): Promise<void> {
+    // Fast path: once the table exists (every boot after the first), skip the
+    // advisory lock + DDL. On a near-idle shared state DB the boot-time
+    // pg_advisory_xact_lock wait gets counted as multi-second query time by
+    // pgbouncer; probing existence first avoids the lock in the common case.
+    // The locked DDL path still runs on a fresh DB to serialize the concurrent
+    // CREATE TABLE (the pg_type race the lock guards against).
+    try {
+      const probe = await this.pool.query("SELECT to_regclass('router_tms_enablement') AS reg");
+      if (probe.rows[0]?.reg != null) return;
+    } catch {
+      // fall through to the locked create path on any probe error
+    }
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");

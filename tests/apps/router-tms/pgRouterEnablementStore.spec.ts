@@ -35,10 +35,15 @@ describe("PgRouterEnablementStore", () => {
   let store: PgRouterEnablementStore;
   let mockPool: any;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     store = new PgRouterEnablementStore("postgres://localhost/test", QUARANTINE_TTL_MS);
     mockPool = getMockPool();
+    // ensureTable() issues a to_regclass existence probe (and DDL on a fresh
+    // DB) from the constructor; let it settle, then drop those pool.query calls
+    // so each test asserts only the queries it triggers.
+    await (store as any).ready;
+    mockPool.query.mockClear();
   });
 
   afterEach(async () => {
@@ -60,6 +65,21 @@ describe("PgRouterEnablementStore", () => {
       expect(calls[2][0]).toMatch(/CREATE TABLE IF NOT EXISTS router_tms_enablement/);
       expect(calls[3]).toEqual(["COMMIT"]);
       expect(mockClient.release).toHaveBeenCalled();
+    });
+
+    it("skips the advisory lock + DDL when the table already exists", async () => {
+      // A boot whose existence probe finds the table present must NOT open a
+      // transaction or take pg_advisory_xact_lock — the hot path that keeps a
+      // near-idle shared state DB off the slow-query radar.
+      jest.clearAllMocks();
+      mockPool.query.mockResolvedValueOnce({rows: [{reg: "router_tms_enablement"}]});
+      const warm = new PgRouterEnablementStore("postgres://localhost/test", QUARANTINE_TTL_MS);
+      await (warm as any).ready;
+      expect(mockPool.query).toHaveBeenCalledWith(
+        "SELECT to_regclass('router_tms_enablement') AS reg"
+      );
+      expect(mockPool.connect).not.toHaveBeenCalled();
+      await warm.close();
     });
   });
 
