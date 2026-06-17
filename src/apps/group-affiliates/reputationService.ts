@@ -90,9 +90,9 @@ type ScoresPage = {
  * address. The per-address ReputationService fans out N requests across
  * thousands of trustees on the full-reconcile path, which blows the
  * rep_score service's request rate limit and aborts the run. Paging
- * `/scores` (limit 100) is ~ceil(total/100) sequential requests total,
- * well under the limit, and serves repeated/incremental checks from a
- * short-lived snapshot so an event burst can't re-page on every event.
+ * `/scores` (limit 10 000) fetches the full member set in a single request
+ * and serves repeated/incremental checks from a short-lived snapshot so
+ * an event burst can't re-page on every event.
  */
 export class BulkReputationService implements IReputationService {
   private snapshot: Map<string, number | null> | null = null;
@@ -102,7 +102,7 @@ export class BulkReputationService implements IReputationService {
     private readonly scoresUrl: string,
     private readonly timeoutMs: number = 30_000,
     private readonly snapshotTtlMs: number = 5 * 60 * 1000,
-    private readonly pageSize: number = 100
+    private readonly pageSize: number = 10_000
   ) {
   }
 
