@@ -16,9 +16,11 @@ jest.mock("pg", () => {
 
 import pg from "pg";
 
-function getMockPool(): any {
-  return (pg.Pool as any).mock.results[0]?.value;
-}
+// The pg mock returns one shared pool instance for every `new Pool()`, so
+// calling the mocked constructor hands back that same singleton — letting us
+// stage the constructor's first query (the existence probe) before building
+// the store.
+const getMockPool = (): any => (pg.Pool as any)();
 
 describe("StateStore", () => {
   let store: StateStore;
@@ -26,11 +28,15 @@ describe("StateStore", () => {
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    store = new StateStore("postgres://localhost/test");
     mockPool = getMockPool();
-    // ensureTable() issues a to_regclass existence probe (and DDL on a fresh
-    // DB) from the constructor; let it settle, then drop those pool.query calls
-    // so each test asserts only the queries it triggers.
+    // Stage the constructor's to_regclass probe as "table absent" so ensureTable
+    // takes the locked create path these tests assert against — and crucially
+    // without the probe throwing, which would route through its catch +
+    // console.warn and pollute routine test setup.
+    mockPool.query.mockResolvedValueOnce({ rows: [{ reg: null }] });
+    store = new StateStore("postgres://localhost/test");
+    // Let ensureTable settle, then drop its pool.query calls so each test
+    // asserts only the queries it triggers.
     await (store as any).ready;
     mockPool.query.mockClear();
   });
@@ -51,7 +57,7 @@ describe("StateStore", () => {
         "SELECT pg_advisory_xact_lock($1)",
         [GROUP_TMS_DDL_LOCK_KEY],
       ]);
-      expect(calls[2][0]).toMatch(/CREATE TABLE IF NOT EXISTS group_tms_state/);
+      expect(calls[2][0]).toMatch(/CREATE TABLE IF NOT EXISTS public\.group_tms_state/);
       expect(calls[3]).toEqual(["COMMIT"]);
       expect(mockClient.release).toHaveBeenCalled();
     });
@@ -61,11 +67,11 @@ describe("StateStore", () => {
       // transaction or take pg_advisory_xact_lock — the hot path that keeps a
       // near-idle shared state DB off the slow-query radar.
       jest.clearAllMocks();
-      mockPool.query.mockResolvedValueOnce({ rows: [{ reg: "group_tms_state" }] });
+      mockPool.query.mockResolvedValueOnce({ rows: [{ reg: "public.group_tms_state" }] });
       const warm = new StateStore("postgres://localhost/test");
       await (warm as any).ready;
       expect(mockPool.query).toHaveBeenCalledWith(
-        "SELECT to_regclass('group_tms_state') AS reg"
+        "SELECT to_regclass('public.group_tms_state') AS reg"
       );
       expect(mockPool.connect).not.toHaveBeenCalled();
       await warm.close();

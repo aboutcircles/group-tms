@@ -18,7 +18,7 @@ import pg from "pg";
 export const GROUP_TMS_DDL_LOCK_KEY = 7281992451;
 
 const DDL = `
-CREATE TABLE IF NOT EXISTS group_tms_state (
+CREATE TABLE IF NOT EXISTS public.group_tms_state (
   app_name         TEXT PRIMARY KEY,
   last_scanned_block BIGINT NOT NULL,
   state_data       JSONB,
@@ -47,11 +47,17 @@ export class StateStore {
     // pgbouncer; probing existence first avoids the lock in the common case.
     // The locked DDL path still runs on a fresh DB to serialize the concurrent
     // CREATE TABLE (the pg_type race the lock guards against).
+    // Schema-qualify the probe (and DDL) so existence detection is independent
+    // of the connection's search_path — the probe must look in exactly the
+    // schema the DDL targets, otherwise a non-default search_path could mask a
+    // present table and re-take the lock every boot.
     try {
-      const probe = await this.pool.query("SELECT to_regclass('group_tms_state') AS reg");
+      const probe = await this.pool.query("SELECT to_regclass('public.group_tms_state') AS reg");
       if (probe.rows[0]?.reg != null) return;
-    } catch {
-      // fall through to the locked create path on any probe error
+    } catch (err) {
+      // Probe failed (connectivity/permission/unexpected) — log a breadcrumb and
+      // fall through to the locked create path, which re-surfaces any real error.
+      console.warn("[state-store] table-existence probe failed; using locked create path:", (err as Error).message);
     }
     const client = await this.pool.connect();
     try {

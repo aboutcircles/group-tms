@@ -22,7 +22,7 @@ import {
 } from "../../interfaces/IRouterEnablementStore";
 
 const DDL = `
-CREATE TABLE IF NOT EXISTS router_tms_enablement (
+CREATE TABLE IF NOT EXISTS public.router_tms_enablement (
   avatar              TEXT PRIMARY KEY,
   fallback_enabled    BOOLEAN     NOT NULL DEFAULT FALSE,
   base_group_enabled  BOOLEAN     NOT NULL DEFAULT FALSE,
@@ -64,11 +64,17 @@ export class PgRouterEnablementStore implements IRouterEnablementStore {
     // pgbouncer; probing existence first avoids the lock in the common case.
     // The locked DDL path still runs on a fresh DB to serialize the concurrent
     // CREATE TABLE (the pg_type race the lock guards against).
+    // Schema-qualify the probe (and DDL) so existence detection is independent
+    // of the connection's search_path — the probe must look in exactly the
+    // schema the DDL targets, otherwise a non-default search_path could mask a
+    // present table and re-take the lock every boot.
     try {
-      const probe = await this.pool.query("SELECT to_regclass('router_tms_enablement') AS reg");
+      const probe = await this.pool.query("SELECT to_regclass('public.router_tms_enablement') AS reg");
       if (probe.rows[0]?.reg != null) return;
-    } catch {
-      // fall through to the locked create path on any probe error
+    } catch (err) {
+      // Probe failed (connectivity/permission/unexpected) — log a breadcrumb and
+      // fall through to the locked create path, which re-surfaces any real error.
+      console.warn("[router-enablement-store] table-existence probe failed; using locked create path:", (err as Error).message);
     }
     const client = await this.pool.connect();
     try {
