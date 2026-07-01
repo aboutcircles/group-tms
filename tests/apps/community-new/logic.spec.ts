@@ -1,6 +1,7 @@
 import {AffiliateGroupMember, IAffiliateGroupsRpc} from "../../../src/interfaces/IAffiliateGroupsRpc";
 import {
   CommunityRunConfig,
+  DEFAULT_FEE_FETCH_CONCURRENCY,
   runCommunityReconciliation
 } from "../../../src/apps/community-new/logic";
 import {IReputationService, ReputationVerdict} from "../../../src/apps/group-affiliates/reputationService";
@@ -77,6 +78,10 @@ function setup() {
 }
 
 describe("runCommunityReconciliation", () => {
+  it("uses a conservative default fee-fetch concurrency", () => {
+    expect(DEFAULT_FEE_FETCH_CONCURRENCY).toBe(2);
+  });
+
   it("trusts only wishlist members that pass the group threshold and aggregate fee cap", async () => {
     const deps = setup();
     deps.affiliateRpc.wishlistByGroup[GROUP_A] = [ELIGIBLE, EXISTING, LOW_SCORE, OVER_FEE_CAP];

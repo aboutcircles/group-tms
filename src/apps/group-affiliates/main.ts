@@ -40,7 +40,10 @@ const APP_NAME = "group-affiliates";
 const AFFILIATE_MAP_STATE_KEY = "group-affiliates:affiliate-map";
 const BACKFILL_CHUNK_SIZE = 10_000;
 const DEFAULT_AFFILIATE_REGISTRY_ADDRESS = "0xca8222e780d046707083f51377b5fd85e2866014";
-const DEFAULT_REPUTATION_BASE_URL = "https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars";
+const DEFAULT_REPUTATION_BASE_URL =
+  "https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/avatars";
+const DEFAULT_REPUTATION_SCORES_URL =
+  "https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/scores";
 const DEFAULT_GROUP_PROFILE_BASE_URL = "https://staging.circlesubi.network/profiles/profile";
 const DEFAULT_START_BLOCK = 46282003;
 
@@ -51,7 +54,8 @@ const wsUrl = process.env.GROUP_AFFILIATES_WSS_URL || deriveGroupAffiliatesWsUrl
 const startBlock = parseEnvInt("GROUP_AFFILIATES_START_BLOCK", DEFAULT_START_BLOCK);
 const confirmationBlocks = parseEnvInt("CONFIRMATION_BLOCKS", 2);
 const batchSize = parseEnvInt("GROUP_AFFILIATES_BATCH_SIZE", DEFAULT_GROUP_AFFILIATES_BATCH_SIZE);
-const reputationBaseUrl = process.env.GROUP_AFFILIATES_REPUTATION_BASE_URL || DEFAULT_REPUTATION_BASE_URL;
+const configuredReputationBaseUrl = process.env.GROUP_AFFILIATES_REPUTATION_BASE_URL?.trim() ?? "";
+const reputationBaseUrl = configuredReputationBaseUrl || DEFAULT_REPUTATION_BASE_URL;
 const reputationTimeoutMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_TIMEOUT_MS", 30_000);
 const reputationRefreshMs = parseEnvInt("GROUP_AFFILIATES_REPUTATION_REFRESH_MS", 30 * 60 * 1000);
 const reputationConcurrency = parseEnvInt("GROUP_AFFILIATES_REPUTATION_CONCURRENCY", 8);
@@ -86,9 +90,12 @@ const circlesRpc = new CirclesRpcService(rpcUrl, (message) => {
 // reconcile (thousands), blowing the rep_score rate limit → AbortError
 // → crash loop. Disable with GROUP_AFFILIATES_REPUTATION_BULK=0.
 const reputationBulkEnabled = process.env.GROUP_AFFILIATES_REPUTATION_BULK !== "0";
+const derivedReputationScoresUrl = /\/avatars\/*$/.test(reputationBaseUrl)
+  ? reputationBaseUrl.replace(/\/avatars\/*$/, "/scores")
+  : "";
 const reputationScoresUrl =
   process.env.GROUP_AFFILIATES_REPUTATION_SCORES_URL ||
-  (/\/avatars\/*$/.test(reputationBaseUrl) ? reputationBaseUrl.replace(/\/avatars\/*$/, "/scores") : "");
+  (configuredReputationBaseUrl.length > 0 ? derivedReputationScoresUrl : DEFAULT_REPUTATION_SCORES_URL);
 const reputationSnapshotTtlMs = Math.max(
   60_000,
   parseEnvInt("GROUP_AFFILIATES_REPUTATION_SNAPSHOT_TTL_MS", reputationRefreshMs > 0 ? reputationRefreshMs : 5 * 60 * 1000)

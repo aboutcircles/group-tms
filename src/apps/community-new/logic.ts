@@ -8,7 +8,7 @@ import {IReputationService} from "../group-affiliates/reputationService";
 
 export const DEFAULT_COMMUNITY_BATCH_SIZE = 20;
 export const DEFAULT_COMMUNITY_PAGE_SIZE = 500;
-export const DEFAULT_FEE_FETCH_CONCURRENCY = 8;
+export const DEFAULT_FEE_FETCH_CONCURRENCY = 2;
 export const MAX_AFFILIATE_FEE_PERCENTAGE = 100;
 export const DEFAULT_COMMUNITY_GROUP_ADDRESSES = [
   "0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5",

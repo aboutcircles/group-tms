@@ -48,6 +48,7 @@ export function isTransientRpcError(err: unknown): boolean {
 export interface RetryOptions {
   maxRetries?: number;
   baseDelayMs?: number;
+  maxDelayMs?: number;
 }
 
 /**
@@ -60,6 +61,7 @@ export async function retryWithBackoff<T>(
 ): Promise<T> {
   const maxRetries = opts?.maxRetries ?? 3;
   const baseDelayMs = opts?.baseDelayMs ?? 1_000;
+  const maxDelayMs = opts?.maxDelayMs ?? Number.POSITIVE_INFINITY;
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -72,7 +74,9 @@ export async function retryWithBackoff<T>(
       }
       // Jitter: 50-100% of base delay to avoid thundering herd across workers
       const jitter = 0.5 + Math.random() * 0.5;
-      const delayMs = Math.round(baseDelayMs * Math.pow(2, attempt) * jitter);
+      const backoffDelayMs = Math.round(baseDelayMs * Math.pow(2, attempt) * jitter);
+      const retryAfterMs = parseRetryAfterMs(err);
+      const delayMs = Math.min(maxDelayMs, Math.max(backoffDelayMs, retryAfterMs ?? 0));
       const errMsg = formatRetryError(err);
       console.warn(`[RPC_RETRY] attempt ${attempt + 1}/${maxRetries}, waiting ${delayMs}ms — ${errMsg}`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -80,6 +84,13 @@ export async function retryWithBackoff<T>(
   }
   // Unreachable, but satisfies TypeScript
   throw lastError;
+}
+
+function parseRetryAfterMs(err: unknown): number | undefined {
+  const value = (err as {retryAfterMs?: unknown} | null | undefined)?.retryAfterMs;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.ceil(value)
+    : undefined;
 }
 
 function formatRetryError(err: unknown): string {

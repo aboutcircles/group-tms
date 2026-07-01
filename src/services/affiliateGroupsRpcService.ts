@@ -5,10 +5,14 @@ import {
   IAffiliateGroupsRpc
 } from "../interfaces/IAffiliateGroupsRpc";
 import {primaryRpcUrl} from "./rpcProvider";
+import {retryWithBackoff} from "./retryWithBackoff";
 
 const DEFAULT_PAGE_SIZE = 500;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_PAGES = 500;
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_BASE_DELAY_MS = 1_000;
+const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
 
 type JsonRpcError = {
   code?: unknown;
@@ -25,6 +29,18 @@ type MembersPage = {
   hasMore: boolean;
   nextCursor: string | null;
 };
+
+class AffiliateRpcHttpError extends Error {
+  constructor(
+    method: string,
+    public readonly status: number,
+    statusText: string,
+    public readonly retryAfterMs?: number
+  ) {
+    super(`${method} failed: HTTP ${status} ${statusText}`.trim());
+    this.name = "AffiliateRpcHttpError";
+  }
+}
 
 /**
  * Raw JSON-RPC implementation used until rpc.affiliate.* is available in the
@@ -112,6 +128,17 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
   }
 
   private async call(method: string, params: unknown[]): Promise<unknown> {
+    return retryWithBackoff(
+      () => this.callOnce(method, params),
+      {
+        maxRetries: DEFAULT_MAX_RETRIES,
+        baseDelayMs: DEFAULT_RETRY_BASE_DELAY_MS,
+        maxDelayMs: DEFAULT_RETRY_MAX_DELAY_MS
+      }
+    );
+  }
+
+  private async callOnce(method: string, params: unknown[]): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     const id = ++this.requestId;
@@ -124,7 +151,12 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
         signal: controller.signal
       });
       if (!response.ok) {
-        throw new Error(`${method} failed: HTTP ${response.status} ${response.statusText}`.trim());
+        throw new AffiliateRpcHttpError(
+          method,
+          response.status,
+          response.statusText,
+          parseRetryAfterHeader(response.headers.get("retry-after"))
+        );
       }
 
       const payload = await response.json() as JsonRpcResponse;
@@ -148,6 +180,20 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
       clearTimeout(timeout);
     }
   }
+}
+
+function parseRetryAfterHeader(value: string | null): number | undefined {
+  if (value === null || value.trim().length === 0) {
+    return undefined;
+  }
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds * 1_000);
+  }
+
+  const retryAt = Date.parse(value);
+  return Number.isFinite(retryAt) ? Math.max(0, retryAt - Date.now()) : undefined;
 }
 
 function parseMembersPage(value: unknown, method: string): MembersPage {

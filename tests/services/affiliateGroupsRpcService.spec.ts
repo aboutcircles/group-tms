@@ -55,6 +55,32 @@ describe("AffiliateGroupsRpcService", () => {
     });
   });
 
+  it("retries a rate-limited fee request after the server's Retry-After delay", async () => {
+    jest.useFakeTimers();
+    const fetchMock = global.fetch as jest.Mock;
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+        headers: new Headers({"retry-after": "2"})
+      })
+      .mockResolvedValueOnce(rpcResponse({totalFeePercentage: 25}));
+    const service = new AffiliateGroupsRpcService(RPC_URL);
+
+    try {
+      const result = service.fetchAffiliateGroupFeesPercentage(AVATAR_A);
+      await jest.advanceTimersByTimeAsync(1_999);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(1);
+      await expect(result).resolves.toBe(25);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it("surfaces JSON-RPC errors instead of treating them as empty results", async () => {
     (global.fetch as jest.Mock).mockResolvedValue({
       ok: true,
