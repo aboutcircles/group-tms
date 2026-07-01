@@ -39,6 +39,14 @@ Specialized services for Circles protocol trust management:
 * Replays historical logs from a persisted cursor on startup before listening live
 * Supports dry-run mode with optional Safe transaction simulation
 
+## Community New App
+* Reads multi-affiliate community intent from `circles_getAffiliateGroupMembersWishlist`
+* Loads each managed group's `minRepScore` and checks every intended member's reputation
+* Enforces the aggregate community membership-fee cap (`totalFeePercentage <= 100`)
+* Trusts eligible intended members and untrusts members that become ineligible
+* Untrusts every current trustee removed from the wishlist, treating removal as intent to leave
+* Supports dry-run Safe simulation
+
 ## Router2 App
 * Calls `setApprovalForCRC(address[])` for every address trusted by the configured truster and every Gnosis App user with `avatarType=RegisterHuman`
 * Executes transactions directly from the configured EOA signer
@@ -74,6 +82,7 @@ npm run start:dublin-tms
 npm run start:oic
 npm run start:all
 npm run start:group-affiliates
+npm run start:community-new
 npm run start:router2
 ```
 
@@ -315,6 +324,49 @@ INSTANCE_ID=                                 # Used by Slack messages to tag the
 VERBOSE_LOGGING=1
 ```
 
+### Community New App Configuration
+
+```dotenv
+# New multi-affiliate reads. Keep this separate from RPC_URL while the methods
+# are staging-only; RPC_URL is used for group contract reads and Safe writes.
+COMMUNITY_NEW_RPC_URL=https://rpc.staging.aboutcircles.com
+RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/       # optional
+
+# Comma-separated groups managed by this worker. Defaults to the three
+# existing Group Affiliates managed groups when omitted.
+COMMUNITY_NEW_GROUP_ADDRESSES=0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5,0x2709757a543CF1BF4d92586b73d3891438b2589d,0xEEcAe593589a6eE4a12AE64F19420B47F3112Fa9
+
+# One Safe must be the service for every configured group.
+COMMUNITY_NEW_SAFE_ADDRESS=
+COMMUNITY_NEW_SAFE_SIGNER_PRIVATE_KEY=
+COMMUNITY_NEW_SIGNER_ADDRESS=                    # optional key/address validation
+
+# Reconciliation and RPC pagination
+COMMUNITY_NEW_POLL_INTERVAL_MS=600000
+COMMUNITY_NEW_PAGE_SIZE=500                      # 1..1000
+COMMUNITY_NEW_BATCH_SIZE=20
+COMMUNITY_NEW_FEE_FETCH_CONCURRENCY=8
+COMMUNITY_NEW_RPC_TIMEOUT_MS=30000
+COMMUNITY_NEW_RPC_MAX_PAGES=500
+COMMUNITY_NEW_ERRORS_BEFORE_CRASH=5
+
+# Group criteria and reputation lookups
+COMMUNITY_NEW_PROFILE_TIMEOUT_MS=30000
+COMMUNITY_NEW_REPUTATION_BASE_URL=https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars
+COMMUNITY_NEW_REPUTATION_SCORES_URL=              # optional explicit bulk /scores URL
+COMMUNITY_NEW_REPUTATION_BULK=1
+COMMUNITY_NEW_REPUTATION_TIMEOUT_MS=30000
+COMMUNITY_NEW_REPUTATION_SNAPSHOT_TTL_MS=600000
+
+# Operation and notifications
+DRY_RUN=0
+COMMUNITY_NEW_SLACK_WEBHOOK_URL=                  # falls back to SLACK_WEBHOOK_URL
+SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=
+VERBOSE_LOGGING=1
+```
+
 ### Gnosis Group App Configuration
 
 ```dotenv
@@ -429,6 +481,15 @@ VERBOSE_LOGGING=1
 * Cursor persistence uses `LEADER_DB_URL` and app name `group-affiliates`
 * `DRY_RUN=1` logs planned trust/untrust batches and simulates them when Safe credentials are configured
 * Service maintains incremental state to avoid re-processing old events
+
+### Community New App
+* The wishlist RPC is the source of membership intent; a normal group trust relation alone is not community intent
+* Eligibility requires `reputation_score > minRepScore` and an aggregate wishlist fee no greater than 100%
+* Missing or invalid group criteria and failed RPC/reputation reads fail the run before any transactions are submitted
+* A current trustee absent from the wishlist is treated as having left and is untrusted regardless of reputation or fee criteria
+* Current trustees still on the wishlist are untrusted when they fail reputation or fee eligibility
+* The RPC methods read chain head and do not support block pinning, so reconciliation is intentionally repeatable and eventually consistent
+* Use `DRY_RUN=1` to inspect and optionally simulate the exact trust/untrust plan before enabling writes
 
 ### Dublin TMS App
 * `DUBLIN_TMS_SERVICE_EOA` should be the group service EOA (defaults to `0x20a3C619De4C15E360d30F329DBCfe5bb618654f`)
