@@ -112,4 +112,22 @@ describe("retryWithBackoff", () => {
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(3);
   });
+
+  it("honors a retryAfterMs hint from the transient error", async () => {
+    const rateLimitError = Object.assign(new Error("HTTP 429 Too Many Requests"), {
+      status: 429,
+      retryAfterMs: 2_000
+    });
+    const fn = jest.fn()
+      .mockRejectedValueOnce(rateLimitError)
+      .mockResolvedValueOnce("recovered");
+
+    const promise = retryWithBackoff(fn, {baseDelayMs: 100});
+    await jest.advanceTimersByTimeAsync(1_999);
+    expect(fn).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(1);
+    await expect(promise).resolves.toBe("recovered");
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
 });

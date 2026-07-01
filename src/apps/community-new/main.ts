@@ -25,11 +25,10 @@ import {
   DEFAULT_FEE_FETCH_CONCURRENCY,
   runCommunityReconciliation
 } from "./logic";
+import {resolveCommunityReputationConfig} from "./reputationConfig";
 
 const APP_NAME = "community-new";
 const DEFAULT_COMMUNITY_RPC_URL = "https://rpc.staging.aboutcircles.com";
-const DEFAULT_REPUTATION_BASE_URL =
-  "https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars";
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const logger = new LoggerService(verboseLogging, APP_NAME);
@@ -51,7 +50,11 @@ const pollIntervalMs = Math.max(1_000, parsePositiveInt("COMMUNITY_NEW_POLL_INTE
 const affiliateRpcTimeoutMs = parsePositiveInt("COMMUNITY_NEW_RPC_TIMEOUT_MS", 30_000);
 const affiliateRpcMaxPages = parsePositiveInt("COMMUNITY_NEW_RPC_MAX_PAGES", 500);
 const profileTimeoutMs = parsePositiveInt("COMMUNITY_NEW_PROFILE_TIMEOUT_MS", 30_000);
-const reputationBaseUrl = process.env.COMMUNITY_NEW_REPUTATION_BASE_URL || DEFAULT_REPUTATION_BASE_URL;
+const {
+  baseUrl: reputationBaseUrl,
+  scoresUrl: reputationScoresUrl,
+  useBulk: useBulkReputation
+} = resolveCommunityReputationConfig(process.env);
 const reputationTimeoutMs = parsePositiveInt("COMMUNITY_NEW_REPUTATION_TIMEOUT_MS", 30_000);
 const reputationConcurrency = parsePositiveInt("COMMUNITY_NEW_REPUTATION_CONCURRENCY", 8);
 const reputationSnapshotTtlMs = parsePositiveInt(
@@ -77,11 +80,6 @@ const affiliateRpc = new AffiliateGroupsRpcService(
 );
 const circlesRpc = new CirclesRpcService(communityRpcUrl);
 const profileService = new CommunityGroupProfileService(communityRpcUrl, profileTimeoutMs);
-const reputationScoresUrl = process.env.COMMUNITY_NEW_REPUTATION_SCORES_URL ||
-  (/\/avatars\/*$/.test(reputationBaseUrl)
-    ? reputationBaseUrl.replace(/\/avatars\/*$/, "/scores")
-    : "");
-const useBulkReputation = process.env.COMMUNITY_NEW_REPUTATION_BULK !== "0" && reputationScoresUrl.length > 0;
 const reputationService: IReputationService = useBulkReputation
   ? new BulkReputationService(reputationScoresUrl, reputationTimeoutMs, reputationSnapshotTtlMs)
   : new ReputationService(reputationBaseUrl, reputationTimeoutMs, reputationConcurrency);
@@ -231,7 +229,9 @@ function logConfiguration(): void {
   logger.info(`  - feeFetchConcurrency=${feeFetchConcurrency}`);
   logger.info(`  - pollIntervalMs=${pollIntervalMs}`);
   logger.info(`  - profileSource=${communityRpcUrl} (circles_getProfileByAddressBatch)`);
-  logger.info(`  - reputationMode=${useBulkReputation ? "bulk" : "per-address"}`);
+  logger.info(
+    `  - reputationMode=${useBulkReputation ? `bulk (${reputationScoresUrl})` : `per-address (${reputationBaseUrl})`}`
+  );
   logger.info(`  - safe=${safeAddress || "(not set)"}`);
   logger.info(`  - dryRun=${dryRun}`);
 }

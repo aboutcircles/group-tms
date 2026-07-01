@@ -305,9 +305,13 @@ GROUP_AFFILIATES_BATCH_SIZE=20
 CONFIRMATION_BLOCKS=2
 
 # Reputation gate
-GROUP_AFFILIATES_REPUTATION_BASE_URL=https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars
+GROUP_AFFILIATES_REPUTATION_BASE_URL=https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/avatars
+GROUP_AFFILIATES_REPUTATION_SCORES_URL=https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/scores
+GROUP_AFFILIATES_REPUTATION_BULK=1
+GROUP_AFFILIATES_REPUTATION_CONCURRENCY=8
 GROUP_AFFILIATES_REPUTATION_TIMEOUT_MS=30000
 GROUP_AFFILIATES_REPUTATION_REFRESH_MS=1800000
+GROUP_AFFILIATES_REPUTATION_SNAPSHOT_TTL_MS=1800000
 GROUP_AFFILIATES_PROFILE_BASE_URL=https://staging.circlesubi.network/profiles/profile
 GROUP_AFFILIATES_PROFILE_TIMEOUT_MS=30000
 
@@ -346,15 +350,15 @@ COMMUNITY_NEW_SIGNER_ADDRESS=                    # optional key/address validati
 COMMUNITY_NEW_POLL_INTERVAL_MS=600000
 COMMUNITY_NEW_PAGE_SIZE=500                      # 1..1000
 COMMUNITY_NEW_BATCH_SIZE=20
-COMMUNITY_NEW_FEE_FETCH_CONCURRENCY=8
+COMMUNITY_NEW_FEE_FETCH_CONCURRENCY=2
 COMMUNITY_NEW_RPC_TIMEOUT_MS=30000
 COMMUNITY_NEW_RPC_MAX_PAGES=500
 COMMUNITY_NEW_ERRORS_BEFORE_CRASH=5
 
 # Group criteria and reputation lookups
 COMMUNITY_NEW_PROFILE_TIMEOUT_MS=30000
-COMMUNITY_NEW_REPUTATION_BASE_URL=https://walrus-app-2-iod58.ondigitalocean.app/aboutcircles-advanced-analytics2/rep_score/groups/gnosis/avatars
-COMMUNITY_NEW_REPUTATION_SCORES_URL=              # optional explicit bulk /scores URL
+COMMUNITY_NEW_REPUTATION_BASE_URL=                 # required only when bulk mode is disabled
+COMMUNITY_NEW_REPUTATION_SCORES_URL=https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/scores
 COMMUNITY_NEW_REPUTATION_BULK=1
 COMMUNITY_NEW_REPUTATION_TIMEOUT_MS=30000
 COMMUNITY_NEW_REPUTATION_SNAPSHOT_TTL_MS=600000

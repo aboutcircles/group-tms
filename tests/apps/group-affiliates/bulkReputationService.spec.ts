@@ -3,7 +3,7 @@ import {BulkReputationService} from "../../../src/apps/group-affiliates/reputati
 const A = "0x1000000000000000000000000000000000000001";
 const B = "0x1000000000000000000000000000000000000002";
 const C = "0x1000000000000000000000000000000000000003";
-const URL = "http://advanced-analytics:8080/rep_score/groups/gnosis/scores";
+const URL = "https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/scores";
 
 function pageResponse(total: number, items: Array<{address: string; reputation_score: unknown}>): Response {
   return {
@@ -34,6 +34,7 @@ describe("BulkReputationService", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[0][0]).toContain("limit=2&offset=0");
+    expect(fetchMock.mock.calls[0][0]).toContain("details=false");
     expect(fetchMock.mock.calls[1][0]).toContain("offset=2");
     expect(result.get(A.toLowerCase())).toEqual({address: A.toLowerCase(), reputationScore: 75, eligible: true});
     expect(result.get(B.toLowerCase())).toEqual({address: B.toLowerCase(), reputationScore: 10, eligible: false});
@@ -50,6 +51,18 @@ describe("BulkReputationService", () => {
 
     expect(result.get(A.toLowerCase())?.eligible).toBe(true);
     expect(result.get(B.toLowerCase())).toEqual({address: B.toLowerCase(), reputationScore: null, eligible: false});
+  });
+
+  it("rejects an empty snapshot for a non-empty address set", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      pageResponse(0, [])
+    ) as unknown as typeof fetch;
+
+    const svc = new BulkReputationService(URL, 5_000, 60_000, 100);
+
+    await expect(svc.check([A], 40)).rejects.toThrow(
+      "bulk reputation endpoint returned an empty snapshot for a non-empty address set"
+    );
   });
 
   it("throws (no partial snapshot) when a page request fails", async () => {

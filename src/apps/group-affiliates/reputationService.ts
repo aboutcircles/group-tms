@@ -109,6 +109,9 @@ export class BulkReputationService implements IReputationService {
   async check(addresses: string[], threshold: number): Promise<Map<string, ReputationVerdict>> {
     const snapshot = await this.ensureSnapshot();
     const unique = Array.from(new Set(addresses.map((address) => getAddress(address).toLowerCase())));
+    if (unique.length > 0 && snapshot.size === 0) {
+      throw new Error("bulk reputation endpoint returned an empty snapshot for a non-empty address set");
+    }
     return new Map(unique.map((address) => {
       // Absent from the group snapshot ⇒ not a scored member ⇒ ineligible.
       // Mirrors the per-address service, where a missing/failed lookup
@@ -136,7 +139,7 @@ export class BulkReputationService implements IReputationService {
 
     for (let page = 0; page < maxPages; page++) {
       const sep = base.includes("?") ? "&" : "?";
-      const url = `${base}${sep}limit=${this.pageSize}&offset=${offset}`;
+      const url = `${base}${sep}limit=${this.pageSize}&offset=${offset}&details=false`;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
       let payload: ScoresPage;
