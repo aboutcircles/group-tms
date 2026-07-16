@@ -19,6 +19,7 @@
     "start:community-new": "node --env-file=.env dist/src/apps/community-new/main.js",
     "start:new-gnosis": "node --env-file=.env dist/src/apps/new-gnosis/main.js",
     "start:all": "node --env-file=.env dist/src/apps/manager.js",
+    "diff:community-new": "node --env-file=.env dist/src/apps/community-new/tools/evictionDiff.js",
     "test": "jest --config jest.config.ts",
     "test:coverage": "jest --config jest.config.ts --coverage",
     "test:integration": "jest --config jest.integration.config.ts --verbose"

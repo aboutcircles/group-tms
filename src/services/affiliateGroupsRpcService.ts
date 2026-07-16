@@ -72,6 +72,18 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
     return this.fetchAllMembers("circles_getAffiliateGroupMembersWishlist", groupAddress, pageSize);
   }
 
+  /**
+   * Startup probe: verifies the affiliate wishlist RPC method exists on the
+   * configured node. The `circles_getAffiliateGroup*` methods are not served by
+   * every Circles RPC (prod `rpc.aboutcircles.com` returns `-32601 Method not
+   * found`). A single-page call surfaces a wrong-endpoint misconfiguration at
+   * boot instead of after a poll cycle. Throws on any RPC/transport error.
+   */
+  async assertAffiliateMethodsAvailable(groupAddress: string): Promise<void> {
+    const group = normalizeAddress(groupAddress, "group");
+    await this.call("circles_getAffiliateGroupMembersWishlist", [group, 1]);
+  }
+
   fetchAllGroupMembers(
     groupAddress: string,
     pageSize: number = DEFAULT_PAGE_SIZE

@@ -11,6 +11,7 @@ import {recordRunError, recordRunSuccess, startMetricsServer} from "../../servic
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {SafeGroupService} from "../../services/safeGroupService";
 import {SlackService} from "../../services/slackService";
+import {StateStore} from "../../services/stateStore";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {
   BulkReputationService,
@@ -23,8 +24,27 @@ import {
   DEFAULT_COMMUNITY_GROUP_ADDRESSES,
   DEFAULT_COMMUNITY_PAGE_SIZE,
   DEFAULT_FEE_FETCH_CONCURRENCY,
+  DEFAULT_MAX_UNTRUST_RATIO_PER_GROUP,
+  DEFAULT_MAX_UNTRUST_TOTAL,
+  DEFAULT_UNTRUST_MODE,
+  UntrustMode,
   runCommunityReconciliation
 } from "./logic";
+import {AffiliateMultiMap} from "./affiliateMultiMap";
+import {
+  DEFAULT_MULTI_AFFILIATE_REGISTRY_ADDRESS,
+  DEFAULT_MULTI_AFFILIATE_REGISTRY_DEPLOY_BLOCK,
+  MultiAffiliateEvent,
+  MultiAffiliateListenerHandle,
+  deriveWsUrl,
+  fetchMultiAffiliateEvents,
+  startMultiAffiliateListener
+} from "./multiRegistry";
+import {
+  DEFAULT_OLD_AFFILIATE_REGISTRY_ADDRESS,
+  DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK,
+  fetchOldRegistryMembersByGroup
+} from "./oldRegistryMembers";
 import {resolveCommunityReputationConfig} from "./reputationConfig";
 
 const APP_NAME = "community-new";
@@ -61,6 +81,25 @@ const reputationSnapshotTtlMs = parsePositiveInt(
   "COMMUNITY_NEW_REPUTATION_SNAPSHOT_TTL_MS",
   Math.max(pollIntervalMs, 5 * 60 * 1000)
 );
+const untrustMode = parseUntrustMode(process.env.COMMUNITY_NEW_UNTRUST_MODE);
+const maxUntrustTotal = parsePositiveInt("COMMUNITY_NEW_MAX_UNTRUST_TOTAL", DEFAULT_MAX_UNTRUST_TOTAL);
+const maxUntrustRatioPerGroup = parseRatio("COMMUNITY_NEW_MAX_UNTRUST_RATIO", DEFAULT_MAX_UNTRUST_RATIO_PER_GROUP);
+const oldRegistryAddress = process.env.COMMUNITY_NEW_OLD_REGISTRY_ADDRESS || DEFAULT_OLD_AFFILIATE_REGISTRY_ADDRESS;
+const oldRegistryStartBlock = parsePositiveInt(
+  "COMMUNITY_NEW_OLD_REGISTRY_START_BLOCK",
+  DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK
+);
+const ackGroupAffiliatesRetired = process.env.COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED === "1";
+const membershipSource = parseMembershipSource(process.env.COMMUNITY_NEW_MEMBERSHIP_SOURCE);
+const registryAddress = process.env.COMMUNITY_NEW_REGISTRY_ADDRESS || DEFAULT_MULTI_AFFILIATE_REGISTRY_ADDRESS;
+const registryDeployBlock = parsePositiveInt(
+  "COMMUNITY_NEW_REGISTRY_DEPLOY_BLOCK",
+  DEFAULT_MULTI_AFFILIATE_REGISTRY_DEPLOY_BLOCK
+);
+const wssUrl = process.env.COMMUNITY_NEW_WSS_URL || deriveWsUrl(chainRpcUrl);
+const enableWss = process.env.COMMUNITY_NEW_ENABLE_WSS === "1";
+const stateDbUrl = process.env.LEADER_DB_URL || "";
+const MULTI_MAP_STATE_KEY = "community-new:multi-affiliate-map";
 const dryRun = process.env.DRY_RUN === "1";
 const safeAddress = process.env.COMMUNITY_NEW_SAFE_ADDRESS || "";
 const safeSignerPrivateKey = process.env.COMMUNITY_NEW_SAFE_SIGNER_PRIVATE_KEY || "";
@@ -87,7 +126,83 @@ const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slac
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 const groupService = createGroupService();
 
+const stateStore = membershipSource === "registry" && stateDbUrl.length > 0 ? new StateStore(stateDbUrl) : null;
+let multiMap: AffiliateMultiMap | null = null;
+let multiListener: MultiAffiliateListenerHandle | null = null;
 let shuttingDown = false;
+
+function applyMultiEvents(map: AffiliateMultiMap, events: MultiAffiliateEvent[]): void {
+  for (const event of events) {
+    if (event.type === "add") map.add(event.avatar, event.group, event.blockNumber);
+    else map.remove(event.avatar, event.group, event.blockNumber);
+  }
+}
+
+async function persistMultiMap(map: AffiliateMultiMap): Promise<void> {
+  if (!stateStore) return;
+  try {
+    await map.save(stateStore, MULTI_MAP_STATE_KEY);
+  } catch (error) {
+    logger.warn("Failed to persist multi-affiliate map:", error);
+  }
+}
+
+async function fetchChainHead(): Promise<number> {
+  const response = await fetch(chainRpcUrl, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: []})
+  });
+  if (!response.ok) throw new Error(`eth_blockNumber failed with HTTP ${response.status}`);
+  const payload = await response.json() as {result?: string; error?: {message?: string}};
+  if (payload.error) throw new Error(payload.error.message ?? "eth_blockNumber RPC error");
+  const head = Number.parseInt(String(payload.result), 16);
+  if (!Number.isFinite(head)) throw new Error(`eth_blockNumber returned a non-numeric head: ${payload.result}`);
+  return head;
+}
+
+/** Incrementally catch the map up to chain head via getLogs and persist it. */
+async function refreshMultiMap(map: AffiliateMultiMap): Promise<void> {
+  const head = await fetchChainHead();
+  const from = Math.max(registryDeployBlock, map.lastScannedBlock + 1);
+  if (from > head) return;
+  const events = await fetchMultiAffiliateEvents(chainRpcUrl, registryAddress, from, head, runLogger);
+  applyMultiEvents(map, events);
+  map.advanceCursor(head);
+  await persistMultiMap(map);
+}
+
+async function initMultiMap(): Promise<void> {
+  multiMap = stateStore ? await AffiliateMultiMap.load(stateStore, MULTI_MAP_STATE_KEY) : null;
+  if (!multiMap) {
+    multiMap = new AffiliateMultiMap(registryDeployBlock - 1);
+  }
+  logger.info(
+    `Backfilling multi-affiliate map from block ` +
+    `${Math.max(registryDeployBlock, multiMap.lastScannedBlock + 1)} (registry ${registryAddress})...`
+  );
+  await refreshMultiMap(multiMap);
+  logger.info(`Multi-affiliate map ready: lastScannedBlock=${multiMap.lastScannedBlock}`);
+
+  if (enableWss) {
+    const map = multiMap;
+    multiListener = startMultiAffiliateListener({
+      httpRpcUrl: chainRpcUrl,
+      wsUrl: wssUrl,
+      registryAddress,
+      logger: logger.child("wss"),
+      getFromBlock: () => map.lastScannedBlock + 1,
+      onEvents: async (events) => {
+        applyMultiEvents(map, events);
+        if (events.length > 0) {
+          map.advanceCursor(events[events.length - 1].blockNumber);
+        }
+        await persistMultiMap(map);
+      }
+    });
+    logger.info(`Multi-affiliate WSS listener started on ${wssUrl}.`);
+  }
+}
 
 process.on("SIGINT", () => { void shutdown("SIGINT"); });
 process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
@@ -102,6 +217,28 @@ async function start(): Promise<void> {
   }
   if (!dryRun || canSimulate) {
     await validateManagedGroupServices();
+  }
+
+  // The wishlist RPC method is only used when membership comes from the RPC.
+  // In `registry` mode membership is read from the on-chain map (fees still use
+  // the RPC and fail loudly on their own if the fee method is unavailable).
+  if (membershipSource === "rpc") {
+    try {
+      await affiliateRpc.assertAffiliateMethodsAvailable(managedGroups[0]);
+      logger.info("Affiliate wishlist RPC methods available on the configured node.");
+    } catch (cause) {
+      throw new Error(
+        `Affiliate wishlist RPC methods unavailable on ${communityRpcUrl} ` +
+        `(circles_getAffiliateGroupMembersWishlist). Set COMMUNITY_NEW_RPC_URL to a node that serves them ` +
+        `— prod rpc.aboutcircles.com currently returns -32601 Method not found — or use ` +
+        `COMMUNITY_NEW_MEMBERSHIP_SOURCE=registry to read membership from chain instead.`,
+        {cause: asError(cause)}
+      );
+    }
+  }
+
+  if (membershipSource === "registry") {
+    await initMultiMap();
   }
 
   logConfiguration();
@@ -123,6 +260,25 @@ async function start(): Promise<void> {
       });
       if (healthy) {
         const minRepScoresByGroup = await profileService.fetchMinRepScores(managedGroups);
+
+        // registry mode: keep the on-chain map current (getLogs catch-up — also a
+        // WSS backstop) and use it as the membership source instead of the RPC.
+        let wishlistOverrideByGroup: Record<string, ReadonlySet<string>> | undefined;
+        if (membershipSource === "registry" && multiMap) {
+          await refreshMultiMap(multiMap);
+          wishlistOverrideByGroup = {};
+          for (const group of managedGroups) {
+            wishlistOverrideByGroup[group] = multiMap.getMembersOf(group);
+          }
+        }
+
+        const protectedTrusteesByGroup = untrustMode === "union"
+          ? await fetchOldRegistryMembersByGroup(chainRpcUrl, managedGroups, {
+              registryAddress: oldRegistryAddress,
+              fromBlock: oldRegistryStartBlock,
+              logger: runLogger
+            })
+          : undefined;
         const outcome = await runCommunityReconciliation(
           {affiliateRpc, circlesRpc, groupService, reputationService, logger: runLogger},
           {
@@ -131,7 +287,12 @@ async function start(): Promise<void> {
             pageSize,
             batchSize,
             feeFetchConcurrency,
-            dryRun
+            dryRun,
+            untrustMode,
+            protectedTrusteesByGroup,
+            maxUntrustTotal,
+            maxUntrustRatioPerGroup,
+            wishlistOverrideByGroup
           }
         );
         recordRunSuccess(APP_NAME, Date.now() - startedAt);
@@ -184,6 +345,17 @@ function createGroupService(): IGroupService {
 }
 
 function validateConfig(): void {
+  // Cutover gate (H3): community-new and group-affiliates manage the same three
+  // groups through the SAME Safe + signer EOA. Two wet workers on one signer
+  // race the nonce (GS026) and fight an untrust war. Refuse to run wet until the
+  // operator has retired group-affiliates for these groups and acknowledged it.
+  if (!dryRun && !ackGroupAffiliatesRetired) {
+    throw new Error(
+      "Refusing to run wet: community-new shares a Safe/signer with group-affiliates for these groups. " +
+      "Retire group-affiliates for the managed groups first, then set " +
+      "COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED=1 to acknowledge the cutover."
+    );
+  }
   if (!dryRun && safeAddress.trim().length === 0) {
     throw new Error("COMMUNITY_NEW_SAFE_ADDRESS is required unless DRY_RUN=1");
   }
@@ -233,12 +405,31 @@ function logConfiguration(): void {
     `  - reputationMode=${useBulkReputation ? `bulk (${reputationScoresUrl})` : `per-address (${reputationBaseUrl})`}`
   );
   logger.info(`  - safe=${safeAddress || "(not set)"}`);
+  logger.info(`  - membershipSource=${membershipSource}`);
+  if (membershipSource === "registry") {
+    logger.info(`  - registry=${registryAddress} (deployBlock=${registryDeployBlock})`);
+    logger.info(`  - wss=${enableWss ? wssUrl : "(disabled)"}  statePersistence=${stateStore ? "on" : "off"}`);
+  }
+  logger.info(`  - untrustMode=${untrustMode}`);
+  logger.info(`  - maxUntrustTotal=${maxUntrustTotal} maxUntrustRatioPerGroup=${maxUntrustRatioPerGroup}`);
+  if (untrustMode === "union") {
+    logger.info(`  - oldRegistry=${oldRegistryAddress} (startBlock=${oldRegistryStartBlock})`);
+  }
+  logger.info(`  - ackGroupAffiliatesRetired=${ackGroupAffiliatesRetired}`);
   logger.info(`  - dryRun=${dryRun}`);
 }
 
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
+  if (multiListener) {
+    try {
+      multiListener.stop();
+    } catch (error) {
+      logger.warn("Failed to stop multi-affiliate listener:", error);
+    }
+    multiListener = null;
+  }
   await notify(`🔄 *community-new shutting down* (${signal})`, SlackSeverity.INFO);
   process.exit(0);
 }
@@ -275,6 +466,31 @@ function parsePositiveInt(name: string, fallback: number, max: number = Number.M
     throw new Error(`${name} must be an integer in [1, ${max}], received ${raw ?? value}`);
   }
   return value;
+}
+
+function parseRatio(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const value = raw && raw.trim().length > 0 ? Number(raw) : fallback;
+  if (!Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new Error(`${name} must be a number in (0, 1], received ${raw ?? value}`);
+  }
+  return value;
+}
+
+function parseUntrustMode(raw: string | undefined): UntrustMode {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value.length === 0) return DEFAULT_UNTRUST_MODE;
+  if (value === "add-only" || value === "union" || value === "wishlist") {
+    return value;
+  }
+  throw new Error(`COMMUNITY_NEW_UNTRUST_MODE must be one of add-only|union|wishlist, received '${raw}'`);
+}
+
+function parseMembershipSource(raw: string | undefined): "rpc" | "registry" {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value.length === 0 || value === "rpc") return "rpc";
+  if (value === "registry") return "registry";
+  throw new Error(`COMMUNITY_NEW_MEMBERSHIP_SOURCE must be one of rpc|registry, received '${raw}'`);
 }
 
 function asError(cause: unknown): Error {

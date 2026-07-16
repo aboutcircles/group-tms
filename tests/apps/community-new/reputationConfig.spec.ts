@@ -4,14 +4,15 @@ import {
 } from "../../../src/apps/community-new/reputationConfig";
 
 describe("resolveCommunityReputationConfig", () => {
-  it("defaults bulk reputation to the backend's score_group scores endpoint", () => {
+  it("defaults bulk reputation to the backend's score_group_v2 scores endpoint", () => {
     expect(resolveCommunityReputationConfig({})).toEqual({
       baseUrl: "",
       scoresUrl: DEFAULT_COMMUNITY_REPUTATION_SCORES_URL,
       useBulk: true
     });
+    // The `score_group` slug 404s ("Unknown group"); `score_group_v2` is the live one.
     expect(DEFAULT_COMMUNITY_REPUTATION_SCORES_URL).toBe(
-      "https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/scores"
+      "https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group_v2/scores"
     );
   });
 
