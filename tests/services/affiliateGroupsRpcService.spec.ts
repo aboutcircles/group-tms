@@ -37,7 +37,7 @@ describe("AffiliateGroupsRpcService", () => {
     const firstBody = JSON.parse(fetchMock.mock.calls[0][1].body);
     const secondBody = JSON.parse(fetchMock.mock.calls[1][1].body);
     expect(firstBody).toMatchObject({
-      method: "circles_getAffiliateGroupMembersWishlist",
+      method: "circles_getCommunityMembersWishlist",
       params: [GROUP, 50]
     });
     expect(secondBody.params).toEqual([GROUP, 50, "opaque-page-2"]);
@@ -50,7 +50,7 @@ describe("AffiliateGroupsRpcService", () => {
     await expect(service.fetchAffiliateGroupFeesPercentage(AVATAR_A)).resolves.toBe(100);
     const body = JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body);
     expect(body).toMatchObject({
-      method: "circles_getAffiliateGroupFeesPercentage",
+      method: "circles_getAvatarCommunityFeesPercentage",
       params: [AVATAR_A]
     });
   });
