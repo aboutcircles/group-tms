@@ -331,15 +331,60 @@ VERBOSE_LOGGING=1
 ### Community New App Configuration
 
 ```dotenv
-# New multi-affiliate reads. Keep this separate from RPC_URL while the methods
-# are staging-only; RPC_URL is used for group contract reads and Safe writes.
-COMMUNITY_NEW_RPC_URL=https://rpc.staging.aboutcircles.com
+# Chain reads (getLogs, eth_blockNumber) and Safe writes.
 RPC_URL=https://rpc.aboutcircles.com/
 TX_RPC_URL=https://your-write-rpc.example/       # optional
+# Only used by MEMBERSHIP_SOURCE=rpc (staging-only wishlist methods).
+COMMUNITY_NEW_RPC_URL=https://rpc.staging.aboutcircles.com
 
-# Comma-separated groups managed by this worker. Defaults to the three
-# existing Group Affiliates managed groups when omitted.
+# Comma-separated groups managed by this worker (BaseGroups). Defaults to the
+# three featured community groups when omitted. Do NOT list a ScoreGroup here —
+# ScoreGroups are append-only and untrust would revert.
 COMMUNITY_NEW_GROUP_ADDRESSES=0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5,0x2709757a543CF1BF4d92586b73d3891438b2589d,0xEEcAe593589a6eE4a12AE64F19420B47F3112Fa9
+
+# --- Membership source: where the worker reads group intent from ---
+#   rpc     — staging-only wishlist RPC (dev/staging only).
+#   old     — OLD single-slot registry (0xca8222) via AffiliateGroupChanged;
+#             byte-identical to group-affiliates (prod parity baseline).
+#   hybrid  — OLD registry for everyone EXCEPT COMMUNITY_NEW_TEST_ADDRESSES,
+#             who are governed by the NEW multi registry (multi-group testing).
+#   new     — NEW multi registry (0x4a25a7cf) for everyone (final GA state).
+COMMUNITY_NEW_MEMBERSHIP_SOURCE=old
+
+# Test-dev allowlist (hybrid only): these avatars read from the NEW registry.
+COMMUNITY_NEW_TEST_ADDRESSES=
+# Cold-start dev addresses have reputation 0; opt-in to bypass the rep gate for
+# the allowlist so they can be trusted during testing. NEVER set for real users.
+COMMUNITY_NEW_TEST_BYPASS_REPUTATION=0
+
+# OLD registry (old/hybrid). Reconciliation is poll-gated (each poll refreshes the
+# map before reading it), so WSS only keeps the map warm between polls — for lower
+# trust latency, lower COMMUNITY_NEW_POLL_INTERVAL_MS rather than relying on WSS.
+COMMUNITY_NEW_OLD_REGISTRY_ADDRESS=0xca8222e780d046707083f51377b5fd85e2866014
+COMMUNITY_NEW_OLD_REGISTRY_START_BLOCK=46282003
+COMMUNITY_NEW_OLD_ENABLE_WSS=0
+COMMUNITY_NEW_OLD_WSS_URL=                        # optional; else derived from RPC_URL
+
+# NEW registry (new/hybrid).
+COMMUNITY_NEW_REGISTRY_ADDRESS=0x4a25a7cf216351963f1637ad965d77b3ae277ef3
+COMMUNITY_NEW_REGISTRY_DEPLOY_BLOCK=46891940
+COMMUNITY_NEW_ENABLE_WSS=0
+COMMUNITY_NEW_WSS_URL=                            # optional; else derived from RPC_URL
+
+# Persistence for the on-chain maps (block cursor + membership). Historical name;
+# it is just the shared state-DB DSN. Required for old/hybrid/new persistence.
+LEADER_DB_URL=
+
+# Untrust policy + safety. Default is `wishlist` (authoritative) in old/hybrid to
+# match group-affiliates, else `add-only`. The circuit breaker aborts a wet run
+# whose untrust set is implausibly large (guards a bad rescan).
+COMMUNITY_NEW_UNTRUST_MODE=                       # add-only|union|wishlist (per-mode default)
+COMMUNITY_NEW_MAX_UNTRUST_TOTAL=20
+COMMUNITY_NEW_MAX_UNTRUST_RATIO=0.5               # (0,1]
+
+# Cutover gate: community-new shares the Safe/signer with group-affiliates. Must
+# retire group-affiliates for these groups first, then set this to run wet.
+COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED=0
 
 # One Safe must be the service for every configured group.
 COMMUNITY_NEW_SAFE_ADDRESS=
@@ -347,7 +392,7 @@ COMMUNITY_NEW_SAFE_SIGNER_PRIVATE_KEY=
 COMMUNITY_NEW_SIGNER_ADDRESS=                    # optional key/address validation
 
 # Reconciliation and RPC pagination
-COMMUNITY_NEW_POLL_INTERVAL_MS=600000
+COMMUNITY_NEW_POLL_INTERVAL_MS=600000            # lower (~60000) on prod for near-realtime
 COMMUNITY_NEW_PAGE_SIZE=500                      # 1..1000
 COMMUNITY_NEW_BATCH_SIZE=20
 COMMUNITY_NEW_FEE_FETCH_CONCURRENCY=2
@@ -355,10 +400,14 @@ COMMUNITY_NEW_RPC_TIMEOUT_MS=30000
 COMMUNITY_NEW_RPC_MAX_PAGES=500
 COMMUNITY_NEW_ERRORS_BEFORE_CRASH=5
 
-# Group criteria and reputation lookups
+# Group criteria and reputation lookups. The fee cap uses a staging-only RPC and
+# is only enforced in `rpc` mode; old/hybrid/new run with no fee cap (parity with
+# group-affiliates). In prod the reputation base URL is set to the in-network,
+# address-indexed endpoint (…/groups/0x93ed5a96…/avatars) so a slug rename cannot
+# 404 it; the public `score_group_v2` slug below is the code default fallback.
 COMMUNITY_NEW_PROFILE_TIMEOUT_MS=30000
 COMMUNITY_NEW_REPUTATION_BASE_URL=                 # required only when bulk mode is disabled
-COMMUNITY_NEW_REPUTATION_SCORES_URL=https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/scores
+COMMUNITY_NEW_REPUTATION_SCORES_URL=https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group_v2/scores
 COMMUNITY_NEW_REPUTATION_BULK=1
 COMMUNITY_NEW_REPUTATION_TIMEOUT_MS=30000
 COMMUNITY_NEW_REPUTATION_SNAPSHOT_TTL_MS=600000
@@ -370,6 +419,12 @@ SLACK_WEBHOOK_URL=
 SLACK_WEBHOOK_URL_INFO=
 VERBOSE_LOGGING=1
 ```
+
+**prod1 cutover (replaces group-affiliates — same Safe, so only one runs wet):**
+1. Deploy `MEMBERSHIP_SOURCE=old`, `DRY_RUN=1`; run `npm run diff:community-new` and confirm the untrust set is empty/expected.
+2. Stop group-affiliates → set `COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED=1`, `DRY_RUN=0` (still `old`). Verify trust/untrust matches the prior worker.
+3. Switch to `hybrid` with `COMMUNITY_NEW_TEST_ADDRESSES=…` (+ `COMMUNITY_NEW_TEST_BYPASS_REPUTATION=1` for cold-start dev addresses) to exercise multi-group.
+4. GA: switch to `new` for full multi-membership.
 
 ### Gnosis Group App Configuration
 

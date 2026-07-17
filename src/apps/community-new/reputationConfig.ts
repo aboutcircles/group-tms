@@ -1,5 +1,8 @@
+// The analytics rep_score service exposes the default ScoreGroup under the slug
+// `score_group_v2` (or its address form 0x93ed5a96…); the older `score_group`
+// slug 404s ("Unknown group: score_group") and silently yields no scores.
 export const DEFAULT_COMMUNITY_REPUTATION_SCORES_URL =
-  "https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group/scores";
+  "https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group_v2/scores";
 
 export type CommunityReputationConfig = {
   baseUrl: string;

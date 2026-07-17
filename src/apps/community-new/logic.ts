@@ -16,6 +16,31 @@ export const DEFAULT_COMMUNITY_GROUP_ADDRESSES = [
   "0xEEcAe593589a6eE4a12AE64F19420B47F3112Fa9"
 ] as const;
 
+/**
+ * How the reconciler treats current on-chain trustees that are absent from the
+ * (eligible) wishlist. The featured groups are being migrated off the OLD
+ * single-slot affiliate registry onto the NEW multi-affiliate registry that
+ * feeds the wishlist; during migration the wishlist is NOT yet a complete
+ * membership set, so treating wishlist-absence as "leave" would evict members
+ * who joined via the old path.
+ *
+ * - `add-only`  — never untrust (default, migration-safe). Removal is handled
+ *   by the incumbent group-affiliates worker until it is retired.
+ * - `union`     — untrust only avatars absent from BOTH the wishlist and the
+ *   supplied protected set (old-registry members / current path). Bridges the
+ *   two registries so no current member is evicted.
+ * - `wishlist`  — the wishlist is authoritative; untrust anyone not eligible.
+ *   Only correct once every member has migrated to the new registry. Gated by
+ *   the untrust circuit breaker below.
+ */
+export type UntrustMode = "add-only" | "union" | "wishlist";
+
+export const DEFAULT_UNTRUST_MODE: UntrustMode = "add-only";
+/** Circuit breaker: abort the whole run if total untrusts across groups exceed this. */
+export const DEFAULT_MAX_UNTRUST_TOTAL = 20;
+/** Circuit breaker: abort if a single group would untrust more than this fraction of its trustees. */
+export const DEFAULT_MAX_UNTRUST_RATIO_PER_GROUP = 0.5;
+
 export type CommunityRunConfig = {
   managedGroupAddresses: readonly string[];
   minRepScoresByGroup: Record<string, number>;
@@ -23,7 +48,38 @@ export type CommunityRunConfig = {
   batchSize: number;
   feeFetchConcurrency: number;
   maxTotalFeePercentage?: number;
+  /**
+   * Whether to fetch + enforce the per-member affiliate fee cap. Default true.
+   * The fee data comes from `circles_getAffiliateGroupFeesPercentage`, which is
+   * only served on the staging RPC. On prod (old/hybrid/new membership sources)
+   * this must be false — group-affiliates has no fee cap, and calling the missing
+   * method would throw. When false, fees are treated as unbounded (never a reason
+   * for ineligibility) and the fee RPC is never called.
+   */
+  feeCapEnabled?: boolean;
   dryRun?: boolean;
+  /** How wishlist-absent trustees are handled. Default {@link DEFAULT_UNTRUST_MODE} (add-only). */
+  untrustMode?: UntrustMode;
+  /** `union` mode: per-group set of addresses that must never be untrusted (old-registry members / current path). */
+  protectedTrusteesByGroup?: Record<string, ReadonlySet<string>>;
+  /** Circuit breaker cap on total untrusts per run. Default {@link DEFAULT_MAX_UNTRUST_TOTAL}. */
+  maxUntrustTotal?: number;
+  /** Circuit breaker cap on per-group untrust fraction. Default {@link DEFAULT_MAX_UNTRUST_RATIO_PER_GROUP}. */
+  maxUntrustRatioPerGroup?: number;
+  /**
+   * Membership source override. When provided for a group, this set (e.g. the
+   * on-chain-derived {@link AffiliateMultiMap} members) is used as the wishlist
+   * instead of calling the wishlist RPC — removing the dependency on the
+   * staging-only `circles_getAffiliateGroupMembersWishlist` method.
+   */
+  wishlistOverrideByGroup?: Record<string, ReadonlySet<string>>;
+  /**
+   * Avatars exempt from the reputation gate (test-dev allowlist). Used during the
+   * hybrid test period so fresh dev addresses (reputation 0, cold-start) can
+   * exercise the new multi-group flow without a qualifying score. The fee cap is
+   * already off in the modes this is used in. NEVER set this for real users.
+   */
+  reputationBypassAddresses?: ReadonlySet<string>;
 };
 
 export type CommunityRunDeps = {
@@ -87,15 +143,28 @@ export async function runCommunityReconciliation(
   if (!Number.isFinite(maxTotalFeePercentage) || maxTotalFeePercentage < 0) {
     throw new Error(`maxTotalFeePercentage must be a finite non-negative number, received ${maxTotalFeePercentage}`);
   }
+  const feeCapEnabled = cfg.feeCapEnabled ?? true;
+  const untrustMode = cfg.untrustMode ?? DEFAULT_UNTRUST_MODE;
+  const maxUntrustTotal = cfg.maxUntrustTotal ?? DEFAULT_MAX_UNTRUST_TOTAL;
+  const maxUntrustRatioPerGroup = cfg.maxUntrustRatioPerGroup ?? DEFAULT_MAX_UNTRUST_RATIO_PER_GROUP;
+  const protectedTrusteesByGroup = normalizeProtectedTrustees(cfg.protectedTrusteesByGroup);
+  const wishlistOverrideByGroup = normalizeProtectedTrustees(cfg.wishlistOverrideByGroup);
+  const reputationBypass = new Set(
+    Array.from(cfg.reputationBypassAddresses ?? []).map(normalizeAddress)
+  );
 
   const snapshots = await Promise.all(groups.map(async (groupAddress): Promise<GroupSnapshot> => {
+    const wishlistOverride = wishlistOverrideByGroup.get(groupAddress);
     const [wishlistMembers, currentTrustees] = await Promise.all([
-      deps.affiliateRpc.fetchAllGroupMembersWishlist(groupAddress, pageSize),
+      wishlistOverride ? Promise.resolve(null) : deps.affiliateRpc.fetchAllGroupMembersWishlist(groupAddress, pageSize),
       deps.circlesRpc.fetchAllTrustees(groupAddress)
     ]);
+    const wishlist = wishlistOverride ?? new Set(
+      (wishlistMembers ?? []).map((member) => normalizeAddress(member.avatarAddress))
+    );
     return {
       groupAddress,
-      wishlist: new Set(wishlistMembers.map((member) => normalizeAddress(member.avatarAddress))),
+      wishlist,
       currentTrustees: new Set(currentTrustees.map(normalizeAddress))
     };
   }));
@@ -107,7 +176,9 @@ export async function runCommunityReconciliation(
     allWishlistAddresses.length > 0
       ? deps.reputationService.check(allWishlistAddresses, 0)
       : new Map(),
-    fetchFeePercentages(deps.affiliateRpc, allWishlistAddresses, feeFetchConcurrency)
+    feeCapEnabled
+      ? fetchFeePercentages(deps.affiliateRpc, allWishlistAddresses, feeFetchConcurrency)
+      : Promise.resolve(new Map<string, number>())
   ]);
 
   const wishlistMembersByGroup: Record<string, number> = {};
@@ -126,16 +197,17 @@ export async function runCommunityReconciliation(
     for (const avatarAddress of snapshot.wishlist) {
       const verdict = reputationVerdicts.get(avatarAddress);
       const reputationScore = verdict?.reputationScore ?? null;
-      const totalFeePercentage = feePercentages.get(avatarAddress);
-      if (totalFeePercentage === undefined) {
+      const feeResult = feePercentages.get(avatarAddress);
+      if (feeCapEnabled && feeResult === undefined) {
         throw new Error(`Missing aggregate fee result for ${avatarAddress}`);
       }
+      const totalFeePercentage = feeResult ?? 0;
 
       const reasons: EligibilityFailure["reasons"] = [];
-      if (reputationScore === null || reputationScore <= threshold) {
+      if (!reputationBypass.has(avatarAddress) && (reputationScore === null || reputationScore <= threshold)) {
         reasons.push("reputation");
       }
-      if (totalFeePercentage > maxTotalFeePercentage) {
+      if (feeCapEnabled && totalFeePercentage > maxTotalFeePercentage) {
         reasons.push("fee-cap");
       }
 
@@ -160,17 +232,34 @@ export async function runCommunityReconciliation(
     trustedByGroup[snapshot.groupAddress] = Array.from(eligible)
       .filter((address) => !snapshot.currentTrustees.has(address))
       .sort();
-    untrustedByGroup[snapshot.groupAddress] = Array.from(snapshot.currentTrustees)
-      .filter((address) => !eligible.has(address))
-      .sort();
+
+    const rawUntrust = Array.from(snapshot.currentTrustees)
+      .filter((address) => !eligible.has(address));
+    untrustedByGroup[snapshot.groupAddress] = applyUntrustPolicy(
+      snapshot,
+      rawUntrust,
+      untrustMode,
+      protectedTrusteesByGroup.get(snapshot.groupAddress),
+      deps.logger
+    ).sort();
   }
+
+  assertUntrustWithinCaps(
+    untrustedByGroup,
+    currentTrusteesByGroup,
+    maxUntrustTotal,
+    maxUntrustRatioPerGroup,
+    !!cfg.dryRun,
+    deps.logger
+  );
 
   const totalTrust = countAddresses(trustedByGroup);
   const totalUntrust = countAddresses(untrustedByGroup);
   const totalLeft = countAddresses(leftByGroup);
   deps.logger.info(
     `Community reconciliation: groups=${groups.length} wishlist=${allWishlistAddresses.length} ` +
-    `ineligible=${ineligible.length} left=${totalLeft} toTrust=${totalTrust} toUntrust=${totalUntrust}`
+    `ineligible=${ineligible.length} left=${totalLeft} toTrust=${totalTrust} toUntrust=${totalUntrust} ` +
+    `untrustMode=${untrustMode}`
   );
 
   if (cfg.dryRun) {
@@ -323,6 +412,96 @@ function positiveIntegerInRange(name: string, value: number, min: number, max: n
 
 function countAddresses(byGroup: Record<string, string[]>): number {
   return Object.values(byGroup).reduce((sum, addresses) => sum + addresses.length, 0);
+}
+
+function normalizeProtectedTrustees(
+  protectedByGroup: Record<string, ReadonlySet<string>> | undefined
+): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+  for (const [group, addresses] of Object.entries(protectedByGroup ?? {})) {
+    result.set(
+      normalizeAddress(group),
+      new Set(Array.from(addresses).map(normalizeAddress))
+    );
+  }
+  return result;
+}
+
+/**
+ * Decides which of `rawUntrust` (current trustees no longer eligible) are
+ * actually queued for untrust, honoring the empty-wishlist guard and the
+ * untrust mode. The empty-wishlist guard is unconditional: a well-formed empty
+ * wishlist must never be interpreted as "everyone left" — that is the primary
+ * mass-untrust failure mode this worker must not have.
+ */
+function applyUntrustPolicy(
+  snapshot: GroupSnapshot,
+  rawUntrust: string[],
+  mode: UntrustMode,
+  protectedTrustees: Set<string> | undefined,
+  logger: ILoggerService
+): string[] {
+  if (snapshot.wishlist.size === 0 && snapshot.currentTrustees.size > 0) {
+    logger.warn(
+      `Empty wishlist for ${snapshot.groupAddress} with ${snapshot.currentTrustees.size} ` +
+      `current trustee(s) — untrusting nobody this cycle (empty-wishlist guard).`
+    );
+    return [];
+  }
+
+  switch (mode) {
+    case "add-only":
+      return [];
+    case "union": {
+      const protectedSet = protectedTrustees ?? new Set<string>();
+      return rawUntrust.filter((address) => !protectedSet.has(address));
+    }
+    case "wishlist":
+      return rawUntrust;
+  }
+}
+
+/**
+ * Circuit breaker: refuses to submit an anomalously large untrust set. Trips on
+ * either an absolute total across all groups or a per-group fraction of current
+ * trustees. In dry-run it only warns (so the plan is still observable); in wet
+ * mode it throws before any write, so a sparse/misconfigured wishlist or an
+ * unintended `wishlist`-mode cutover cannot mass-evict members.
+ */
+function assertUntrustWithinCaps(
+  untrustedByGroup: Record<string, string[]>,
+  currentTrusteesByGroup: Record<string, number>,
+  maxTotal: number,
+  maxRatioPerGroup: number,
+  dryRun: boolean,
+  logger: ILoggerService
+): void {
+  const breaches: string[] = [];
+
+  const total = countAddresses(untrustedByGroup);
+  if (total > maxTotal) {
+    breaches.push(`total untrust ${total} exceeds cap ${maxTotal}`);
+  }
+  for (const [group, addresses] of Object.entries(untrustedByGroup)) {
+    const trustees = currentTrusteesByGroup[group] ?? 0;
+    if (addresses.length > 0 && trustees > 0 && addresses.length / trustees > maxRatioPerGroup) {
+      breaches.push(
+        `group ${group} would untrust ${addresses.length}/${trustees} ` +
+        `(${((addresses.length / trustees) * 100).toFixed(0)}% > ${(maxRatioPerGroup * 100).toFixed(0)}%)`
+      );
+    }
+  }
+  if (breaches.length === 0) return;
+
+  const message =
+    `Untrust circuit breaker tripped: ${breaches.join("; ")}. ` +
+    `Refusing to mass-untrust. If this is an intentional migration cutover, raise ` +
+    `COMMUNITY_NEW_MAX_UNTRUST_TOTAL / COMMUNITY_NEW_MAX_UNTRUST_RATIO deliberately.`;
+  if (dryRun) {
+    logger.warn(`[dry-run] ${message}`);
+    return;
+  }
+  throw new Error(message);
 }
 
 function chunk<T>(values: T[], size: number): T[][] {
