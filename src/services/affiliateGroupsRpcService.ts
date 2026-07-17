@@ -69,32 +69,32 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
     groupAddress: string,
     pageSize: number = DEFAULT_PAGE_SIZE
   ): Promise<AffiliateGroupMember[]> {
-    return this.fetchAllMembers("circles_getAffiliateGroupMembersWishlist", groupAddress, pageSize);
+    return this.fetchAllMembers("circles_getCommunityMembersWishlist", groupAddress, pageSize);
   }
 
   fetchAllGroupMembers(
     groupAddress: string,
     pageSize: number = DEFAULT_PAGE_SIZE
   ): Promise<AffiliateGroupMember[]> {
-    return this.fetchAllMembers("circles_getAffiliateGroupMembers", groupAddress, pageSize);
+    return this.fetchAllMembers("circles_getCommunityMembers", groupAddress, pageSize);
   }
 
   async fetchAffiliateGroupFeesPercentage(avatarAddress: string): Promise<number> {
     const avatar = normalizeAddress(avatarAddress, "avatar");
-    const result = await this.call("circles_getAffiliateGroupFeesPercentage", [avatar]);
+    const result = await this.call("circles_getAvatarCommunityFeesPercentage", [avatar]);
     if (!isRecord(result)) {
-      throw new Error("circles_getAffiliateGroupFeesPercentage returned a non-object result");
+      throw new Error("circles_getAvatarCommunityFeesPercentage returned a non-object result");
     }
 
     const total = result.totalFeePercentage;
     if (typeof total !== "number" || !Number.isFinite(total) || total < 0) {
-      throw new Error("circles_getAffiliateGroupFeesPercentage returned an invalid totalFeePercentage");
+      throw new Error("circles_getAvatarCommunityFeesPercentage returned an invalid totalFeePercentage");
     }
     return total;
   }
 
   private async fetchAllMembers(
-    method: "circles_getAffiliateGroupMembersWishlist" | "circles_getAffiliateGroupMembers",
+    method: "circles_getCommunityMembersWishlist" | "circles_getCommunityMembers",
     groupAddress: string,
     pageSize: number
   ): Promise<AffiliateGroupMember[]> {
