@@ -48,6 +48,15 @@ export type CommunityRunConfig = {
   batchSize: number;
   feeFetchConcurrency: number;
   maxTotalFeePercentage?: number;
+  /**
+   * Whether to fetch + enforce the per-member affiliate fee cap. Default true.
+   * The fee data comes from `circles_getAffiliateGroupFeesPercentage`, which is
+   * only served on the staging RPC. On prod (old/hybrid/new membership sources)
+   * this must be false — group-affiliates has no fee cap, and calling the missing
+   * method would throw. When false, fees are treated as unbounded (never a reason
+   * for ineligibility) and the fee RPC is never called.
+   */
+  feeCapEnabled?: boolean;
   dryRun?: boolean;
   /** How wishlist-absent trustees are handled. Default {@link DEFAULT_UNTRUST_MODE} (add-only). */
   untrustMode?: UntrustMode;
@@ -64,6 +73,13 @@ export type CommunityRunConfig = {
    * staging-only `circles_getAffiliateGroupMembersWishlist` method.
    */
   wishlistOverrideByGroup?: Record<string, ReadonlySet<string>>;
+  /**
+   * Avatars exempt from the reputation gate (test-dev allowlist). Used during the
+   * hybrid test period so fresh dev addresses (reputation 0, cold-start) can
+   * exercise the new multi-group flow without a qualifying score. The fee cap is
+   * already off in the modes this is used in. NEVER set this for real users.
+   */
+  reputationBypassAddresses?: ReadonlySet<string>;
 };
 
 export type CommunityRunDeps = {
@@ -127,11 +143,15 @@ export async function runCommunityReconciliation(
   if (!Number.isFinite(maxTotalFeePercentage) || maxTotalFeePercentage < 0) {
     throw new Error(`maxTotalFeePercentage must be a finite non-negative number, received ${maxTotalFeePercentage}`);
   }
+  const feeCapEnabled = cfg.feeCapEnabled ?? true;
   const untrustMode = cfg.untrustMode ?? DEFAULT_UNTRUST_MODE;
   const maxUntrustTotal = cfg.maxUntrustTotal ?? DEFAULT_MAX_UNTRUST_TOTAL;
   const maxUntrustRatioPerGroup = cfg.maxUntrustRatioPerGroup ?? DEFAULT_MAX_UNTRUST_RATIO_PER_GROUP;
   const protectedTrusteesByGroup = normalizeProtectedTrustees(cfg.protectedTrusteesByGroup);
   const wishlistOverrideByGroup = normalizeProtectedTrustees(cfg.wishlistOverrideByGroup);
+  const reputationBypass = new Set(
+    Array.from(cfg.reputationBypassAddresses ?? []).map(normalizeAddress)
+  );
 
   const snapshots = await Promise.all(groups.map(async (groupAddress): Promise<GroupSnapshot> => {
     const wishlistOverride = wishlistOverrideByGroup.get(groupAddress);
@@ -156,7 +176,9 @@ export async function runCommunityReconciliation(
     allWishlistAddresses.length > 0
       ? deps.reputationService.check(allWishlistAddresses, 0)
       : new Map(),
-    fetchFeePercentages(deps.affiliateRpc, allWishlistAddresses, feeFetchConcurrency)
+    feeCapEnabled
+      ? fetchFeePercentages(deps.affiliateRpc, allWishlistAddresses, feeFetchConcurrency)
+      : Promise.resolve(new Map<string, number>())
   ]);
 
   const wishlistMembersByGroup: Record<string, number> = {};
@@ -175,16 +197,17 @@ export async function runCommunityReconciliation(
     for (const avatarAddress of snapshot.wishlist) {
       const verdict = reputationVerdicts.get(avatarAddress);
       const reputationScore = verdict?.reputationScore ?? null;
-      const totalFeePercentage = feePercentages.get(avatarAddress);
-      if (totalFeePercentage === undefined) {
+      const feeResult = feePercentages.get(avatarAddress);
+      if (feeCapEnabled && feeResult === undefined) {
         throw new Error(`Missing aggregate fee result for ${avatarAddress}`);
       }
+      const totalFeePercentage = feeResult ?? 0;
 
       const reasons: EligibilityFailure["reasons"] = [];
-      if (reputationScore === null || reputationScore <= threshold) {
+      if (!reputationBypass.has(avatarAddress) && (reputationScore === null || reputationScore <= threshold)) {
         reasons.push("reputation");
       }
-      if (totalFeePercentage > maxTotalFeePercentage) {
+      if (feeCapEnabled && totalFeePercentage > maxTotalFeePercentage) {
         reasons.push("fee-cap");
       }
 

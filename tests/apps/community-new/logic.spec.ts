@@ -290,4 +290,66 @@ describe("runCommunityReconciliation", () => {
       .toThrow(`No minRepScore was loaded for managed group ${GROUP_A}`);
     expect(deps.groupService.calls).toEqual([]);
   });
+
+  it("feeCapEnabled=false skips the fee RPC and treats fees as unbounded (old/hybrid/new parity)", async () => {
+    const deps = setup();
+    // Membership from override (no wishlist RPC); no fees registered → the fake
+    // fee RPC would throw if called, proving fetchFeePercentages is skipped.
+    deps.circlesRpc.trusteesByTruster[GROUP_A] = [];
+    deps.reputationService.scores.set(ELIGIBLE, 90);
+
+    const outcome = await runCommunityReconciliation(deps, config({
+      feeCapEnabled: false,
+      wishlistOverrideByGroup: {[GROUP_A]: new Set([ELIGIBLE])}
+    }));
+
+    expect(outcome.trustedByGroup[GROUP_A]).toEqual([ELIGIBLE]);
+    expect(deps.affiliateRpc.feeRequests).toEqual([]);
+  });
+
+  it("reputationBypassAddresses trusts a cold-start (score 0) test address in hybrid", async () => {
+    const deps = setup();
+    deps.circlesRpc.trusteesByTruster[GROUP_A] = [];
+    deps.reputationService.scores.set(ELIGIBLE, 0); // below threshold 40
+
+    const outcome = await runCommunityReconciliation(deps, config({
+      feeCapEnabled: false,
+      wishlistOverrideByGroup: {[GROUP_A]: new Set([ELIGIBLE])},
+      reputationBypassAddresses: new Set([ELIGIBLE])
+    }));
+
+    expect(outcome.trustedByGroup[GROUP_A]).toEqual([ELIGIBLE]);
+    expect(outcome.ineligible).toEqual([]);
+  });
+
+  it("without the bypass, a score-0 address stays ineligible (control)", async () => {
+    const deps = setup();
+    deps.circlesRpc.trusteesByTruster[GROUP_A] = [];
+    deps.reputationService.scores.set(ELIGIBLE, 0);
+
+    const outcome = await runCommunityReconciliation(deps, config({
+      feeCapEnabled: false,
+      wishlistOverrideByGroup: {[GROUP_A]: new Set([ELIGIBLE])}
+    }));
+
+    expect(outcome.trustedByGroup[GROUP_A]).toEqual([]);
+    expect(outcome.ineligible).toEqual([
+      expect.objectContaining({avatarAddress: ELIGIBLE, reasons: ["reputation"]})
+    ]);
+  });
+
+  it("old-mode override untrusts a trustee absent from the old-registry membership (affiliates parity)", async () => {
+    const deps = setup();
+    deps.circlesRpc.trusteesByTruster[GROUP_A] = [ELIGIBLE, STALE_CONFIRMED];
+    deps.reputationService.scores.set(ELIGIBLE, 90);
+
+    const outcome = await runCommunityReconciliation(deps, config({
+      feeCapEnabled: false,
+      untrustMode: "wishlist",
+      wishlistOverrideByGroup: {[GROUP_A]: new Set([ELIGIBLE])}
+    }));
+
+    expect(outcome.untrustedByGroup[GROUP_A]).toEqual([STALE_CONFIRMED]);
+    expect(outcome.trustedByGroup[GROUP_A]).toEqual([]);
+  });
 });

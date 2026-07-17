@@ -45,7 +45,10 @@ import {
   DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK,
   fetchOldRegistryMembersByGroup
 } from "./oldRegistryMembers";
+import {OldRegistrySource, mergeHybridMembers} from "./oldRegistrySource";
 import {resolveCommunityReputationConfig} from "./reputationConfig";
+
+type MembershipSource = "rpc" | "registry" | "old" | "hybrid";
 
 const APP_NAME = "community-new";
 const DEFAULT_COMMUNITY_RPC_URL = "https://rpc.staging.aboutcircles.com";
@@ -53,8 +56,15 @@ const DEFAULT_COMMUNITY_RPC_URL = "https://rpc.staging.aboutcircles.com";
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const logger = new LoggerService(verboseLogging, APP_NAME);
 const runLogger = logger.child("run");
-const communityRpcUrl = process.env.COMMUNITY_NEW_RPC_URL || DEFAULT_COMMUNITY_RPC_URL;
-const chainRpcUrl = process.env.RPC_URL || communityRpcUrl;
+const membershipSource = parseMembershipSource(process.env.COMMUNITY_NEW_MEMBERSHIP_SOURCE);
+const chainRpcUrl = process.env.RPC_URL || DEFAULT_COMMUNITY_RPC_URL;
+// The community RPC serves trustees + profile (minRepScore) reads and, in `rpc`
+// mode, the staging-only wishlist methods. In old/hybrid/new there is NO
+// staging-only dependency, so it must be the same prod chain as RPC_URL — fall
+// back to it (never the staging default) so the worker can't read staging trust
+// state on prod and untrust against it.
+const communityRpcUrl = process.env.COMMUNITY_NEW_RPC_URL
+  || (membershipSource === "rpc" ? DEFAULT_COMMUNITY_RPC_URL : chainRpcUrl);
 const txRpcUrl = resolveTransactionRpcUrl(chainRpcUrl);
 const managedGroups = parseGroupAddresses(
   process.env.COMMUNITY_NEW_GROUP_ADDRESSES,
@@ -81,7 +91,6 @@ const reputationSnapshotTtlMs = parsePositiveInt(
   "COMMUNITY_NEW_REPUTATION_SNAPSHOT_TTL_MS",
   Math.max(pollIntervalMs, 5 * 60 * 1000)
 );
-const untrustMode = parseUntrustMode(process.env.COMMUNITY_NEW_UNTRUST_MODE);
 const maxUntrustTotal = parsePositiveInt("COMMUNITY_NEW_MAX_UNTRUST_TOTAL", DEFAULT_MAX_UNTRUST_TOTAL);
 const maxUntrustRatioPerGroup = parseRatio("COMMUNITY_NEW_MAX_UNTRUST_RATIO", DEFAULT_MAX_UNTRUST_RATIO_PER_GROUP);
 const oldRegistryAddress = process.env.COMMUNITY_NEW_OLD_REGISTRY_ADDRESS || DEFAULT_OLD_AFFILIATE_REGISTRY_ADDRESS;
@@ -90,7 +99,27 @@ const oldRegistryStartBlock = parsePositiveInt(
   DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK
 );
 const ackGroupAffiliatesRetired = process.env.COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED === "1";
-const membershipSource = parseMembershipSource(process.env.COMMUNITY_NEW_MEMBERSHIP_SOURCE);
+// Test-dev allowlist: in `hybrid` these avatars are governed by the NEW multi
+// registry (multi-group), everyone else keeps OLD single-slot prod behavior.
+const testAddresses = parseAddressSet(process.env.COMMUNITY_NEW_TEST_ADDRESSES);
+// Fresh dev addresses have reputation 0 (cold-start), which fails the rep gate.
+// Opt-in bypass so allowlisted test avatars can exercise the new flow in hybrid.
+const testBypassReputation = process.env.COMMUNITY_NEW_TEST_BYPASS_REPUTATION === "1";
+const needsNewMap = membershipSource === "registry" || membershipSource === "hybrid";
+const needsOldMap = membershipSource === "old" || membershipSource === "hybrid";
+// Per-member fees come from the staging-only wishlist RPC; only enforce them in
+// `rpc` mode. old/hybrid/new read the chain directly (prod RPC lacks the method)
+// and, like group-affiliates, apply no fee cap.
+const feeCapEnabled = membershipSource === "rpc";
+// Every chain-authoritative mode (old/hybrid/new) is a membership source of
+// truth, so it must UNTRUST departed/removed members — the `wishlist` policy,
+// matching group-affiliates (old) and honoring AffiliateGroupRemoved (new). Only
+// the staging `rpc` mode keeps the migration-safe add-only default. The untrust
+// circuit breaker still guards a wet run whose eviction set is implausibly large.
+const untrustMode = parseUntrustMode(
+  process.env.COMMUNITY_NEW_UNTRUST_MODE,
+  membershipSource === "rpc" ? DEFAULT_UNTRUST_MODE : "wishlist"
+);
 const registryAddress = process.env.COMMUNITY_NEW_REGISTRY_ADDRESS || DEFAULT_MULTI_AFFILIATE_REGISTRY_ADDRESS;
 const registryDeployBlock = parsePositiveInt(
   "COMMUNITY_NEW_REGISTRY_DEPLOY_BLOCK",
@@ -98,6 +127,8 @@ const registryDeployBlock = parsePositiveInt(
 );
 const wssUrl = process.env.COMMUNITY_NEW_WSS_URL || deriveWsUrl(chainRpcUrl);
 const enableWss = process.env.COMMUNITY_NEW_ENABLE_WSS === "1";
+const oldWssUrl = process.env.COMMUNITY_NEW_OLD_WSS_URL || undefined;
+const enableOldWss = process.env.COMMUNITY_NEW_OLD_ENABLE_WSS === "1";
 const stateDbUrl = process.env.LEADER_DB_URL || "";
 const MULTI_MAP_STATE_KEY = "community-new:multi-affiliate-map";
 const dryRun = process.env.DRY_RUN === "1";
@@ -126,9 +157,10 @@ const slackService = new SlackService(slackWebhookUrl, slackWebhookUrlInfo, slac
 const errorTracker = new ConsecutiveErrorTracker(errorsBeforeCrash);
 const groupService = createGroupService();
 
-const stateStore = membershipSource === "registry" && stateDbUrl.length > 0 ? new StateStore(stateDbUrl) : null;
+const stateStore = membershipSource !== "rpc" && stateDbUrl.length > 0 ? new StateStore(stateDbUrl) : null;
 let multiMap: AffiliateMultiMap | null = null;
 let multiListener: MultiAffiliateListenerHandle | null = null;
+let oldSource: OldRegistrySource | null = null;
 let shuttingDown = false;
 
 function applyMultiEvents(map: AffiliateMultiMap, events: MultiAffiliateEvent[]): void {
@@ -237,8 +269,21 @@ async function start(): Promise<void> {
     }
   }
 
-  if (membershipSource === "registry") {
+  if (needsNewMap) {
     await initMultiMap();
+  }
+  if (needsOldMap) {
+    oldSource = await OldRegistrySource.create({
+      chainRpcUrl,
+      wssUrl: oldWssUrl,
+      registryAddress: oldRegistryAddress,
+      startBlock: oldRegistryStartBlock,
+      logger: logger.child("old-registry"),
+      stateStore,
+      enableWss: enableOldWss
+    });
+    await oldSource.init();
+    logger.info(`Old-affiliate map ready: lastScannedBlock=${oldSource.lastScannedBlock}`);
   }
 
   logConfiguration();
@@ -261,15 +306,13 @@ async function start(): Promise<void> {
       if (healthy) {
         const minRepScoresByGroup = await profileService.fetchMinRepScores(managedGroups);
 
-        // registry mode: keep the on-chain map current (getLogs catch-up — also a
-        // WSS backstop) and use it as the membership source instead of the RPC.
+        // Non-rpc modes: keep the on-chain map(s) current (getLogs catch-up — a
+        // WSS backstop) and derive the membership override instead of the RPC.
         let wishlistOverrideByGroup: Record<string, ReadonlySet<string>> | undefined;
-        if (membershipSource === "registry" && multiMap) {
-          await refreshMultiMap(multiMap);
-          wishlistOverrideByGroup = {};
-          for (const group of managedGroups) {
-            wishlistOverrideByGroup[group] = multiMap.getMembersOf(group);
-          }
+        if (membershipSource !== "rpc") {
+          if (needsNewMap && multiMap) await refreshMultiMap(multiMap);
+          if (needsOldMap && oldSource) await oldSource.refresh();
+          wishlistOverrideByGroup = buildWishlistOverride();
         }
 
         const protectedTrusteesByGroup = untrustMode === "union"
@@ -287,12 +330,15 @@ async function start(): Promise<void> {
             pageSize,
             batchSize,
             feeFetchConcurrency,
+            feeCapEnabled,
             dryRun,
             untrustMode,
             protectedTrusteesByGroup,
             maxUntrustTotal,
             maxUntrustRatioPerGroup,
-            wishlistOverrideByGroup
+            wishlistOverrideByGroup,
+            reputationBypassAddresses:
+              membershipSource === "hybrid" && testBypassReputation ? testAddresses : undefined
           }
         );
         recordRunSuccess(APP_NAME, Date.now() - startedAt);
@@ -406,14 +452,23 @@ function logConfiguration(): void {
   );
   logger.info(`  - safe=${safeAddress || "(not set)"}`);
   logger.info(`  - membershipSource=${membershipSource}`);
-  if (membershipSource === "registry") {
+  logger.info(`  - feeCapEnabled=${feeCapEnabled}`);
+  if (needsNewMap) {
     logger.info(`  - registry=${registryAddress} (deployBlock=${registryDeployBlock})`);
     logger.info(`  - wss=${enableWss ? wssUrl : "(disabled)"}  statePersistence=${stateStore ? "on" : "off"}`);
+  }
+  if (needsOldMap) {
+    logger.info(`  - oldRegistry=${oldRegistryAddress} (startBlock=${oldRegistryStartBlock})`);
+    logger.info(`  - oldWss=${enableOldWss ? (oldWssUrl ?? "(derived from RPC)") : "(disabled)"}`);
+  }
+  if (membershipSource === "hybrid") {
+    logger.info(`  - testAddresses(${testAddresses.size})=${Array.from(testAddresses).join(", ") || "(none)"}`);
+    logger.info(`  - testBypassReputation=${testBypassReputation}`);
   }
   logger.info(`  - untrustMode=${untrustMode}`);
   logger.info(`  - maxUntrustTotal=${maxUntrustTotal} maxUntrustRatioPerGroup=${maxUntrustRatioPerGroup}`);
   if (untrustMode === "union") {
-    logger.info(`  - oldRegistry=${oldRegistryAddress} (startBlock=${oldRegistryStartBlock})`);
+    logger.info(`  - unionProtectedFrom=oldRegistry ${oldRegistryAddress} (startBlock=${oldRegistryStartBlock})`);
   }
   logger.info(`  - ackGroupAffiliatesRetired=${ackGroupAffiliatesRetired}`);
   logger.info(`  - dryRun=${dryRun}`);
@@ -429,6 +484,10 @@ async function shutdown(signal: string): Promise<void> {
       logger.warn("Failed to stop multi-affiliate listener:", error);
     }
     multiListener = null;
+  }
+  if (oldSource) {
+    oldSource.stop();
+    oldSource = null;
   }
   await notify(`🔄 *community-new shutting down* (${signal})`, SlackSeverity.INFO);
   process.exit(0);
@@ -477,20 +536,54 @@ function parseRatio(name: string, fallback: number): number {
   return value;
 }
 
-function parseUntrustMode(raw: string | undefined): UntrustMode {
+function parseUntrustMode(raw: string | undefined, fallback: UntrustMode): UntrustMode {
   const value = (raw ?? "").trim().toLowerCase();
-  if (value.length === 0) return DEFAULT_UNTRUST_MODE;
+  if (value.length === 0) return fallback;
   if (value === "add-only" || value === "union" || value === "wishlist") {
     return value;
   }
   throw new Error(`COMMUNITY_NEW_UNTRUST_MODE must be one of add-only|union|wishlist, received '${raw}'`);
 }
 
-function parseMembershipSource(raw: string | undefined): "rpc" | "registry" {
+function parseMembershipSource(raw: string | undefined): MembershipSource {
   const value = (raw ?? "").trim().toLowerCase();
   if (value.length === 0 || value === "rpc") return "rpc";
-  if (value === "registry") return "registry";
-  throw new Error(`COMMUNITY_NEW_MEMBERSHIP_SOURCE must be one of rpc|registry, received '${raw}'`);
+  if (value === "registry" || value === "new") return "registry";
+  if (value === "old") return "old";
+  if (value === "hybrid") return "hybrid";
+  throw new Error(
+    `COMMUNITY_NEW_MEMBERSHIP_SOURCE must be one of rpc|old|hybrid|new (new=registry), received '${raw}'`
+  );
+}
+
+function parseAddressSet(raw: string | undefined): Set<string> {
+  const set = new Set<string>();
+  if (!raw) return set;
+  for (const value of raw.split(",").map((entry) => entry.trim()).filter(Boolean)) {
+    set.add(getAddress(value).toLowerCase());
+  }
+  return set;
+}
+
+/** Per-group membership override for the current mode (see {@link MembershipSource}). */
+function buildWishlistOverride(): Record<string, ReadonlySet<string>> {
+  const override: Record<string, ReadonlySet<string>> = {};
+  for (const group of managedGroups) {
+    if (membershipSource === "registry" && multiMap) {
+      override[group] = multiMap.getMembersOf(group);
+    } else if (membershipSource === "old" && oldSource) {
+      override[group] = oldSource.getMembersOf(group);
+    } else if (membershipSource === "hybrid" && oldSource && multiMap) {
+      override[group] = mergeHybridMembers(
+        oldSource.getMembersOf(group),
+        multiMap.getMembersOf(group),
+        testAddresses
+      );
+    } else {
+      override[group] = new Set();
+    }
+  }
+  return override;
 }
 
 function asError(cause: unknown): Error {

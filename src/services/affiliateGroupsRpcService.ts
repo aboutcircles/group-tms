@@ -14,6 +14,19 @@ const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_BASE_DELAY_MS = 1_000;
 const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
 
+/**
+ * The Circles RPC affiliate methods are being renamed (…AffiliateGroup…→…Community…)
+ * on the Nethermind plugin. We try the NEW name first and fall back to the OLD on
+ * `-32601 Method not found`, caching the winner, so the worker keeps working on
+ * nodes before AND after the rename ships. Only used in `rpc` membership mode.
+ */
+type MethodPair = {primary: string; fallback: string};
+const RENAMED_METHODS: Record<"membersWishlist" | "members" | "fees", MethodPair> = {
+  membersWishlist: {primary: "circles_getCommunityMembersWishlist", fallback: "circles_getAffiliateGroupMembersWishlist"},
+  members: {primary: "circles_getCommunityMembers", fallback: "circles_getAffiliateGroupMembers"},
+  fees: {primary: "circles_getAvatarCommunityFeesPercentage", fallback: "circles_getAffiliateGroupFeesPercentage"}
+};
+
 type JsonRpcError = {
   code?: unknown;
   message?: unknown;
@@ -48,6 +61,8 @@ class AffiliateRpcHttpError extends Error {
  */
 export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
   private requestId = 0;
+  /** Resolved method name per pair.primary (new-vs-old rename), decided once. */
+  private readonly resolvedNames = new Map<string, string>();
 
   constructor(
     rpcUrl: string,
@@ -69,44 +84,44 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
     groupAddress: string,
     pageSize: number = DEFAULT_PAGE_SIZE
   ): Promise<AffiliateGroupMember[]> {
-    return this.fetchAllMembers("circles_getAffiliateGroupMembersWishlist", groupAddress, pageSize);
+    return this.fetchAllMembers(RENAMED_METHODS.membersWishlist, groupAddress, pageSize);
   }
 
   /**
-   * Startup probe: verifies the affiliate wishlist RPC method exists on the
-   * configured node. The `circles_getAffiliateGroup*` methods are not served by
-   * every Circles RPC (prod `rpc.aboutcircles.com` returns `-32601 Method not
-   * found`). A single-page call surfaces a wrong-endpoint misconfiguration at
-   * boot instead of after a poll cycle. Throws on any RPC/transport error.
+   * Startup probe: verifies the community/affiliate wishlist RPC method exists on
+   * the configured node. These methods are not served by every Circles RPC (prod
+   * `rpc.aboutcircles.com` returns `-32601 Method not found`). A single-page call
+   * surfaces a wrong-endpoint misconfiguration at boot instead of after a poll
+   * cycle. Tolerates the …Affiliate…→…Community… rename via fallback.
    */
   async assertAffiliateMethodsAvailable(groupAddress: string): Promise<void> {
     const group = normalizeAddress(groupAddress, "group");
-    await this.call("circles_getAffiliateGroupMembersWishlist", [group, 1]);
+    await this.callWithFallback(RENAMED_METHODS.membersWishlist, [group, 1]);
   }
 
   fetchAllGroupMembers(
     groupAddress: string,
     pageSize: number = DEFAULT_PAGE_SIZE
   ): Promise<AffiliateGroupMember[]> {
-    return this.fetchAllMembers("circles_getAffiliateGroupMembers", groupAddress, pageSize);
+    return this.fetchAllMembers(RENAMED_METHODS.members, groupAddress, pageSize);
   }
 
   async fetchAffiliateGroupFeesPercentage(avatarAddress: string): Promise<number> {
     const avatar = normalizeAddress(avatarAddress, "avatar");
-    const result = await this.call("circles_getAffiliateGroupFeesPercentage", [avatar]);
+    const result = await this.callWithFallback(RENAMED_METHODS.fees, [avatar]);
     if (!isRecord(result)) {
-      throw new Error("circles_getAffiliateGroupFeesPercentage returned a non-object result");
+      throw new Error("community fees RPC returned a non-object result");
     }
 
     const total = result.totalFeePercentage;
     if (typeof total !== "number" || !Number.isFinite(total) || total < 0) {
-      throw new Error("circles_getAffiliateGroupFeesPercentage returned an invalid totalFeePercentage");
+      throw new Error("community fees RPC returned an invalid totalFeePercentage");
     }
     return total;
   }
 
   private async fetchAllMembers(
-    method: "circles_getAffiliateGroupMembersWishlist" | "circles_getAffiliateGroupMembers",
+    methodPair: MethodPair,
     groupAddress: string,
     pageSize: number
   ): Promise<AffiliateGroupMember[]> {
@@ -114,11 +129,12 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
     const limit = normalizePageSize(pageSize);
     const members = new Map<string, AffiliateGroupMember>();
     const seenCursors = new Set<string>();
+    const label = methodPair.primary;
     let cursor: string | null = null;
 
     for (let pageNumber = 1; pageNumber <= this.maxPages; pageNumber++) {
       const params: unknown[] = cursor ? [group, limit, cursor] : [group, limit];
-      const page = parseMembersPage(await this.call(method, params), method);
+      const page = parseMembersPage(await this.callWithFallback(methodPair, params), label);
       for (const member of page.results) {
         members.set(member.avatarAddress, member);
       }
@@ -127,16 +143,38 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
         return Array.from(members.values());
       }
       if (!page.nextCursor) {
-        throw new Error(`${method} returned hasMore=true without nextCursor`);
+        throw new Error(`${label} returned hasMore=true without nextCursor`);
       }
       if (seenCursors.has(page.nextCursor)) {
-        throw new Error(`${method} returned a repeated pagination cursor`);
+        throw new Error(`${label} returned a repeated pagination cursor`);
       }
       seenCursors.add(page.nextCursor);
       cursor = page.nextCursor;
     }
 
-    throw new Error(`${method} exceeded the ${this.maxPages}-page safety limit`);
+    throw new Error(`${label} exceeded the ${this.maxPages}-page safety limit`);
+  }
+
+  /**
+   * Call `pair.primary`, falling back to `pair.fallback` on `-32601 Method not
+   * found` (the …Affiliate…→…Community… rename). The resolved name is cached, so
+   * the fallback probe happens at most once per method per process.
+   */
+  private async callWithFallback(pair: MethodPair, params: unknown[]): Promise<unknown> {
+    const cached = this.resolvedNames.get(pair.primary);
+    if (cached) {
+      return this.call(cached, params);
+    }
+    try {
+      const result = await this.call(pair.primary, params);
+      this.resolvedNames.set(pair.primary, pair.primary);
+      return result;
+    } catch (error) {
+      if (!isMethodNotFound(error)) throw error;
+      const result = await this.call(pair.fallback, params);
+      this.resolvedNames.set(pair.primary, pair.fallback);
+      return result;
+    }
   }
 
   private async call(method: string, params: unknown[]): Promise<unknown> {
@@ -266,4 +304,10 @@ function normalizePageSize(value: number): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** JSON-RPC "method not found" (-32601) — used to trigger the rename fallback. */
+function isMethodNotFound(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return message.includes("-32601") || message.includes("method not found");
 }
