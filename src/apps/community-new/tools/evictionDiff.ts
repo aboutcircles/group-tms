@@ -48,6 +48,7 @@ import {
   DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK,
   fetchOldRegistryMembersByGroup
 } from "../oldRegistryMembers";
+import {mergeProtectedTrustees, parseGrandfatherAddresses} from "../grandfather";
 import {OldRegistrySource, mergeHybridMembers} from "../oldRegistrySource";
 import {resolveCommunityReputationConfig} from "../reputationConfig";
 
@@ -221,39 +222,54 @@ async function run(): Promise<void> {
       ""
     );
   } else {
-    // Prod path: membership rebuilt from chain; report the authoritative eviction set.
+    // Prod path: membership rebuilt from chain. Report BOTH the strict wishlist
+    // blast radius AND the union+grandfather set the worker actually applies, so
+    // the operator sees exactly which orphans the grandfather list spares.
     const wishlistOverrideByGroup = await buildChainOverride(source, groups, chainRpcUrl, logger);
     const reputationBypassAddresses = source === "hybrid" && process.env.COMMUNITY_NEW_TEST_BYPASS_REPUTATION === "1"
       ? parseAddressSet(process.env.COMMUNITY_NEW_TEST_ADDRESSES)
       : undefined;
-    const result = await runCommunityReconciliation(deps, {
-      ...baseCfg,
-      untrustMode: "wishlist" as UntrustMode,
-      feeCapEnabled: false,
-      wishlistOverrideByGroup,
-      reputationBypassAddresses
+    const oldRegistryMembers = await fetchOldRegistryMembersByGroup(chainRpcUrl, groups, {
+      registryAddress: process.env.COMMUNITY_NEW_OLD_REGISTRY_ADDRESS || DEFAULT_OLD_AFFILIATE_REGISTRY_ADDRESS,
+      fromBlock: parseIntEnv("COMMUNITY_NEW_OLD_REGISTRY_START_BLOCK", DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK),
+      logger
     });
-    let totalEvict = 0;
+    const grandfatherByGroup = parseGrandfatherAddresses(process.env.COMMUNITY_NEW_GRANDFATHER_ADDRESSES);
+    const protectedByGroup = mergeProtectedTrustees(oldRegistryMembers, grandfatherByGroup);
+
+    const commonCfg = {...baseCfg, feeCapEnabled: false, wishlistOverrideByGroup, reputationBypassAddresses};
+    const wishlist = await runCommunityReconciliation(deps, {...commonCfg, untrustMode: "wishlist" as UntrustMode});
+    const union = await runCommunityReconciliation(deps, {
+      ...commonCfg,
+      untrustMode: "union" as UntrustMode,
+      protectedTrusteesByGroup: protectedByGroup
+    });
+    let totalWishlist = 0;
+    let totalUnion = 0;
     let totalTrust = 0;
     for (const group of groups) {
-      const trustees = result.currentTrusteesByGroup[group] ?? 0;
-      const members = result.wishlistMembersByGroup[group] ?? 0;
-      const evict = result.untrustedByGroup[group] ?? [];
-      const add = result.trustedByGroup[group] ?? [];
-      totalEvict += evict.length;
+      const trustees = wishlist.currentTrusteesByGroup[group] ?? 0;
+      const members = wishlist.wishlistMembersByGroup[group] ?? 0;
+      const gf = grandfatherByGroup[group]?.size ?? 0;
+      const wEvict = wishlist.untrustedByGroup[group] ?? [];
+      const uEvict = union.untrustedByGroup[group] ?? [];
+      const add = wishlist.trustedByGroup[group] ?? [];
+      totalWishlist += wEvict.length;
+      totalUnion += uEvict.length;
       totalTrust += add.length;
       lines.push(
         "",
         `Group ${group}`,
-        `  on-chain trustees=${trustees}  ${source}-members=${members}`,
-        `  would UNTRUST: ${evict.length}${evict.length ? "  [" + evict.join(", ") + "]" : ""}`,
-        `  would TRUST:   ${add.length}${add.length ? "  [" + add.join(", ") + "]" : ""}`
+        `  on-chain trustees=${trustees}  ${source}-members=${members}  grandfathered=${gf}`,
+        `  wishlist mode     → UNTRUST ${wEvict.length}${wEvict.length ? "  [" + wEvict.join(", ") + "]" : ""}`,
+        `  union+grandfather → UNTRUST ${uEvict.length}${uEvict.length ? "  [" + uEvict.join(", ") + "]" : ""}`,
+        `  would TRUST       → ${add.length}${add.length ? "  [" + add.join(", ") + "]" : ""}`
       );
     }
     lines.push(
       "",
-      `TOTAL — untrust: ${totalEvict}   trust: ${totalTrust}  (mode=wishlist, feeCap=off)`,
-      "Zero-regression cutover requires the untrust set to be empty or intentional.",
+      `TOTAL — wishlist untrust: ${totalWishlist}   union+grandfather untrust: ${totalUnion}   trust: ${totalTrust}  (feeCap=off)`,
+      "Zero-change cutover requires the configured mode's untrust set to be empty or intentional.",
       ""
     );
   }
