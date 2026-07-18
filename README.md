@@ -382,6 +382,16 @@ COMMUNITY_NEW_UNTRUST_MODE=                       # add-only|union|wishlist (per
 COMMUNITY_NEW_MAX_UNTRUST_TOTAL=20
 COMMUNITY_NEW_MAX_UNTRUST_RATIO=0.5               # (0,1]
 
+# Cutover grandfather list (union mode ONLY). JSON mapping each managed group to
+# avatars that are trusted on-chain but absent from the registry feeding the
+# wishlist (orphans). They are added to the union protected set so an
+# authoritative sweep spares exactly these addresses, while every OTHER member
+# still gets full join/leave/reputation enforcement. Frozen by config on purpose
+# (a recomputed set would re-protect post-cutover leavers). Errors if set while
+# UNTRUST_MODE is not union, or if it names an unmanaged group.
+#   {"0x<group>":["0x<avatar>", ...]}
+COMMUNITY_NEW_GRANDFATHER_ADDRESSES=
+
 # Cutover gate: community-new shares the Safe/signer with group-affiliates. Must
 # retire group-affiliates for these groups first, then set this to run wet.
 COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED=0
@@ -421,8 +431,8 @@ VERBOSE_LOGGING=1
 ```
 
 **prod1 cutover (replaces group-affiliates — same Safe, so only one runs wet):**
-1. Deploy `MEMBERSHIP_SOURCE=old`, `DRY_RUN=1`; run `npm run diff:community-new` and confirm the untrust set is empty/expected.
-2. Stop group-affiliates → set `COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED=1`, `DRY_RUN=0` (still `old`). Verify trust/untrust matches the prior worker.
+1. Deploy `MEMBERSHIP_SOURCE=hybrid`, `UNTRUST_MODE=union`, `DRY_RUN=1`; run `npm run diff:community-new`. The report prints both the strict `wishlist` blast radius and the `union+grandfather` set the worker applies — confirm the latter is 0 (or intentional). Populate `COMMUNITY_NEW_GRANDFATHER_ADDRESSES` with the orphans the `wishlist` column lists so day-one removals are zero while leave/rep enforcement stays live for everyone else.
+2. Stop group-affiliates → set `COMMUNITY_NEW_ACK_GROUP_AFFILIATES_RETIRED=1`, `DRY_RUN=0`. Verify trust/untrust matches the prior worker (grandfathered orphans retained; genuine leavers still untrusted).
 3. Switch to `hybrid` with `COMMUNITY_NEW_TEST_ADDRESSES=…` (+ `COMMUNITY_NEW_TEST_BYPASS_REPUTATION=1` for cold-start dev addresses) to exercise multi-group.
 4. GA: switch to `new` for full multi-membership.
 
