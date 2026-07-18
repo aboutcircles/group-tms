@@ -45,6 +45,12 @@ import {
   DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK,
   fetchOldRegistryMembersByGroup
 } from "./oldRegistryMembers";
+import {
+  GRANDFATHER_ENV,
+  countGrandfather,
+  mergeProtectedTrustees,
+  parseGrandfatherAddresses
+} from "./grandfather";
 import {OldRegistrySource, mergeHybridMembers} from "./oldRegistrySource";
 import {resolveCommunityReputationConfig} from "./reputationConfig";
 
@@ -120,6 +126,11 @@ const untrustMode = parseUntrustMode(
   process.env.COMMUNITY_NEW_UNTRUST_MODE,
   membershipSource === "rpc" ? DEFAULT_UNTRUST_MODE : "wishlist"
 );
+// Cutover carve-outs (union mode only): orphans trusted on-chain but absent
+// from the registry that feeds the wishlist. They are added to the union
+// protected set so an authoritative sweep spares them, while every other member
+// keeps full join/leave/rep enforcement. See grandfather.ts.
+const grandfatherByGroup = parseGrandfatherAddresses(process.env.COMMUNITY_NEW_GRANDFATHER_ADDRESSES);
 const registryAddress = process.env.COMMUNITY_NEW_REGISTRY_ADDRESS || DEFAULT_MULTI_AFFILIATE_REGISTRY_ADDRESS;
 const registryDeployBlock = parsePositiveInt(
   "COMMUNITY_NEW_REGISTRY_DEPLOY_BLOCK",
@@ -316,11 +327,14 @@ async function start(): Promise<void> {
         }
 
         const protectedTrusteesByGroup = untrustMode === "union"
-          ? await fetchOldRegistryMembersByGroup(chainRpcUrl, managedGroups, {
-              registryAddress: oldRegistryAddress,
-              fromBlock: oldRegistryStartBlock,
-              logger: runLogger
-            })
+          ? mergeProtectedTrustees(
+              await fetchOldRegistryMembersByGroup(chainRpcUrl, managedGroups, {
+                registryAddress: oldRegistryAddress,
+                fromBlock: oldRegistryStartBlock,
+                logger: runLogger
+              }),
+              grandfatherByGroup
+            )
           : undefined;
         const outcome = await runCommunityReconciliation(
           {affiliateRpc, circlesRpc, groupService, reputationService, logger: runLogger},
@@ -421,6 +435,28 @@ function validateConfig(): void {
       throw new Error(`Configured community signer ${expected} does not match private-key signer ${actual}`);
     }
   }
+
+  // Grandfather carve-outs are only consulted by union mode; fail loud rather
+  // than let an operator believe addresses are protected when the active mode
+  // would still evict (wishlist) or already spares everyone (add-only).
+  const grandfatherGroups = Object.keys(grandfatherByGroup);
+  if (grandfatherGroups.length > 0) {
+    if (untrustMode !== "union") {
+      throw new Error(
+        `${GRANDFATHER_ENV} is only honored in union untrust mode, but ` +
+        `COMMUNITY_NEW_UNTRUST_MODE resolves to '${untrustMode}'. Set it to union, or clear the grandfather list.`
+      );
+    }
+    const managed = new Set(managedGroups);
+    for (const group of grandfatherGroups) {
+      if (!managed.has(group)) {
+        throw new Error(
+          `${GRANDFATHER_ENV} references group ${group}, which is not in COMMUNITY_NEW_GROUP_ADDRESSES — ` +
+          `grandfathering an unmanaged group has no effect (likely a typo).`
+        );
+      }
+    }
+  }
 }
 
 async function validateManagedGroupServices(): Promise<void> {
@@ -469,6 +505,10 @@ function logConfiguration(): void {
   logger.info(`  - maxUntrustTotal=${maxUntrustTotal} maxUntrustRatioPerGroup=${maxUntrustRatioPerGroup}`);
   if (untrustMode === "union") {
     logger.info(`  - unionProtectedFrom=oldRegistry ${oldRegistryAddress} (startBlock=${oldRegistryStartBlock})`);
+    logger.info(`  - grandfatherAddresses=${countGrandfather(grandfatherByGroup)} (frozen carve-outs, union-protected)`);
+    for (const [group, set] of Object.entries(grandfatherByGroup)) {
+      logger.info(`    · ${group}: ${set.size} [${Array.from(set).join(", ")}]`);
+    }
   }
   logger.info(`  - ackGroupAffiliatesRetired=${ackGroupAffiliatesRetired}`);
   logger.info(`  - dryRun=${dryRun}`);

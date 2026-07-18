@@ -5,6 +5,7 @@ import {
   DEFAULT_UNTRUST_MODE,
   runCommunityReconciliation
 } from "../../../src/apps/community-new/logic";
+import {mergeProtectedTrustees} from "../../../src/apps/community-new/grandfather";
 import {IReputationService, ReputationVerdict} from "../../../src/apps/group-affiliates/reputationService";
 import {FakeGroupService, FakeLogger} from "../../../fakes/fakes";
 import {FakeCirclesRpc} from "../../../fakes/fakes";
@@ -215,6 +216,31 @@ describe("runCommunityReconciliation", () => {
     // PROTECTED is an old-registry member → kept; ORPHAN is on neither source → untrusted.
     expect(outcome.untrustedByGroup[GROUP_A]).toEqual([ORPHAN]);
     expect(outcome.trustedByGroup[GROUP_A]).toEqual([]);
+  });
+
+  it("union + grandfather list spares a cutover orphan while still untrusting a real leaver", async () => {
+    const deps = setup();
+    // PROTECTED is trusted but in neither the wishlist nor the old registry — a
+    // cutover orphan we grandfather. ORPHAN is likewise off both sources but NOT
+    // grandfathered → it must still be untrusted (leave enforcement intact).
+    deps.affiliateRpc.wishlistByGroup[GROUP_A] = [ELIGIBLE];
+    deps.circlesRpc.trusteesByTruster[GROUP_A] = [ELIGIBLE, PROTECTED, ORPHAN];
+    deps.affiliateRpc.feesByAvatar[ELIGIBLE] = 0;
+    deps.reputationService.scores.set(ELIGIBLE, 90);
+
+    // Old registry has no members for this group (base is empty); PROTECTED is
+    // carried solely by the frozen grandfather list.
+    const protectedTrusteesByGroup = mergeProtectedTrustees(
+      {[GROUP_A]: new Set<string>()},
+      {[GROUP_A]: new Set([PROTECTED])}
+    );
+    const outcome = await runCommunityReconciliation(deps, config({
+      untrustMode: "union",
+      protectedTrusteesByGroup
+    }));
+
+    expect(outcome.untrustedByGroup[GROUP_A]).toEqual([ORPHAN]);
+    expect(outcome.untrustedByGroup[GROUP_A]).not.toContain(PROTECTED);
   });
 
   it("empty-wishlist guard: never mass-untrusts when the wishlist comes back empty", async () => {
