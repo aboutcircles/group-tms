@@ -10,7 +10,8 @@ import {StateStore} from "../../services/stateStore";
  * an avatar here belongs to MANY groups at once — mirroring the on-chain
  * per-avatar linked list. Maintained by history backfill on boot and kept current
  * by the realtime WSS listener; consumed by the reconciler as the membership
- * source so community-new no longer depends on the staging-only wishlist RPC.
+ * source so community-new no longer depends on the wishlist RPC (or on how far
+ * the indexer behind it has caught up).
  *
  * Not a security boundary: a stale/incomplete map can only under-report members
  * (fail to trust), never over-untrust — untrust decisions remain gated by the
