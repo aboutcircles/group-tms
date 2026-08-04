@@ -15,10 +15,12 @@ const DEFAULT_RETRY_BASE_DELAY_MS = 1_000;
 const DEFAULT_RETRY_MAX_DELAY_MS = 30_000;
 
 /**
- * The Circles RPC affiliate methods are being renamed (…AffiliateGroup…→…Community…)
- * on the Nethermind plugin. We try the NEW name first and fall back to the OLD on
- * `-32601 Method not found`, caching the winner, so the worker keeps working on
- * nodes before AND after the rename ships. Only used in `rpc` membership mode.
+ * The Circles RPC affiliate methods were renamed (…AffiliateGroup…→…Community…)
+ * on the Nethermind plugin and the new names are live on staging and prod.
+ * We try the NEW name first and fall back to the OLD on `-32601 Method not found`,
+ * caching the winner, so the worker also keeps working against a node still on a
+ * pre-rename image. The fallback is legacy — drop it once no such node remains.
+ * Only used in `rpc` membership mode.
  */
 type MethodPair = {primary: string; fallback: string};
 const RENAMED_METHODS: Record<"membersWishlist" | "members" | "fees", MethodPair> = {
@@ -88,11 +90,11 @@ export class AffiliateGroupsRpcService implements IAffiliateGroupsRpc {
   }
 
   /**
-   * Startup probe: verifies the community/affiliate wishlist RPC method exists on
-   * the configured node. These methods are not served by every Circles RPC (prod
-   * `rpc.aboutcircles.com` returns `-32601 Method not found`). A single-page call
-   * surfaces a wrong-endpoint misconfiguration at boot instead of after a poll
-   * cycle. Tolerates the …Affiliate…→…Community… rename via fallback.
+   * Startup probe: verifies the community wishlist RPC method exists on the
+   * configured node. Staging and prod both serve it, but a plain chain RPC does
+   * not — a single-page call surfaces a wrong-endpoint misconfiguration at boot
+   * instead of after a poll cycle. Tolerates the …Affiliate…→…Community… rename
+   * via fallback.
    */
   async assertAffiliateMethodsAvailable(groupAddress: string): Promise<void> {
     const group = normalizeAddress(groupAddress, "group");

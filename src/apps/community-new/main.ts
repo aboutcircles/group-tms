@@ -65,10 +65,13 @@ const runLogger = logger.child("run");
 const membershipSource = parseMembershipSource(process.env.COMMUNITY_NEW_MEMBERSHIP_SOURCE);
 const chainRpcUrl = process.env.RPC_URL || DEFAULT_COMMUNITY_RPC_URL;
 // The community RPC serves trustees + profile (minRepScore) reads and, in `rpc`
-// mode, the staging-only wishlist methods. In old/hybrid/new there is NO
-// staging-only dependency, so it must be the same prod chain as RPC_URL — fall
-// back to it (never the staging default) so the worker can't read staging trust
-// state on prod and untrust against it.
+// mode, the wishlist methods. Those are now served on prod as well as staging
+// (renamed …AffiliateGroup…→…Community… on the Nethermind plugin), so `rpc` mode
+// is no longer pinned to staging by capability — but the default below points at
+// staging deliberately. In old/hybrid/new there is no wishlist dependency at all,
+// so the URL must be the same prod chain as RPC_URL — fall back to it (never the
+// staging default) so the worker can't read staging trust state on prod and
+// untrust against it.
 const communityRpcUrl = process.env.COMMUNITY_NEW_RPC_URL
   || (membershipSource === "rpc" ? DEFAULT_COMMUNITY_RPC_URL : chainRpcUrl);
 const txRpcUrl = resolveTransactionRpcUrl(chainRpcUrl);
@@ -113,9 +116,10 @@ const testAddresses = parseAddressSet(process.env.COMMUNITY_NEW_TEST_ADDRESSES);
 const testBypassReputation = process.env.COMMUNITY_NEW_TEST_BYPASS_REPUTATION === "1";
 const needsNewMap = membershipSource === "registry" || membershipSource === "hybrid";
 const needsOldMap = membershipSource === "old" || membershipSource === "hybrid";
-// Per-member fees come from the staging-only wishlist RPC; only enforce them in
-// `rpc` mode. old/hybrid/new read the chain directly (prod RPC lacks the method)
-// and, like group-affiliates, apply no fee cap.
+// Per-member fees come from the wishlist RPC; only enforce them in `rpc` mode.
+// old/hybrid/new read the chain directly and, like group-affiliates, apply no fee
+// cap — a deliberate parity choice, not an RPC limitation (the fee method is
+// served on prod too since the community rename).
 const feeCapEnabled = membershipSource === "rpc";
 // Every chain-authoritative mode (old/hybrid/new) is a membership source of
 // truth, so it must UNTRUST departed/removed members — the `wishlist` policy,
@@ -271,10 +275,11 @@ async function start(): Promise<void> {
       logger.info("Affiliate wishlist RPC methods available on the configured node.");
     } catch (cause) {
       throw new Error(
-        `Affiliate wishlist RPC methods unavailable on ${communityRpcUrl} ` +
-        `(circles_getAffiliateGroupMembersWishlist). Set COMMUNITY_NEW_RPC_URL to a node that serves them ` +
-        `— prod rpc.aboutcircles.com currently returns -32601 Method not found — or use ` +
-        `COMMUNITY_NEW_MEMBERSHIP_SOURCE=registry to read membership from chain instead.`,
+        `Community wishlist RPC methods unavailable on ${communityRpcUrl} ` +
+        `(circles_getCommunityMembersWishlist, or the pre-rename circles_getAffiliateGroupMembersWishlist). ` +
+        `Both staging and prod serve these — check COMMUNITY_NEW_RPC_URL points at a Circles RPC host ` +
+        `(not a plain chain RPC), or use COMMUNITY_NEW_MEMBERSHIP_SOURCE=registry to read membership ` +
+        `from chain instead.`,
         {cause: asError(cause)}
       );
     }

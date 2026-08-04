@@ -40,7 +40,7 @@ Specialized services for Circles protocol trust management:
 * Supports dry-run mode with optional Safe transaction simulation
 
 ## Community New App
-* Reads multi-affiliate community intent from `circles_getAffiliateGroupMembersWishlist`
+* Reads multi-affiliate community intent from `circles_getCommunityMembersWishlist`
 * Loads each managed group's `minRepScore` and checks every intended member's reputation
 * Enforces the aggregate community membership-fee cap (`totalFeePercentage <= 100`)
 * Trusts eligible intended members and untrusts members that become ineligible
@@ -334,7 +334,7 @@ VERBOSE_LOGGING=1
 # Chain reads (getLogs, eth_blockNumber) and Safe writes.
 RPC_URL=https://rpc.aboutcircles.com/
 TX_RPC_URL=https://your-write-rpc.example/       # optional
-# Only used by MEMBERSHIP_SOURCE=rpc (staging-only wishlist methods).
+# Only used by MEMBERSHIP_SOURCE=rpc (the wishlist methods; served on staging and prod).
 COMMUNITY_NEW_RPC_URL=https://rpc.staging.aboutcircles.com
 
 # Comma-separated groups managed by this worker (BaseGroups). Defaults to the
@@ -343,7 +343,8 @@ COMMUNITY_NEW_RPC_URL=https://rpc.staging.aboutcircles.com
 COMMUNITY_NEW_GROUP_ADDRESSES=0x4E2564e5df6C1Fb10C1A018538de36E4D5844DE5,0x2709757a543CF1BF4d92586b73d3891438b2589d,0xEEcAe593589a6eE4a12AE64F19420B47F3112Fa9
 
 # --- Membership source: where the worker reads group intent from ---
-#   rpc     — staging-only wishlist RPC (dev/staging only).
+#   rpc     — indexer wishlist RPC (dev/staging only, by policy — the methods
+#             themselves are served on prod too).
 #   old     — OLD single-slot registry (0xca8222) via AffiliateGroupChanged;
 #             byte-identical to group-affiliates (prod parity baseline).
 #   hybrid  — OLD registry for everyone EXCEPT COMMUNITY_NEW_TEST_ADDRESSES,
@@ -410,11 +411,12 @@ COMMUNITY_NEW_RPC_TIMEOUT_MS=30000
 COMMUNITY_NEW_RPC_MAX_PAGES=500
 COMMUNITY_NEW_ERRORS_BEFORE_CRASH=5
 
-# Group criteria and reputation lookups. The fee cap uses a staging-only RPC and
-# is only enforced in `rpc` mode; old/hybrid/new run with no fee cap (parity with
-# group-affiliates). In prod the reputation base URL is set to the in-network,
-# address-indexed endpoint (…/groups/0x93ed5a96…/avatars) so a slug rename cannot
-# 404 it; the public `score_group_v2` slug below is the code default fallback.
+# Group criteria and reputation lookups. The fee cap is only enforced in `rpc`
+# mode; old/hybrid/new run with no fee cap (parity with group-affiliates — a
+# deliberate choice, not an RPC limitation). In prod the reputation base URL is
+# set to the in-network, address-indexed endpoint (…/groups/0x93ed5a96…/avatars)
+# so a slug rename cannot 404 it; the public `score_group_v2` slug below is the
+# code default fallback.
 COMMUNITY_NEW_PROFILE_TIMEOUT_MS=30000
 COMMUNITY_NEW_REPUTATION_BASE_URL=                 # required only when bulk mode is disabled
 COMMUNITY_NEW_REPUTATION_SCORES_URL=https://rpc.aboutcircles.com/analytics/rep_score/groups/score_group_v2/scores

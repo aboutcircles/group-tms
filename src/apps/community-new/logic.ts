@@ -50,11 +50,12 @@ export type CommunityRunConfig = {
   maxTotalFeePercentage?: number;
   /**
    * Whether to fetch + enforce the per-member affiliate fee cap. Default true.
-   * The fee data comes from `circles_getAffiliateGroupFeesPercentage`, which is
-   * only served on the staging RPC. On prod (old/hybrid/new membership sources)
-   * this must be false — group-affiliates has no fee cap, and calling the missing
-   * method would throw. When false, fees are treated as unbounded (never a reason
-   * for ineligibility) and the fee RPC is never called.
+   * The fee data comes from `circles_getAvatarCommunityFeesPercentage` (served on
+   * staging and prod since the circles-nethermind-plugin community rename; the
+   * pre-rename `circles_getAffiliateGroupFeesPercentage` is gone). In old/hybrid/new
+   * membership modes this must be false for parity — group-affiliates has no fee
+   * cap. When false, fees are treated as unbounded (never a reason for
+   * ineligibility) and the fee RPC is never called.
    */
   feeCapEnabled?: boolean;
   dryRun?: boolean;
@@ -69,8 +70,8 @@ export type CommunityRunConfig = {
   /**
    * Membership source override. When provided for a group, this set (e.g. the
    * on-chain-derived {@link AffiliateMultiMap} members) is used as the wishlist
-   * instead of calling the wishlist RPC — removing the dependency on the
-   * staging-only `circles_getAffiliateGroupMembersWishlist` method.
+   * instead of calling the wishlist RPC — removing the dependency on
+   * `circles_getCommunityMembersWishlist` and on indexer freshness.
    */
   wishlistOverrideByGroup?: Record<string, ReadonlySet<string>>;
   /**
