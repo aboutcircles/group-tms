@@ -1,0 +1,116 @@
+name: Deploy to Production
+
+# Production deployments are MANUAL ONLY — no auto-deploy on push or tag.
+# Go to Actions → "Deploy to Production" → Run workflow → Click "Run workflow"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type 'production' to confirm"
+        required: true
+        type: string
+
+concurrency:
+  group: deploy-group-tms-production
+  cancel-in-progress: false
+
+permissions:
+  checks: read
+  contents: read
+  packages: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm production deployment
+        env:
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          if [ "$CONFIRM" != "production" ]; then
+            echo "::error::You must type 'production' to confirm. Got: '$CONFIRM'"
+            exit 1
+          fi
+          echo "Production deployment confirmed by ${{ github.actor }}"
+
+  build-and-push:
+    needs: [validate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/aboutcircles/group-tms
+          tags: |
+            type=raw,value=production
+            type=sha,prefix=
+
+      - name: Build & push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  trigger-deploy:
+    needs: [build-and-push]
+    if: needs.build-and-push.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger infrastructure deployment (production)
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.ANSIBLE_REPO_PAT }}
+          repository: ${{ secrets.ANSIBLE_REPO }}
+          event-type: deploy-circles-smart
+          client-payload: |
+            {
+              "environment": "production",
+              "image": "ghcr.io/aboutcircles/group-tms",
+              "image_tag": "production",
+              "commit_sha": "${{ github.sha }}",
+              "triggered_by": "${{ github.actor }}",
+              "source_repo": "${{ github.repository }}",
+              "deploy": {
+                "group_tms": "true"
+              }
+            }
+
+      - name: Deployment summary
+        env:
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          {
+            echo "## Production Deployment Triggered"
+            echo ""
+            echo "| Target | Status |"
+            echo "|--------|--------|"
+            echo "| Production (Ansible rolling deploy) | Triggered |"
+            echo ""
+            echo "- Image: \`ghcr.io/aboutcircles/group-tms:production\`"
+            echo "- Commit: \`${SHA}\`"
+            echo "- Triggered by: ${ACTOR}"
+            echo ""
+            echo "Monitor: [Infrastructure workflow](https://github.com/aboutcircles/aboutcircles-infrastructure/actions)"
+          } >> "$GITHUB_STEP_SUMMARY"
