@@ -46,6 +46,58 @@ describe("isTransientRpcError", () => {
     expect(isTransientRpcError(null)).toBe(false);
     expect(isTransientRpcError(undefined)).toBe(false);
   });
+
+  // sdk-rpc reports a rate limit as a generic connection failure and puts the
+  // 429 on .cause. Classifying only the outer error reads that as permanent.
+  it("returns true for a 429 wrapped as .cause behind an opaque message", () => {
+    const wrapped = new Error("Failed to connect to RPC endpoint", {
+      cause: new Error("HTTP 429: Too Many Requests")
+    });
+    expect(isTransientRpcError(wrapped)).toBe(true);
+  });
+
+  it("returns true for a 429 nested two causes deep", () => {
+    const inner = new Error("HTTP 429: Too Many Requests");
+    const middle = new Error("request failed", {cause: inner});
+    const outer = new Error("Failed to connect to RPC endpoint", {cause: middle});
+    expect(isTransientRpcError(outer)).toBe(true);
+  });
+
+  it("returns false when nothing in the cause chain is transient", () => {
+    const wrapped = new Error("Failed to connect to RPC endpoint", {
+      cause: new Error("execution reverted")
+    });
+    expect(isTransientRpcError(wrapped)).toBe(false);
+  });
+
+  it("terminates on a circular cause chain", () => {
+    const a: any = new Error("outer boom");
+    const b: any = new Error("inner boom");
+    a.cause = b;
+    b.cause = a;
+    expect(isTransientRpcError(a)).toBe(false);
+  });
+
+  it("terminates when an error is its own cause", () => {
+    const self: any = new Error("self boom");
+    self.cause = self;
+    expect(isTransientRpcError(self)).toBe(false);
+  });
+
+  // The data-less CALL_EXCEPTION heuristic guesses that the node failed to
+  // simulate. A nested one says nothing about the call we made, and honouring it
+  // would retry genuine reverts.
+  it("ignores a data-less CALL_EXCEPTION found in the cause chain", () => {
+    const wrapped: any = new Error("trust simulation failed", {
+      cause: Object.assign(new Error("call exception"), {code: "CALL_EXCEPTION", data: null})
+    });
+    expect(isTransientRpcError(wrapped)).toBe(false);
+  });
+
+  it("still honours a data-less CALL_EXCEPTION on the outermost error", () => {
+    const err: any = Object.assign(new Error("call exception"), {code: "CALL_EXCEPTION", data: null});
+    expect(isTransientRpcError(err)).toBe(true);
+  });
 });
 
 describe("retryWithBackoff", () => {

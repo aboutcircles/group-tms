@@ -23,7 +23,16 @@ const TRANSIENT_CODES = new Set<number>([
 /** Match "429" only as a standalone token, not inside larger numbers like "42900001". */
 const RATE_LIMIT_PATTERN = /\b429\b/;
 
-export function isTransientRpcError(err: unknown): boolean {
+/** How deep to follow .cause / .error before giving up. */
+const MAX_CAUSE_DEPTH = 8;
+
+/**
+ * Classifies a single error object, ignoring any wrapped cause.
+ * `allowCallExceptionHeuristic` is only set for the outermost error: a nested
+ * CALL_EXCEPTION says nothing about whether the operation we invoked is worth
+ * retrying, and treating it as transient would retry genuine reverts.
+ */
+function isTransientRpcErrorShallow(err: unknown, allowCallExceptionHeuristic: boolean): boolean {
   if (err == null) return false;
   const msg = String((err as any)?.message ?? err);
   const code = ((err as any)?.code ?? (err as any)?.error?.code) as number | undefined;
@@ -36,13 +45,43 @@ export function isTransientRpcError(err: unknown): boolean {
   // ethers CALL_EXCEPTION with data strictly null/undefined = RPC failed to simulate
   // (returned no revert payload at all). data="0x" means a real bare revert() — not transient.
   // Caveat: some RPCs omit revert data even for genuine reverts. This is a best-effort heuristic.
-  const ethersCode = (err as any)?.code as string | undefined;
-  if (ethersCode === "CALL_EXCEPTION") {
-    const d = (err as any)?.data;
-    if (d === null || d === undefined) return true;
+  if (allowCallExceptionHeuristic) {
+    const ethersCode = (err as any)?.code as string | undefined;
+    if (ethersCode === "CALL_EXCEPTION") {
+      const d = (err as any)?.data;
+      if (d === null || d === undefined) return true;
+    }
   }
 
   return TRANSIENT_MESSAGES.some((t) => msg.includes(t));
+}
+
+/**
+ * True when the error, or anything in its `.cause` / `.error` chain, is a
+ * transient RPC failure.
+ *
+ * Walking the chain is required, not cosmetic: `@aboutcircles/sdk-rpc` reports a
+ * rate limit as `RpcError: Failed to connect to RPC endpoint` and puts the
+ * `HTTP 429: Too Many Requests` on `.cause`, so a top-level-only check reads it
+ * as permanent and never retries. The chain can be circular, so track visited
+ * nodes and cap the depth.
+ */
+export function isTransientRpcError(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && current != null; depth++) {
+    if (seen.has(current)) return false;
+    seen.add(current);
+
+    if (isTransientRpcErrorShallow(current, depth === 0)) return true;
+
+    const next = (current as any)?.cause ?? (current as any)?.error;
+    if (next === current) return false;
+    current = next;
+  }
+
+  return false;
 }
 
 export interface RetryOptions {
