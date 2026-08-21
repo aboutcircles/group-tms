@@ -16,6 +16,7 @@ import {startMetricsServer, recordRunSuccess, recordRunError} from "../../servic
 import {ensureRpcHealthyOrNotify} from "../../services/rpcHealthService";
 import {resolveTransactionRpcUrl} from "../../services/transactionRpc";
 import {createProvider, primaryRpcUrl} from "../../services/rpcProvider";
+import {mapPacedChunks, PacedChunkOptions} from "../../services/pacedChunks";
 import {formatErrorWithCauses} from "../../formatError";
 import {
   runBackfill,
@@ -42,9 +43,20 @@ const TRUST_BATCH_ABI = [
   "function optOuts(address) view returns (bool)"
 ];
 const TX_CONFIRMATION_TIMEOUT_MS = 5 * 60 * 1_000;
-const READ_CONCURRENCY = 25;
 const REGISTERED_HUMAN_LOOKUP_BATCH = 500;
 const AVATAR_INFO_LOOKUP_BATCH = 500;
+
+// The Circles RPC host rate-limits per client IP with a token bucket that counts
+// JSON-RPC *batch items* individually (100 tokens/s sustained, 200 burst). ethers
+// packs the concurrent eth_calls of one chunk into a single batch, so a chunk of
+// N reads costs ~N tokens at once. Chunks used to run back to back with no gap,
+// which drained the whole burst in milliseconds and made the next call fail with
+// HTTP 429, often a call as cheap as a one-token circles_getAvatarInfoBatch.
+//
+// DEFAULT_READ_CHUNK_DELAY_MS keeps the sustained rate under the server budget:
+// 25 items per 300ms is ~83/s. Retry stays as the safety net for the rest.
+const DEFAULT_READ_CONCURRENCY = 25;
+const DEFAULT_READ_CHUNK_DELAY_MS = 300;
 
 const verboseLogging = !!process.env.VERBOSE_LOGGING;
 const rootLogger = new LoggerService(verboseLogging, APP_NAME);
@@ -70,6 +82,8 @@ const scoreThreshold = parseEnvFloat("NEW_GNOSIS_SCORE_THRESHOLD", DEFAULT_SCORE
 const scoreBatchSize = Math.max(1, parseEnvInt("NEW_GNOSIS_SCORE_BATCH_SIZE", DEFAULT_TRUST_SCORE_BATCH_SIZE));
 const scoreFetchTimeoutMs = Math.max(1_000, parseEnvInt("NEW_GNOSIS_SCORE_FETCH_TIMEOUT_MS", DEFAULT_TRUST_SCORE_TIMEOUT_MS));
 const cutoffBlock = parseEnvInt("NEW_GNOSIS_CUTOFF_BLOCK", DEFAULT_CUTOFF_BLOCK);
+const readConcurrency = Math.max(1, parseEnvInt("NEW_GNOSIS_READ_CONCURRENCY", DEFAULT_READ_CONCURRENCY));
+const readChunkDelayMs = Math.max(0, parseEnvInt("NEW_GNOSIS_READ_DELAY_MS", DEFAULT_READ_CHUNK_DELAY_MS));
 const errorsBeforeCrash = 3;
 
 if (!dryRun && signerPrivateKey.trim().length === 0) {
@@ -455,15 +469,18 @@ async function fetchOutgoingTrustees(rpc: CirclesRpc, truster: string): Promise<
  */
 async function filterHumanAvatars(rpc: CirclesRpc, addresses: string[]): Promise<Set<string>> {
   const result = new Set<string>();
-  for (let i = 0; i < addresses.length; i += AVATAR_INFO_LOOKUP_BATCH) {
-    const chunk = addresses.slice(i, i + AVATAR_INFO_LOOKUP_BATCH);
-    const infos = await rpc.avatar.getAvatarInfoBatch(chunk as `0x${string}`[]);
-    for (const info of infos) {
-      if (info.type === "CrcV2_RegisterHuman") {
-        result.add(info.avatar.toLowerCase());
+  await mapPacedChunks(
+    addresses,
+    {...readPacing(), chunkSize: AVATAR_INFO_LOOKUP_BATCH},
+    async (chunk) => {
+      const infos = await rpc.avatar.getAvatarInfoBatch(chunk as `0x${string}`[]);
+      for (const info of infos) {
+        if (info.type === "CrcV2_RegisterHuman") {
+          result.add(info.avatar.toLowerCase());
+        }
       }
     }
-  }
+  );
   return result;
 }
 
@@ -483,8 +500,7 @@ async function filterTrustSimulated(
 ): Promise<Set<string>> {
   const overrides = from ? {from} : {};
   const result = new Set<string>();
-  for (let i = 0; i < addresses.length; i += READ_CONCURRENCY) {
-    const chunk = addresses.slice(i, i + READ_CONCURRENCY);
+  await mapPacedChunks(addresses, readPacing(), async (chunk) => {
     const outcomes = await Promise.all(chunk.map(async (a) => {
       try {
         await contract.trust.staticCall(a, overrides);
@@ -497,17 +513,16 @@ async function filterTrustSimulated(
     chunk.forEach((a, idx) => {
       if (outcomes[idx]) result.add(a.toLowerCase());
     });
-  }
+  });
   return result;
 }
 
 async function fetchIsOptedOutBatch(contract: Contract, addresses: string[]): Promise<Map<string, boolean>> {
   const result = new Map<string, boolean>();
-  for (let i = 0; i < addresses.length; i += READ_CONCURRENCY) {
-    const chunk = addresses.slice(i, i + READ_CONCURRENCY);
+  await mapPacedChunks(addresses, readPacing(), async (chunk) => {
     const flags = await Promise.all(chunk.map((a) => contract.optOuts(a) as Promise<boolean>));
     chunk.forEach((a, idx) => result.set(a.toLowerCase(), flags[idx] === true));
-  }
+  });
   return result;
 }
 
@@ -531,6 +546,11 @@ async function fetchRegisteredHumans(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Pacing applied to every batched on-chain read, so no single phase can drain the RPC rate-limit bucket. */
+function readPacing(): PacedChunkOptions {
+  return {chunkSize: readConcurrency, delayMs: readChunkDelayMs};
 }
 
 function parseEnvInt(name: string, fallback: number): number {
