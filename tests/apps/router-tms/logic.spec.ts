@@ -551,7 +551,7 @@ describe("router-tms runOnce", () => {
     expect(outcome.failedBatches).toHaveLength(1);
     expect(outcome.txHashes).toEqual([]);
     // Single-address batch quarantines the address directly
-    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
+    expect(outcome.newlyQuarantinedAddresses.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
   });
 
   it("falls back to individual simulation when batch fails, retries with valid addresses", async () => {
@@ -579,7 +579,7 @@ describe("router-tms runOnce", () => {
     expect(outcome.executedEnableCount).toBe(2);
     expect(outcome.txHashes).toHaveLength(1);
     expect(outcome.failedBatches).toHaveLength(0);
-    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
+    expect(outcome.newlyQuarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
 
     // Enablement store should contain Alice and Carol, not Bob
     const enabled = await enablementStore.loadEnablementStatuses().then(s => s.map(e => e.avatar));
@@ -609,7 +609,7 @@ describe("router-tms runOnce", () => {
 
     expect(outcome.executedEnableCount).toBe(0);
     expect(outcome.failedBatches).toHaveLength(1);
-    expect(outcome.quarantinedAddresses).toHaveLength(2);
+    expect(outcome.newlyQuarantinedAddresses).toHaveLength(2);
     expect(outcome.txHashes).toEqual([]);
   });
 
@@ -634,7 +634,7 @@ describe("router-tms runOnce", () => {
     // No fallback → addresses are NOT quarantined, batch recorded as failed
     expect(outcome.executedEnableCount).toBe(0);
     expect(outcome.failedBatches).toHaveLength(1);
-    expect(outcome.quarantinedAddresses).toHaveLength(0);
+    expect(outcome.newlyQuarantinedAddresses).toHaveLength(0);
   });
 
   it("retry batch after fallback also fails — still records quarantined addresses", async () => {
@@ -664,7 +664,7 @@ describe("router-tms runOnce", () => {
     const outcome = await runOnce(deps, cfg);
 
     // Bob should still be quarantined even though retry also failed
-    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
+    expect(outcome.newlyQuarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
     // The retry batch (Alice, Carol) still failed
     expect(outcome.failedBatches).toHaveLength(1);
     expect(outcome.executedEnableCount).toBe(0);
@@ -686,7 +686,7 @@ describe("router-tms runOnce", () => {
     const outcome = await runOnce(deps, cfg);
 
     expect(outcome.executedEnableCount).toBe(0);
-    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanAlice.toLowerCase()]);
+    expect(outcome.newlyQuarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanAlice.toLowerCase()]);
     expect(outcome.failedBatches).toHaveLength(1);
     // No simulation calls were made (skipped probe phase for single-address batch)
     expect(routerService.simulationCalls).toBe(0);
@@ -736,7 +736,7 @@ describe("router-tms runOnce", () => {
     const outcome = await runOnce(deps, cfg);
 
     // Bob is quarantined (genuine revert), Carol is NOT (transient error)
-    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
+    expect(outcome.newlyQuarantinedAddresses.map(a => a.toLowerCase())).toEqual([humanBob.toLowerCase()]);
     // Alice + Carol succeed in the retry (Carol kept in good list despite transient error)
     expect(outcome.executedEnableCount).toBe(2);
     expect(outcome.txHashes).toHaveLength(1);
@@ -803,7 +803,7 @@ describe("Safe-level error short-circuit in batch fallback", () => {
     const outcome = await runOnce(deps, cfg);
 
     // No addresses should be quarantined — GS026 is a Safe-level error
-    expect(outcome.quarantinedAddresses).toHaveLength(0);
+    expect(outcome.newlyQuarantinedAddresses).toHaveLength(0);
     // Batch should be recorded as failed with safe-level failureType
     expect(outcome.failedBatches).toHaveLength(1);
     expect(outcome.failedBatches[0].failureType).toBe("safe-level");
@@ -834,7 +834,7 @@ describe("Safe-level error short-circuit in batch fallback", () => {
     const outcome = await runOnce(deps, cfg);
 
     // All batches fail but NO addresses quarantined
-    expect(outcome.quarantinedAddresses).toHaveLength(0);
+    expect(outcome.newlyQuarantinedAddresses).toHaveLength(0);
     expect(outcome.failedBatches.length).toBeGreaterThan(0);
     expect(routerService.simulationCalls).toBe(0);
   });
@@ -860,7 +860,7 @@ describe("Safe-level error short-circuit in batch fallback", () => {
     const outcome = await runOnce(deps, cfg);
 
     // Both addresses should be quarantined (non-Safe-level error, existing behavior)
-    expect(outcome.quarantinedAddresses).toHaveLength(2);
+    expect(outcome.newlyQuarantinedAddresses).toHaveLength(2);
     // FailedBatch should have address-specific failureType
     expect(outcome.failedBatches).toHaveLength(1);
     expect(outcome.failedBatches[0].failureType).toBe("address-specific");
@@ -895,7 +895,7 @@ describe("Quarantine persistence across runs", () => {
     // Alice was already quarantined, so only Bob and Carol should be enabled
     expect(outcome.executedEnableCount).toBe(2);
     // No NEW quarantine this run
-    expect(outcome.quarantinedAddresses).toHaveLength(0);
+    expect(outcome.newlyQuarantinedAddresses).toHaveLength(0);
   });
 
   it("persists newly quarantined addresses for subsequent runs", async () => {
@@ -918,8 +918,8 @@ describe("Quarantine persistence across runs", () => {
     const outcome = await runOnce(deps, cfg);
 
     // Alice quarantined from simulation probe, Bob succeeded via retry
-    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
-    expect(outcome.quarantinedAddresses.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
+    expect(outcome.newlyQuarantinedAddresses.map(a => a.toLowerCase())).toContain(humanAlice.toLowerCase());
+    expect(outcome.newlyQuarantinedAddresses.map(a => a.toLowerCase())).not.toContain(humanBob.toLowerCase());
     expect(outcome.executedEnableCount).toBe(1); // Only Bob executed
 
     // Alice should be persisted in quarantine store

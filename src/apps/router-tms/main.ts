@@ -1,6 +1,7 @@
 import {CirclesRpcService} from "../../services/circlesRpcService";
 import {LoggerService} from "../../services/loggerService";
 import {SlackService} from "../../services/slackService";
+import {validateSafeOwnershipOrExit} from "../../services/startupValidation";
 import {SlackSeverity} from "../../interfaces/ISlackService";
 import {RouterService} from "../../services/routerService";
 import {BlacklistingService} from "../../services/blacklistingService";
@@ -253,14 +254,14 @@ async function mainLoop(): Promise<void> {
           `pending=${outcome.pendingEnableCount} ` +
           `executed=${outcome.executedEnableCount} ` +
           `failedBatches=${outcome.failedBatches.length} ` +
-          `quarantined=${outcome.quarantinedAddresses.length}`
+          `newlyQuarantined=${outcome.newlyQuarantinedAddresses.length}`
       );
-      if (outcome.quarantinedAddresses.length > 0) {
+      if (outcome.newlyQuarantinedAddresses.length > 0) {
         runLogger.warn(
-          `Quarantined ${outcome.quarantinedAddresses.length} address(es) that cause on-chain reverts: ` +
-          outcome.quarantinedAddresses.join(", ")
+          `Quarantined ${outcome.newlyQuarantinedAddresses.length} address(es) that cause on-chain reverts: ` +
+          outcome.newlyQuarantinedAddresses.join(", ")
         );
-        void notifySlackQuarantine(outcome.quarantinedAddresses).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
+        void notifySlackQuarantine(outcome.newlyQuarantinedAddresses).catch((e) => rootLogger.warn("Failed to send Slack notification:", e));
       }
       if (outcome.failedBatches.length > 0) {
         for (const fb of outcome.failedBatches) {
@@ -294,24 +295,12 @@ async function mainLoop(): Promise<void> {
 }
 
 async function start(): Promise<void> {
-  if (routerService) {
-    try {
-      await routerService.validateSafeOwnership();
-      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      rootLogger.error(`Safe ownership validation FAILED: ${errorMessage}`);
-      try {
-        await slackService.notifySlackStartOrCrash(
-          `🚨 *Router-TMS Safe ownership check failed*\n\n${errorMessage}`,
-          SlackSeverity.CRITICAL
-        );
-      } catch (slackErr) {
-        rootLogger.warn("Failed to send Slack ownership failure notification:", slackErr);
-      }
-      process.exit(1);
-    }
-  }
+  await validateSafeOwnershipOrExit({
+    validate: routerService?.validateSafeOwnership.bind(routerService),
+    appLabel: "Router-TMS",
+    logger: rootLogger,
+    slack: slackService
+  });
   await mainLoop();
 }
 
