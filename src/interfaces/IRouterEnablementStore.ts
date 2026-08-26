@@ -26,7 +26,12 @@ export interface IRouterEnablementStore {
 
   /**
    * Records the provided addresses as quarantined (cause on-chain reverts).
-   * Each entry starts a fresh TTL from the time of this call.
+   *
+   * Every address passed in gets a fresh TTL running from this call, including
+   * one that was already quarantined. Callers that want an existing entry to
+   * expire on its original schedule must therefore filter it out rather than
+   * re-submit it, which is what `runOnce` does when it passes only the newly
+   * quarantined addresses.
    */
   markQuarantined(addresses: string[]): Promise<void>;
 }

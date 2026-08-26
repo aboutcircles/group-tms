@@ -43,28 +43,23 @@ describe("AffiliateGroupsRpcService", () => {
     expect(secondBody.params).toEqual([GROUP, 50, "opaque-page-2"]);
   });
 
-  it("falls back to the legacy affiliate method name on -32601 (rename transition)", async () => {
+  it("fails on method-not-found instead of retrying the pre-rename method name", async () => {
     const fetchMock = global.fetch as jest.Mock;
-    fetchMock
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        statusText: "OK",
-        json: async () => ({jsonrpc: "2.0", id: 1, error: {code: -32601, message: "Method not found"}})
-      })
-      .mockResolvedValueOnce(rpcResponse({
-        results: [{avatarName: null, avatarAddress: AVATAR_A, timestamp: 1}],
-        hasMore: false,
-        nextCursor: null
-      }));
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({jsonrpc: "2.0", id: 1, error: {code: -32601, message: "Method not found"}})
+    });
     const service = new AffiliateGroupsRpcService(RPC_URL);
 
-    await expect(service.fetchAllGroupMembersWishlist(GROUP, 10)).resolves.toEqual([
-      {avatarName: null, avatarAddress: AVATAR_A, timestamp: 1}
-    ]);
-    // Tries the NEW name first, then falls back to the OLD name on method-not-found.
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body).method).toBe("circles_getCommunityMembersWishlist");
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body).method).toBe("circles_getAffiliateGroupMembersWishlist");
+    await expect(service.fetchAllGroupMembersWishlist(GROUP, 10))
+      .rejects
+      .toThrow("RPC error -32601: Method not found");
+    // Only the community name is ever sent; the …AffiliateGroup… fallback is gone.
+    for (const call of fetchMock.mock.calls) {
+      expect(JSON.parse(call[1].body).method).toBe("circles_getCommunityMembersWishlist");
+    }
   });
 
   it("reads and validates an avatar's aggregate wishlist fee", async () => {

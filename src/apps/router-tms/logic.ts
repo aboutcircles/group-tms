@@ -47,7 +47,13 @@ export type RunOutcome = {
   pendingEnableCount: number;
   executedEnableCount: number;
   failedBatches: FailedBatch[];
-  quarantinedAddresses: string[];
+  /**
+   * Addresses quarantined by THIS run only, not the full quarantine set. Already
+   * quarantined addresses are excluded so their TTL is not reset (see
+   * `IRouterEnablementStore.markQuarantined`), which also makes this the right
+   * value to alert on: it is non-empty only when something newly broke.
+   */
+  newlyQuarantinedAddresses: string[];
   dryRun: boolean;
   txHashes: string[];
 };
@@ -201,7 +207,7 @@ export async function runForHumanAvatars(
       pendingEnableCount: 0,
       executedEnableCount: 0,
       failedBatches: [],
-      quarantinedAddresses: [],
+      newlyQuarantinedAddresses: [],
       dryRun,
       txHashes: []
     };
@@ -316,7 +322,7 @@ export async function runForHumanAvatars(
     pendingEnableCount,
     executedEnableCount: dryRun ? 0 : executedEnableCount,
     failedBatches,
-    quarantinedAddresses: newlyQuarantined,
+    newlyQuarantinedAddresses: newlyQuarantined,
     dryRun,
     txHashes
   };

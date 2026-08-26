@@ -275,9 +275,9 @@ async function start(): Promise<void> {
       logger.info("Affiliate wishlist RPC methods available on the configured node.");
     } catch (cause) {
       throw new Error(
-        `Community wishlist RPC methods unavailable on ${communityRpcUrl} ` +
-        `(circles_getCommunityMembersWishlist, or the pre-rename circles_getAffiliateGroupMembersWishlist). ` +
-        `Both staging and prod serve these — check COMMUNITY_NEW_RPC_URL points at a Circles RPC host ` +
+        `Community wishlist RPC method circles_getCommunityMembersWishlist is unavailable on ` +
+        `${communityRpcUrl}. ` +
+        `Both staging and prod serve it — check COMMUNITY_NEW_RPC_URL points at a Circles RPC host ` +
         `(not a plain chain RPC), or use COMMUNITY_NEW_MEMBERSHIP_SOURCE=registry to read membership ` +
         `from chain instead.`,
         {cause: asError(cause)}

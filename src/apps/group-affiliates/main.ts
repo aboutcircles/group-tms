@@ -10,6 +10,7 @@ import { recordRunError, recordRunSuccess, startMetricsServer } from "../../serv
 import { resolveTransactionRpcUrl } from "../../services/transactionRpc";
 import { SafeGroupService } from "../../services/safeGroupService";
 import { SlackService } from "../../services/slackService";
+import { validateSafeOwnershipOrExit } from "../../services/startupValidation";
 import { StateStore } from "../../services/stateStore";
 import { CirclesRpcService } from "../../services/circlesRpcService";
 import { AffiliateMap } from "./affiliateMap";
@@ -163,20 +164,12 @@ process.on("unhandledRejection", async (reason) => {
 async function start(): Promise<void> {
   startMetricsServer(APP_NAME);
 
-  if (groupService.validateSafeOwnership) {
-    try {
-      await groupService.validateSafeOwnership();
-      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      rootLogger.error(`Safe ownership validation FAILED: ${message}`);
-      await slackService.notifySlackStartOrCrash(
-        `🚨 *Group Affiliates Safe ownership check failed*\n\n${message}`,
-        SlackSeverity.CRITICAL
-      ).catch((slackError) => rootLogger.warn("Failed to send Slack ownership failure notification:", slackError));
-      process.exit(1);
-    }
-  }
+  await validateSafeOwnershipOrExit({
+    validate: groupService.validateSafeOwnership?.bind(groupService),
+    appLabel: "Group Affiliates",
+    logger: rootLogger,
+    slack: slackService
+  });
 
   await notifySlackStartup();
 

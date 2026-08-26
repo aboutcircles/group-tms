@@ -4,6 +4,7 @@ import {CirclesRpcService} from "../../services/circlesRpcService";
 import {IGroupService} from "../../interfaces/IGroupService";
 import {SafeGroupService} from "../../services/safeGroupService";
 import {SlackService} from "../../services/slackService";
+import {validateSafeOwnershipOrExit} from "../../services/startupValidation";
 import {SlackSeverity} from "../../interfaces/ISlackService";
 import {
   runOnce,
@@ -294,24 +295,12 @@ async function refreshBlacklist(): Promise<void> {
 }
 
 async function start(): Promise<void> {
-  if (groupService?.validateSafeOwnership) {
-    try {
-      await groupService.validateSafeOwnership();
-      rootLogger.info("Safe ownership validation passed — signer is a registered owner.");
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
-      rootLogger.error(`Safe ownership validation FAILED: ${errorMessage}`);
-      try {
-        await slackService.notifySlackStartOrCrash(
-          `🚨 *gnosis-group Safe ownership check failed*\n\n${errorMessage}`,
-          SlackSeverity.CRITICAL
-        );
-      } catch (slackErr) {
-        rootLogger.warn("Failed to send Slack ownership failure notification:", slackErr);
-      }
-      process.exit(1);
-    }
-  }
+  await validateSafeOwnershipOrExit({
+    validate: groupService?.validateSafeOwnership?.bind(groupService),
+    appLabel: "gnosis-group",
+    logger: rootLogger,
+    slack: slackService
+  });
   await mainLoop();
 }
 
