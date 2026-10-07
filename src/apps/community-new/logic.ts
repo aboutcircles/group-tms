@@ -512,3 +512,39 @@ function chunk<T>(values: T[], size: number): T[][] {
   }
   return result;
 }
+
+/**
+ * Slack text for the untrusts a run sent, or null when it sent none (dry run
+ * included). Each address carries its reason: off the wishlist (the registry's
+ * leave signal) or the eligibility checks it failed.
+ */
+export function formatUntrustNotice(
+  outcome: Pick<CommunityRunOutcome, "untrustedByGroup" | "leftByGroup" | "ineligible" | "untrustTxHashes">
+): string | null {
+  if (outcome.untrustTxHashes.length === 0) return null;
+
+  const lines: string[] = [];
+  let total = 0;
+  for (const [group, addresses] of Object.entries(outcome.untrustedByGroup)) {
+    if (addresses.length === 0) continue;
+    lines.push(`Group ${group}:`);
+    const left = new Set(outcome.leftByGroup[group] ?? []);
+    for (const address of addresses) {
+      const failure = outcome.ineligible.find(
+        (entry) => entry.groupAddress === group && entry.avatarAddress === address
+      );
+      const reason = left.has(address)
+        ? "not on the wishlist"
+        : failure
+          ? `ineligible: ${failure.reasons.join(", ")}`
+          : "ineligible";
+      lines.push(`• ${address} (${reason})`);
+      total++;
+    }
+  }
+  return [
+    `*community-new untrusted ${total} address(es)*`,
+    ...lines,
+    `Tx: ${outcome.untrustTxHashes.join(", ")}`
+  ].join("\n");
+}
