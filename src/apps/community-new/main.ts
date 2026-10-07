@@ -28,6 +28,7 @@ import {
   DEFAULT_MAX_UNTRUST_TOTAL,
   DEFAULT_UNTRUST_MODE,
   UntrustMode,
+  formatUntrustNotice,
   runCommunityReconciliation
 } from "./logic";
 import {AffiliateMultiMap} from "./affiliateMultiMap";
@@ -369,6 +370,8 @@ async function start(): Promise<void> {
           `untrustTxs=${outcome.untrustTxHashes.length} ineligible=${outcome.ineligible.length} ` +
           `elapsedMs=${Date.now() - startedAt}`
         );
+        const untrustNotice = formatUntrustNotice(outcome);
+        if (untrustNotice) await notify(untrustNotice, SlackSeverity.INFO);
       }
     } catch (cause) {
       const error = asError(cause);
