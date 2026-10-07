@@ -28,6 +28,14 @@ import {
  */
 export const OLD_AFFILIATE_MAP_STATE_KEY = "community-new:old-affiliate-map";
 
+/**
+ * Blocks below the saved cursor that every refresh reads again. A reorg can move
+ * an AffiliateGroupChanged event into a block the map already scanned, and the
+ * re-read applies it. Events already applied are replayed in block order, which
+ * leaves the map unchanged. An event a reorg removed stays applied, as before.
+ */
+export const REORG_DEPTH_BLOCKS = 10;
+
 export type OldRegistrySourceOptions = {
   chainRpcUrl: string;
   wssUrl?: string;
@@ -81,7 +89,8 @@ export class OldRegistrySource {
   }
 
   /**
-   * Incremental getLogs catch-up to chain head + persist. Also the poll backstop.
+   * Incremental getLogs catch-up to chain head + persist, re-reading the last
+   * REORG_DEPTH_BLOCKS blocks. Also the poll backstop.
    * Resolves false when the head block could not be read, so the map was not
    * brought up to date; getLogs failures reject.
    */
@@ -92,8 +101,8 @@ export class OldRegistrySource {
   private async refreshInner(): Promise<boolean> {
     const head = await fetchCurrentBlockNumber(this.opts.chainRpcUrl);
     if (head === null) return false;
-    const from = Math.max(this.opts.startBlock, this.map.lastScannedBlock + 1);
-    if (from > head) return true;
+    if (head <= this.map.lastScannedBlock) return true;
+    const from = Math.max(this.opts.startBlock, this.map.lastScannedBlock + 1 - REORG_DEPTH_BLOCKS);
     const events = await fetchAffiliateGroupChangedEventsBetween(
       this.opts.chainRpcUrl,
       this.opts.registryAddress,

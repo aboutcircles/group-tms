@@ -1,6 +1,7 @@
 import {FakeLogger} from "../../../fakes/fakes";
 import {
   OldRegistrySource,
+  REORG_DEPTH_BLOCKS,
   refreshUnionProtectedTrustees
 } from "../../../src/apps/community-new/oldRegistrySource";
 import {
@@ -58,7 +59,7 @@ beforeEach(() => {
 });
 
 describe("OldRegistrySource.refresh", () => {
-  it("scans from the start block once, then only the blocks added since", async () => {
+  it("scans from the start block once, then only the blocks added since plus the reorg depth", async () => {
     const source = await createSource();
 
     headMock.mockResolvedValueOnce(5000);
@@ -71,9 +72,46 @@ describe("OldRegistrySource.refresh", () => {
 
     expect(eventsMock.mock.calls.map((call) => [call[2], call[3]])).toEqual([
       [START_BLOCK, 5000],
-      [5001, 5100]
+      [5001 - REORG_DEPTH_BLOCKS, 5100]
     ]);
     expect(source.getMembersByGroup([GROUP])).toEqual({[GROUP_LC]: new Set([ALICE, BOB])});
+  });
+
+  it("re-reads recent blocks, so an event a reorg moved into an already-scanned block is applied", async () => {
+    const source = await createSource();
+    // The first pass reads a fork without Alice's transaction.
+    let chain = [event(1200, BOB, ZERO, GROUP_LC)];
+    eventsMock.mockImplementation(async (_rpc, _registry, from, to) =>
+      chain.filter((e) => e.blockNumber >= from && e.blockNumber <= to)
+    );
+
+    headMock.mockResolvedValueOnce(5000);
+    await source.refresh();
+    expect(source.getMembersByGroup([GROUP])).toEqual({[GROUP_LC]: new Set([BOB])});
+
+    // The canonical chain now holds it in block 4998, below the saved cursor.
+    chain = [...chain, event(4998, ALICE, ZERO, GROUP_LC)];
+    headMock.mockResolvedValueOnce(5100);
+    await source.refresh();
+    expect(source.getMembersByGroup([GROUP])).toEqual({[GROUP_LC]: new Set([ALICE, BOB])});
+  });
+
+  it("replaying re-read events leaves the map as it was", async () => {
+    const source = await createSource();
+    const chain = [event(4995, ALICE, ZERO, GROUP_LC), event(4997, ALICE, GROUP_LC, OTHER_GROUP)];
+    eventsMock.mockImplementation(async (_rpc, _registry, from, to) =>
+      chain.filter((e) => e.blockNumber >= from && e.blockNumber <= to)
+    );
+
+    headMock.mockResolvedValueOnce(5000);
+    await source.refresh();
+    headMock.mockResolvedValueOnce(5003);
+    await source.refresh();
+
+    expect(source.getMembersByGroup([GROUP, OTHER_GROUP])).toEqual({
+      [GROUP_LC]: new Set(),
+      [OTHER_GROUP.toLowerCase()]: new Set([ALICE])
+    });
   });
 
   it("does not fetch when no block was added", async () => {
