@@ -1,5 +1,6 @@
 import {getAddress} from "ethers";
 
+import {AffiliateGroupChanged} from "../../interfaces/IAffiliateGroupEventsService";
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {AffiliateGroupEventsService} from "../../services/affiliateGroupEventsService";
 
@@ -49,18 +50,32 @@ export async function fetchOldRegistryMembersByGroup(
     for (const rawGroup of groupAddresses) {
       const group = normalizeAddress(rawGroup);
       const events = await service.fetchAffiliateGroupChanged(registry, group, fromBlock, options.toBlock);
-      events.sort((left, right) => left.blockNumber - right.blockNumber);
-
-      const members = new Set<string>();
-      for (const event of events) {
-        const human = normalizeAddress(event.human);
-        if (normalizeAddress(event.newGroup) === group) members.add(human);
-        if (normalizeAddress(event.oldGroup) === group) members.delete(human);
-      }
-      membersByGroup[group] = members;
+      membersByGroup[group] = reduceOldRegistryMembers(events, group);
     }
     return membersByGroup;
   } finally {
     service.destroy();
   }
+}
+
+/**
+ * Members of one group after applying its AffiliateGroupChanged events in block
+ * order (see {@link fetchOldRegistryMembersByGroup}). The removal for
+ * `oldGroup == group` is applied before the addition for `newGroup == group`, so
+ * an event naming the group the human is already in keeps them: the same result
+ * as the AffiliateMap current-group index that OldRegistrySource maintains.
+ */
+export function reduceOldRegistryMembers(
+  events: readonly AffiliateGroupChanged[],
+  group: string
+): Set<string> {
+  const target = normalizeAddress(group);
+  const ordered = [...events].sort((left, right) => left.blockNumber - right.blockNumber);
+  const members = new Set<string>();
+  for (const event of ordered) {
+    const human = normalizeAddress(event.human);
+    if (normalizeAddress(event.oldGroup) === target) members.delete(human);
+    if (normalizeAddress(event.newGroup) === target) members.add(human);
+  }
+  return members;
 }

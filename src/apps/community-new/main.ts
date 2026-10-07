@@ -42,16 +42,14 @@ import {
 } from "./multiRegistry";
 import {
   DEFAULT_OLD_AFFILIATE_REGISTRY_ADDRESS,
-  DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK,
-  fetchOldRegistryMembersByGroup
+  DEFAULT_OLD_AFFILIATE_REGISTRY_START_BLOCK
 } from "./oldRegistryMembers";
 import {
   GRANDFATHER_ENV,
   countGrandfather,
-  mergeProtectedTrustees,
   parseGrandfatherAddresses
 } from "./grandfather";
-import {OldRegistrySource, mergeHybridMembers} from "./oldRegistrySource";
+import {OldRegistrySource, mergeHybridMembers, refreshUnionProtectedTrustees} from "./oldRegistrySource";
 import {resolveCommunityReputationConfig} from "./reputationConfig";
 
 type MembershipSource = "rpc" | "registry" | "old" | "hybrid";
@@ -130,6 +128,10 @@ const untrustMode = parseUntrustMode(
   process.env.COMMUNITY_NEW_UNTRUST_MODE,
   membershipSource === "rpc" ? DEFAULT_UNTRUST_MODE : "wishlist"
 );
+// `union` protects current OLD-registry members from untrust, so it needs the
+// incremental old-registry map even when membership comes from elsewhere. The
+// map only feeds the wishlist in `old`/`hybrid` (see buildWishlistOverride).
+const needsOldSource = needsOldMap || untrustMode === "union";
 // Cutover carve-outs (union mode only): orphans trusted on-chain but absent
 // from the registry that feeds the wishlist. They are added to the union
 // protected set so an authoritative sweep spares them, while every other member
@@ -288,7 +290,7 @@ async function start(): Promise<void> {
   if (needsNewMap) {
     await initMultiMap();
   }
-  if (needsOldMap) {
+  if (needsOldSource) {
     oldSource = await OldRegistrySource.create({
       chainRpcUrl,
       wssUrl: oldWssUrl,
@@ -331,16 +333,11 @@ async function start(): Promise<void> {
           wishlistOverrideByGroup = buildWishlistOverride();
         }
 
-        const protectedTrusteesByGroup = untrustMode === "union"
-          ? mergeProtectedTrustees(
-              await fetchOldRegistryMembersByGroup(chainRpcUrl, managedGroups, {
-                registryAddress: oldRegistryAddress,
-                fromBlock: oldRegistryStartBlock,
-                logger: runLogger
-              }),
-              grandfatherByGroup
-            )
-          : undefined;
+        let protectedTrusteesByGroup: Record<string, Set<string>> | undefined;
+        if (untrustMode === "union") {
+          if (!oldSource) throw new Error("union untrust mode requires the old-registry map");
+          protectedTrusteesByGroup = await refreshUnionProtectedTrustees(oldSource, managedGroups, grandfatherByGroup);
+        }
         const outcome = await runCommunityReconciliation(
           {affiliateRpc, circlesRpc, groupService, reputationService, logger: runLogger},
           {
