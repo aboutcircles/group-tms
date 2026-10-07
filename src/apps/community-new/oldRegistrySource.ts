@@ -1,6 +1,9 @@
+import {getAddress} from "ethers";
+
 import {ILoggerService} from "../../interfaces/ILoggerService";
 import {StateStore} from "../../services/stateStore";
 import {AffiliateMap} from "../group-affiliates/affiliateMap";
+import {mergeProtectedTrustees} from "./grandfather";
 import {
   AffiliateGroupChangedListenerHandle,
   deriveGroupAffiliatesWsUrl,
@@ -77,16 +80,20 @@ export class OldRegistrySource {
     }
   }
 
-  /** Incremental getLogs catch-up to chain head + persist. Also the poll backstop. */
-  refresh(): Promise<void> {
+  /**
+   * Incremental getLogs catch-up to chain head + persist. Also the poll backstop.
+   * Resolves false when the head block could not be read, so the map was not
+   * brought up to date; getLogs failures reject.
+   */
+  refresh(): Promise<boolean> {
     return this.runExclusive(() => this.refreshInner());
   }
 
-  private async refreshInner(): Promise<void> {
+  private async refreshInner(): Promise<boolean> {
     const head = await fetchCurrentBlockNumber(this.opts.chainRpcUrl);
-    if (head === null) return;
+    if (head === null) return false;
     const from = Math.max(this.opts.startBlock, this.map.lastScannedBlock + 1);
-    if (from > head) return;
+    if (from > head) return true;
     const events = await fetchAffiliateGroupChangedEventsBetween(
       this.opts.chainRpcUrl,
       this.opts.registryAddress,
@@ -100,11 +107,21 @@ export class OldRegistrySource {
     }
     this.map.advanceCursor(head);
     await this.persist();
+    return true;
   }
 
   /** Current single-slot members of a group (lowercased). */
   getMembersOf(group: string): Set<string> {
     return new Set(this.map.getAffiliatesOf(group));
+  }
+
+  /** Current single-slot members per group, keyed by the lowercased group address. */
+  getMembersByGroup(groups: readonly string[]): Record<string, Set<string>> {
+    const membersByGroup: Record<string, Set<string>> = {};
+    for (const group of groups) {
+      membersByGroup[getAddress(group).toLowerCase()] = this.getMembersOf(group);
+    }
+    return membersByGroup;
   }
 
   get lastScannedBlock(): number {
@@ -171,4 +188,30 @@ export function mergeHybridMembers(
     if (testAddresses.has(avatar)) merged.add(avatar);
   }
   return merged;
+}
+
+/**
+ * Protected trustees for `union` untrust: every avatar whose current OLD-registry
+ * affiliate group is a managed group, plus the grandfathered addresses.
+ *
+ * Reads the incremental map instead of rescanning the registry from its start
+ * block on every poll (that rescan was 24 eth_getLogs calls of 100k blocks each
+ * per pass by October 2026, and grows with the chain). Throws when the map could
+ * not be brought to the chain head: a stale list could untrust a member who
+ * joined through the old registry since the last refresh, so the caller must
+ * skip the reconcile, as it did when the rescan failed.
+ */
+export async function refreshUnionProtectedTrustees(
+  source: OldRegistrySource,
+  groups: readonly string[],
+  grandfatherByGroup: Record<string, ReadonlySet<string>>
+): Promise<Record<string, Set<string>>> {
+  const reachedHead = await source.refresh();
+  if (!reachedHead) {
+    throw new Error(
+      `Old-registry map could not reach the chain head (lastScannedBlock=${source.lastScannedBlock}); ` +
+      "skipping this reconcile so union protection is not read from a stale map."
+    );
+  }
+  return mergeProtectedTrustees(source.getMembersByGroup(groups), grandfatherByGroup);
 }
