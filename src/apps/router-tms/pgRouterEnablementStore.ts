@@ -54,6 +54,13 @@ export class PgRouterEnablementStore implements IRouterEnablementStore {
 
   constructor(dbUrl: string, private quarantineTtlMs: number) {
     this.pool = new pg.Pool({connectionString: dbUrl, max: 2});
+    // An idle client whose server connection drops (pgbouncer restart,
+    // failover) makes the pool emit "error". Without a listener Node treats
+    // it as an uncaught exception and the worker exits. The pool has already
+    // discarded that client; the next query opens a new connection.
+    this.pool.on("error", (err) => {
+      console.warn("[router-enablement-store] idle pool client error, client discarded:", err.message);
+    });
     this.ready = this.ensureTable();
   }
 

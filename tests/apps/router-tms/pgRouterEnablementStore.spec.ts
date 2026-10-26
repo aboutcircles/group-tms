@@ -7,11 +7,12 @@ jest.mock("pg", () => {
     query: jest.fn(),
     release: jest.fn()
   };
-  const mockPool = {
+  const {EventEmitter} = jest.requireActual("events");
+  const mockPool = Object.assign(new EventEmitter(), {
     connect: jest.fn().mockResolvedValue(mockClient),
     query: jest.fn(),
     end: jest.fn()
-  };
+  });
   return {Pool: jest.fn(() => mockPool)};
 });
 
@@ -40,6 +41,8 @@ describe("PgRouterEnablementStore", () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockPool = getMockPool();
+    // The mock pool is a singleton: drop listeners left by earlier stores.
+    mockPool.removeAllListeners("error");
     // Stage the constructor's to_regclass probe as "table absent" so ensureTable
     // takes the locked create path these tests assert against — and crucially
     // without the probe throwing, which would route through its catch +
@@ -203,6 +206,19 @@ describe("PgRouterEnablementStore", () => {
       const result = await store.loadQuarantinedAddresses();
       expect(result).toEqual([]);
       expect(warnSpy).toHaveBeenCalled();
+    });
+  });
+
+  describe("pool error event", () => {
+    it("logs an idle client error instead of crashing the process", () => {
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+      // pg.Pool emits "error" when an idle client's server connection drops
+      // (pgbouncer restart, failover). With no listener, emit() throws.
+      expect(() => mockPool.emit("error", new Error("Connection terminated unexpectedly"))).not.toThrow();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[router-enablement-store]"),
+        expect.stringContaining("Connection terminated unexpectedly")
+      );
     });
   });
 });
