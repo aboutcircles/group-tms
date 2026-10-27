@@ -53,6 +53,13 @@ Specialized services for Circles protocol trust management:
 * Keeps a process-local in-memory approval cache to avoid repeating `setApprovalForCRC` for the same address after a successful batch
 * Supports dry-run mode and signer-backed simulation
 
+## Offer Trust Sync App
+* Reads the offer cycle's current offer id, its accepted CRC list and the Hub trust from the cycle to each accepted CRC
+* Calls the cycle's permissionless `syncOfferTrust()` from the configured EOA when any of those trusts does not end at the current offer end
+* Sends nothing in a period that has no offer
+* Polls every 5 minutes and runs 30 seconds after the next offer period starts when that comes sooner
+* Supports dry-run mode and signer-backed simulation
+
 ## Requirements
 
 * Node.js **≥ 24**
@@ -84,6 +91,7 @@ npm run start:all
 npm run start:group-affiliates
 npm run start:community-new
 npm run start:router2
+npm run start:offer-trust-sync
 ```
 
 ## Configuration (.env)
@@ -283,6 +291,30 @@ SLACK_WEBHOOK_URL_INFO=
 
 # Logging
 VERBOSE_LOGGING=1
+```
+
+### Offer Trust Sync Configuration
+
+```dotenv
+# RPC & addresses
+RPC_URL=https://rpc.aboutcircles.com/
+TX_RPC_URL=https://your-write-rpc.example/   # optional; overrides only transaction execution
+OFFER_TRUST_SYNC_CYCLE_ADDRESS=0x68e2C29fEED2A4D0F22Cc6d271e2b25124D99892
+
+# EOA execution (required unless dry run)
+OFFER_TRUST_SYNC_SIGNER_PRIVATE_KEY=         # Any funded EOA: syncOfferTrust() is permissionless
+
+# Timing
+OFFER_TRUST_SYNC_POLL_INTERVAL_MS=300000
+OFFER_TRUST_SYNC_BOUNDARY_MARGIN_MS=30000    # wait past the period start before the boundary run
+OFFER_TRUST_SYNC_ERRORS_BEFORE_CRASH=3
+
+# Operation mode
+DRY_RUN=0                                    # Set to "1" to log/simulate without sending EOA transactions
+
+# Notifications
+SLACK_WEBHOOK_URL=
+SLACK_WEBHOOK_URL_INFO=
 ```
 
 ### Group Affiliates App Configuration
