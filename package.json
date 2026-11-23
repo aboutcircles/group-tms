@@ -28,7 +28,7 @@
   "dependencies": {
     "@aboutcircles/sdk-rpc": "^0.1.24",
     "@aboutcircles/sdk-types": "^0.1.24",
-    "@safe-global/protocol-kit": "^6.1.2",
+    "@safe-global/protocol-kit": "^8.0.11",
     "ethers": "^6.15.0",
     "multihashes": "^4.0.3",
     "pg": "^8.13.0",
